@@ -6,6 +6,7 @@ This repository contains the existing Claude Code configuration and a Codex adap
 
 - [Claude behavior rules](CLAUDE.md) and the existing `skills/` remain the Claude configuration.
 - [Shared Writing Principles](rules/writing.md) defines project-independent writing guidance for both tools.
+- Claude-only user rules (Korean): [screen and UX design](rules/design.md), [decisions and collaboration](rules/decisions-and-collaboration.md), and [planning and research](rules/planning.md). They generalize feedback repeated during project work and are not yet adapted for Codex.
 - [Codex global instructions](codex/AGENTS.md) contains engineering/workflow preferences, skill routing, and the full shared writing principles.
 - [Codex skills](codex/skills/) contains ten task-specific instruction workflows.
 - [Migration notes](codex/MIGRATION.md) records retained rules, compatibility changes, and unsupported Claude-only features.
@@ -17,6 +18,7 @@ This repository contains the existing Claude Code configuration and a Codex adap
 | Codex global rules | `codex/AGENTS.md` | `$CODEX_HOME/AGENTS.md`, default `~/.codex/AGENTS.md` |
 | Codex task skills | Each directory under `codex/skills/` | `$CODEX_HOME/skills/<name>/`, default `~/.codex/skills/<name>/` |
 | Claude writing rules | `rules/writing.md` | `~/.claude/rules/writing.md` or the configured Claude directory |
+| Claude design, decision, and planning rules | `rules/design.md`, `rules/decisions-and-collaboration.md`, `rules/planning.md` | `~/.claude/rules/` |
 
 Inspect and back up existing files first. Merge unrelated instructions rather than overwriting them. For Codex, check `AGENTS.override.md`, which takes precedence over the global AGENTS.md. Keep the skills beside AGENTS.md as shown so its relative references resolve. This layout is verified against the local Codex installation; current documentation also describes `~/.agents/skills` for user skills. If choosing that location instead, update the global skill links accordingly and avoid duplicate installations.
 
