@@ -55,6 +55,11 @@ Read the matching skill before the task. Paths below are relative to this global
 | Git conflicts | [resolve-conflict](skills/resolve-conflict/SKILL.md) |
 | GitHub PR creation/update | [pr-create](skills/pr-create/SKILL.md) |
 | Authorized subagent coordination | [agent-usage](skills/agent-usage/SKILL.md) |
+| Screen/UX design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
+| Decision requests, decision records, design comments, concurrent sessions, or global rule updates | [decisions-and-collaboration](skills/decisions-and-collaboration/SKILL.md) |
+| Product planning, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |
+
+The last three skills and the Shared Writing Principles below are generated from the repository's shared `rules/`; edit the source and regenerate instead of editing installed copies.
 
 Only load task-relevant skills. These are instruction workflows; Claude settings, hooks, model names, slash commands, commit wrapper, Discord forwarding, and automatic settings-repository pulls are not installed.
 

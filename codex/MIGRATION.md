@@ -32,6 +32,10 @@ The detailed code style remains a personal preference: braces, positive conditio
 - Generic variance depends on all input/output uses, syntax, and compiler flags. The former blanket claim that a nested input callback implies invariance was corrected; verify actual assignments with the compiler.
 - A library does not normally inject lexical variables into an existing callback. Migration checks the real callback signature, source, and scope before choosing values.
 
+## Shared Rules
+
+Updated: 2026-11-04. The design, decisions-and-collaboration, and planning rules were written as Claude user rules and are now shared through `rules/`. Codex receives them as the generated `ux-design`, `decisions-and-collaboration`, and `product-planning` skills instead of embedded text, because embedding them would add about 16 KB to a global AGENTS.md whose combined size with project instructions is capped by `project_doc_max_bytes`. Tool-specific wording in the source was made neutral, such as a one-line open command instead of a client's Run button.
+
 ## Verification and Limits
 
 Validate skill frontmatter and local references, compare installed files with these sources, and verify discovery using the local Codex skill registry. This confirms installation and discovery, not guaranteed compliance in every future output. Hooks are not enforcement mechanisms in this package. Restart Codex if changed skills do not appear; a new conversation provides a clean instruction-loading check.

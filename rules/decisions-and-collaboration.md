@@ -1,46 +1,48 @@
-# 결정 요청과 협업 공통 원칙
+# Decision Requests and Collaboration Principles
 
-모든 프로젝트에서 사용자에게 결정을 묻고, 결정 상태를 기록하고, 여러 작업 세션이 함께 일할 때 적용한다. 프로젝트 작업에서 사용자가 반복해 지적한 내용을 일반화했다. 프로젝트 규칙이 있으면 그 규칙을 먼저 따른다.
+Apply in every project when asking the user for decisions, recording decision status, and working alongside other sessions. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
 
-## 결정을 보여 주는 방법
+## Presenting decisions
 
-- 화면·문구·색·배치처럼 눈으로 보는 결정은 글이나 대화 속 이미지로 고르게 하지 않는다. 디자인 도구에 실제 화면 맥락의 비교판을 만들고, 사용자가 그 자리에서 보고 댓글을 달 수 있게 링크로 준다.
-- 링크는 사용자가 실제로 쓰는 앱에서 열리게 준다. 대화 화면에서 눌리지 않는 앱 전용 링크는 실행 버튼이 붙는 한 줄 명령으로 준다.
-- 사용자의 앱이나 브라우저 화면을 에이전트가 마음대로 열거나 전환하지 않는다. 링크와 열기 명령만 주고, 사용자가 그 자리에서 요청할 때만 연다.
-- 비교판의 각 안은 맨 위에 큰 글자 배지(A·B·C), 굵은 안 이름, 표시(추천·지금 안)를 두고, 그 아래 한 줄 장단점을 본문 크기로 쓴다. 한 안의 화면들은 하나의 바탕으로 묶고 추천안은 테두리 색으로 구분한다. 작은 열 제목만으로 구분하지 않는다.
-- 결정을 물을 때마다 선택지를 처음부터 쉬운 말로 다시 설명한다. 비용·개발량·나중에 바꾸기 쉬운 정도·위험을 표로 비교하고, 추천과 이유, 이 결정이 막고 있는 것과 언제까지 정해야 하는지를 함께 쓴다.
-- 사용자의 질문이 기존 안에 없는 방향을 제시하면 그 방향을 새 안으로 만들어 같은 기준으로 비교한다. 타당하면 추천을 바꾸고 무엇 때문에 바꿨는지 말한다.
-- 추천할 때는 다른 서비스들이 보통 어떻게 하는지 사례를 함께 보이고, 출처로 확인한 것과 알고 있는 범위를 구분한다.
-- 비교판은 이상적인 예시 하나만이 아니라 가장 흔할 실제 상황(예: 기록이 거의 없는 첫 주)으로도 보여 준다. 한 화면에 같은 표현이 몇 번 반복되는지도 센다.
-- 추천 이유는 꼭 필요한 이유인지 편의상의 이유인지 구분해 과장하지 않는다. 과장한 것을 알게 되면 바로 바로잡는다.
+- Do not ask the user to choose visual decisions (screens, copy, color, layout) from text or images in chat. Build a comparison board in real screen context in the design tool and give a link where the user can review and comment on the spot.
+- Give links that open in the app the user actually uses. If the chat client cannot open an app-specific link, give it as a one-line shell command that opens it.
+- Do not open or switch the user's apps or browser screens on your own. Give only the link and the open command; open it only when the user asks at that moment.
+- Head each option on a comparison board with a large letter badge (A, B, C), a bold option name, and a marker (recommended, current), followed by one line of pros and cons at body size. Group each option's screens on one background and mark the recommended option with a border color. Do not rely on small column titles alone.
+- Each time you ask for a decision, re-explain the options from scratch in plain language. Compare cost, effort, ease of changing later, and risk in a table, and state the recommendation with its reason, what the decision is blocking, and when it is needed.
+- If the user's question suggests a direction not among the existing options, add it as a new option and compare it on the same criteria. If it holds up, change the recommendation and say why.
+- When recommending, show how other services usually handle it, and distinguish what you verified with sources from what you only know.
+- Show comparison boards not only with one ideal example but also with the most common real situation (e.g., the first week with almost no records). Count how often the same expression repeats on one screen.
+- Distinguish whether a reason for a recommendation is essential or merely convenient, and do not overstate it. Correct any overstatement as soon as you notice it.
+- Show only the decisions the user must make now on a comparison board. Collapse settled decisions into a one-line summary or remove them, and do not keep piling decisions onto one board. Build mockups at the actual width and situation of use (e.g., the width of a capture the user sent).
 
-## 결정 상태를 다루는 방법
+## Handling decision status
 
-- 시안의 기본값, 임시값, 에이전트 권고를 확정된 원칙으로 취급하지 않는다. 무엇을 빼거나 바꾸자고 하기 전에, 그 근거가 사용자 결정인지 기본값인지, 사용자가 전에 밝힌 의도가 무엇인지 기록을 먼저 확인한다.
-- 문서에는 사용자 확정, 에이전트 추천, 에이전트 기본값(사용자 미확인), 결정 대기를 구분해 적고 날짜를 남긴다.
-- 사용자가 결정하면 그 자리에서 규칙 문서에 남기고, 어디에 남겼는지 한 줄로 알린다.
-- 제안하기 전에 그 제안이 기존 규칙과 맞는지 먼저 대조한다. 어긋나면 그 사실을 밝히거나 규칙에 맞게 고친 뒤 제안한다.
-- 새 기능·아이디어를 제안하기 전에 기획 문서에 이미 있는지 검색한다. 있으면 그 기록을 먼저 알리고 거기서 출발한다. 이미 있는 것을 새 제안처럼 말하지 않는다.
-- 실수가 드러나면 무엇을 잘못 판단했는지 사실대로 말하고, 잘못된 제안은 철회했다고 기록한다.
+- Do not treat mockup defaults, placeholder values, or agent recommendations as settled principles. Before proposing to remove or change something, check the records for whether its basis is a user decision or a default, and what intent the user stated before.
+- In documents, distinguish user-confirmed decisions, agent recommendations, agent defaults (not confirmed by the user), and pending decisions, with dates.
+- When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.
+- Before proposing, check the proposal against existing rules. If it conflicts, say so or revise it to fit the rules before proposing.
+- Before proposing a new feature or idea, search the planning documents for it. If it already exists, mention that record first and start from it; do not present an existing idea as new.
+- When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn.
 
-## 도구와 권한
+## Tools and permissions
 
-- 이미 쓰던 방법(예: 로그인된 브라우저로 읽기)이 있으면 그 방법을 먼저 시도한다. 토큰·비밀번호·새 계정을 요구하는 방법은 다른 길이 없을 때만 제안한다.
-- 사용자가 직접 해야 하는 조작은 어느 앱의 어느 화면에서 무엇을 누르는지 메뉴 이름·단축키까지 순서대로 적고, 에이전트가 대신할 수 있으면 그 방법도 알린다.
+- Try methods already in use first (e.g., reading through a signed-in browser). Propose methods that require tokens, passwords, or new accounts only when there is no other way.
+- For actions the user must perform, list in order which app, which screen, and what to press, including menu names and shortcuts. If the agent can do it instead, say how.
 
-## 여러 세션이 함께 일할 때
+## Working alongside other sessions
 
-- 커밋하기 전에 저장소 상태를 확인한다. 다른 세션이 고치는 중인 파일이 있으면 그 파일 전체를 올리지 말고 자기 변경만 골라 올린다. 실수로 섞였으면 내용은 지우지 말고 자기 기록의 위치만 바로잡은 뒤 알린다.
-- 다른 세션이 만든 비교판·결정·화면은 건드리지 않는다. 같은 화면을 두 세션이 고쳐야 하면 어느 쪽이 맡을지 사용자에게 확인한다.
-- 디자인 도구의 댓글이 무엇을 가리키는지는 댓글 위치만 보지 말고, 댓글 시각과 그 시점의 변경 기록을 맞춰 판단한다. 이미 처리된 댓글이면 언제 무엇으로 처리됐는지 알린다.
-- 댓글 해결 처리는 고친 것이 실제 화면에 반영된 것을 확인한 뒤에만 한다. 결정 대기인 댓글은 열어 둔다. 답글은 따로 해결되지 않으므로 첫 댓글을 해결한다.
-- 다른 세션이 이 세션 몫으로 넘긴 할 일이 공용 할 일 목록에 있는지 확인하고, 맡은 일은 끝낸 뒤 목록을 갱신한다.
+- Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
+- Do not touch comparison boards, decisions, or screens made by other sessions. If two sessions must edit the same screen, ask the user which one takes it.
+- Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what.
+- Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
+- Check the shared to-do list for tasks other sessions handed to this session, finish those tasks, and then update the list.
 
-## 규칙을 키워 가는 방법 (2026-11-04 사용자 지시)
+## Growing the rules
 
-- 사용자의 지적·결정·질문 가운데 다른 프로젝트나 다른 작업에서도 반복될 만한 것이 나오면, 그 자리에서 이전 대화 기록과 기존 규칙(프로젝트 규칙, 이 폴더의 전체 규칙)을 대조한다.
-- 전체 규칙에 없으면 일반화해 맞는 파일에 바로 더한다. 화면·문구·디자인 도구는 `design.md`, 결정·협업·도구 사용은 이 파일, 기획·조사·업체 선택은 `planning.md`, 글쓰기는 `writing.md`. 맞는 파일이 없으면 주제별 새 파일을 만든다.
-- 프로젝트에만 해당하는 색·이름·수치·결정은 프로젝트 규칙에만 둔다. 일반화한 원칙은 프로젝트 규칙과 함께 남기고, 어디에 남겼는지 한 줄로 알린다.
-- 디자인뿐 아니라 기획, 조사, 개발, 도구 사용, 글쓰기 모두 같은 방식으로 다룬다.
-- 전체 규칙에는 어느 프로젝트에나 맞는 범용 원칙만 둔다. 프로젝트 이름, 화면 이름, 그 프로젝트의 문구·수치를 예시로 쓰지 않는다. 예시가 필요하면 어디에나 있을 법한 일반 예시를 쓴다.
-- 전체 규칙을 고치면 GitHub 저장소 `tayou89/claude-config`의 `rules/`에도 같은 내용을 올린다. 공개 저장소이므로 올리기 전에 프로젝트 고유 표현이 없는지 다시 확인한다. 이 컴퓨터의 `~/.claude/rules/`는 저장소와 연결되어 있지 않으므로, 저장소를 임시 폴더에 내려받아 파일을 맞춘 뒤 커밋·푸시한다. 새 파일이면 README의 설치 표에도 더한다.
+- When a user correction, decision, or question is likely to recur in other projects or tasks, compare it on the spot with previous conversation records and existing rules (project rules and these global rules).
+- If the global rules do not cover it, generalize it and add it to the right file immediately: screens, copy, and design tools in `design.md`; decisions, collaboration, and tool use in this file; planning, research, and vendor selection in `planning.md`; writing in `writing.md`. If no file fits, create a new file by topic.
+- Keep project-specific colors, names, numbers, and decisions in project rules only. Record the generalized principle alongside the project rule, and tell the user in one line where it was recorded.
+- Treat planning, research, development, tool use, and writing the same way, not only design.
+- Keep only principles that fit any project in the global rules. Do not use project names, screen names, or project copy and numbers as examples; when an example is needed, use a generic one.
+- Write global rules in English and keep them tool-neutral so every AI tool can use them. User-facing replies and project documents follow the user's language.
+- The source of the global rules is `rules/` in the public shared configuration repository `tayou89/ai-config`. Installed local copies are not linked to it, so edit a checkout of the repository, regenerate the tool-specific copies with its sync script, re-check for project-specific terms, commit and push, and then refresh the installed copies. When adding a file, also add it to the README install table and the sync script.

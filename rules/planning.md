@@ -1,20 +1,20 @@
-# 기획·조사 공통 원칙
+# Planning and Research Principles
 
-모든 프로젝트의 제품 기획, 업체·도구 선택, 근거 조사에 적용한다. 프로젝트 작업에서 반복된 질문과 지적을 일반화했다. 프로젝트 규칙이 있으면 그 규칙을 먼저 따른다.
+Apply to product planning, vendor and tool selection, and evidence research in every project. These generalize questions and feedback that recurred during project work. Follow project rules first.
 
-## 조사와 근거
+## Research and evidence
 
-- 요금·무료 범위·한도·약관처럼 바뀌는 사실은 공식 문서로 확인하고 확인한 날짜를 적는다. 블로그·커뮤니티 답변은 그렇다고 밝히고, 확인하지 못한 수치는 확인하지 못했다고 쓴다.
-- 사용자가 ‘보통 어떻게 하나’를 물으면 실제 서비스 사례로 답하고 출처를 붙인다. 직접 확인하지 못한 관행은 알고 있는 범위라고 구분한다.
+- Verify facts that change over time (pricing, free tiers, quotas, terms) in official documentation and note the date checked. Label blog and community answers as such, and state when a number could not be verified.
+- When the user asks how things are usually done, answer with real service examples and cite sources. Mark practices you could not verify directly as what you know.
 
-## 업체·도구를 고를 때
+## Choosing vendors and tools
 
-- 기존 서비스만 비교하지 말고 직접 만드는 방법, 무료 공개 자료, 그 기능 없이 시작하는 방법도 같은 기준으로 비교한다.
-- 비교 기준은 우리 실제 규모에서의 비용, 무료 조건(계정·앱 단위 제한 등), 약관상 저장·표시 제한, 개발량, 사용자에게 익숙한 정도, 나중에 바꾸기 쉬운 정도다.
-- 자체 데이터(식별자, 기록)는 외부 업체와 분리해 두어 업체를 바꿔도 기록이 남게 한다.
-- 함께 묶어 쓰면 편한 것(같은 업체의 지도와 검색)과 기술적으로 상관없는 것(로그인과 지도)을 구분해 설명한다.
+- Do not compare existing services only; compare building it yourself, free public data, and starting without the feature on the same criteria.
+- Compare cost at the actual scale, free-tier conditions (per-account or per-app limits, etc.), storage and display restrictions in the terms, development effort, user familiarity, and ease of switching later.
+- Keep your own data (identifiers, records) separate from external vendors so records survive a vendor switch.
+- Explain separately what is convenient to bundle (one vendor's map and search) and what is technically unrelated (login and maps).
 
-## 초기 제품의 판단 기준
+## Decision criteria for early products
 
-- 사용자가 적은 초기에는 비율 목표를 미리 정하지 않는다. 나중에 되살릴 수 없는 행동 기록은 처음부터 남기고, 출시 직전에 ‘언제 무엇을 보고 계속·수정·재검토를 판단할지’ 한 문장과 날짜를 정한다.
-- 출시 첫날 데이터가 비어 있는 문제(콜드 스타트)를 기능 목록과 함께 다룬다. 기록을 모을 첫 지역·첫 사용자 집단을 좁히고, 빈 상태의 화면과 첫 참여 안내를 함께 설계한다.
+- Do not set ratio targets in advance while users are few. Record behavior that cannot be reconstructed later from the start, and just before launch set one sentence and a date stating when and on what basis to continue, revise, or reconsider.
+- Address the empty-data problem on launch day (cold start) together with the feature list. Narrow the first area and first user group for collecting records, and design empty-state screens and first-participation prompts together.
