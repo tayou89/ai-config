@@ -29,6 +29,13 @@ Apply in every project when asking the user for decisions, recording decision st
 - Try methods already in use first (e.g., reading through a signed-in browser). Propose methods that require tokens, passwords, or new accounts only when there is no other way.
 - For actions the user must perform, list in order which app, which screen, and what to press, including menu names and shortcuts. If the agent can do it instead, say how.
 
+## Checks and independent review
+
+- Before showing any work (screens, documents, plans, code), run as automatic checks everything a rule makes checkable: repeated expressions on one screen, clipped or overflowing text, totals and example data that must agree, the narrowest supported width, broken links and inconsistent terms in documents, and type, lint, and test runs for code. Do not spend a model review on what a script can check.
+- Use an independent reviewer agent only at checkpoints: just before presenting a decision to the user, before applying a large change to the main deliverable, and before a release or a large commit. Skip it for small edits. A reviewer starts without the conversation and must re-read rules and artifacts, so each review costs tens of thousands of tokens.
+- Give the reviewer a short brief instead of the conversation: the goal, the applicable rules as a checklist, and the artifact or one or two captures. Prefer a smaller, cheaper model for checklist reviews, and run it in parallel when the tool allows.
+- Report what the automatic checks covered, what the reviewer found and what you changed, and what was not checked.
+
 ## Working alongside other sessions
 
 - Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.

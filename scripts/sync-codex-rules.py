@@ -40,7 +40,7 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, handle design-tool comments, coordinate with concurrent sessions, or update the global rules.",
+        "Present options for user decisions, record decision status, handle design-tool comments, coordinate with concurrent sessions, run automatic checks and checkpoint reviews before presenting work, or update the global rules.",
     ),
     "planning.md": (
         "product-planning",
