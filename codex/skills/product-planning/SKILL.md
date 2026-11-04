@@ -24,4 +24,5 @@ Apply to product planning, vendor and tool selection, and evidence research in e
 ## Decision criteria for early products
 
 - Do not set ratio targets in advance while users are few. Record behavior that cannot be reconstructed later from the start, and just before launch set one sentence and a date stating when and on what basis to continue, revise, or reconsider.
+- Choose names, metaphors, and copy that fit the product's intended scope, not only the first category it launches with. When the scope is unclear, confirm it before naming.
 - Address the empty-data problem on launch day (cold start) together with the feature list. Narrow the first area and first user group for collecting records, and design empty-state screens and first-participation prompts together.
