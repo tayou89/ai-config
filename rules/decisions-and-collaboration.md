@@ -42,6 +42,7 @@ Apply in every project when asking the user for decisions, recording decision st
 - Do not touch comparison boards, decisions, or screens made by other sessions. If two sessions must edit the same screen, ask the user which one takes it.
 - Propose a new session for work that finishes on its own: it leaves its own result (e.g., implementing another page or researching another topic), and the decisions it needs are already recorded, so a short brief is enough to start it. Keep in the current session work that carries out what was just decided or that needs context found only in the conversation.
 - Open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
+- Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
 - Let only one session edit the same file at a time. If work overlaps, agree the order with the user.
 - Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what.
 - Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
