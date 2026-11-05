@@ -42,6 +42,7 @@ Apply in every project when asking the user for decisions, recording decision st
 - Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
 - Do not touch comparison boards, decisions, or screens made by other sessions. If two sessions must edit the same screen, ask the user which one takes it.
 - Propose a new session for work that finishes on its own: it leaves its own result (e.g., implementing another page or researching another topic), and the decisions it needs are already recorded, so a short brief is enough to start it. Keep in the current session work that carries out what was just decided or that needs context found only in the conversation.
+- Prefer a new session for such work even more when the current conversation is already long or has been summarized: carrying the whole history costs more every turn and summaries lose detail, while a new session re-reads only the recorded decisions it needs.
 - Open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
 - Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
 - Let only one session edit the same file at a time. If work overlaps, agree the order with the user.
