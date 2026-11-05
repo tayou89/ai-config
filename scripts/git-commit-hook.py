@@ -6,14 +6,42 @@ messages, descriptions, or doc text mentioning the phrase are not
 mistaken for command invocations.
 
 Recognized command-position contexts:
-  - start of command string
-  - after a chain operator (;  &&  ||  | )
-  - after one or more env-var assignments (VAR=value cmd)
+  - start of command string or line
+  - after a chain operator (;  &&  ||  |  &) or an opening ( { `
+  - after shell keywords and plain wrappers (then, do, else, !, command,
+    exec, env, nohup, sudo, time) and env-var assignments (VAR=value cmd)
+
+Recognized git invocations: a path-qualified binary (/usr/bin/git) and
+global options before the subcommand (-C <path>, -c <name>=<value>,
+--git-dir <path>, --no-pager, ...).
+
+Not recognized: wrapper options (sudo -u <user>), xargs/find -exec, and
+commands inside quoted strings (sh -c '...'), which are stripped.
 """
 
 import json
 import re
 import sys
+
+
+COMMAND_START = r"(?:^|[;&|\n(`{])\s*"
+COMMAND_PREFIX = (
+    r"(?:(?:then|do|else|!|command|exec|env|nohup|sudo|time"
+    r"|[A-Za-z_]\w*=\S*)\s+)*"
+)
+GIT_EXECUTABLE = r"(?:\S*/)?git"
+GIT_OPTION_WITH_ARGUMENT = r"(?:-[Cc]|--(?:git-dir|work-tree|namespace|config-env))"
+GIT_GLOBAL_OPTION = (
+    rf"\s+(?:{GIT_OPTION_WITH_ARGUMENT}\s+\S+"
+    rf"|(?!{GIT_OPTION_WITH_ARGUMENT}(?:\s|$))-\S+)"
+)
+GIT_COMMIT_COMMAND = re.compile(
+    COMMAND_START
+    + COMMAND_PREFIX
+    + GIT_EXECUTABLE
+    + rf"(?:{GIT_GLOBAL_OPTION})*"
+    + r"\s+commit(?=\s|$|[;&|)`}])"
+)
 
 
 def strip_strings_and_heredocs(text: str) -> str:
@@ -35,18 +63,7 @@ def strip_strings_and_heredocs(text: str) -> str:
 
 def looks_like_git_commit_command(command: str) -> bool:
     cleaned = strip_strings_and_heredocs(command)
-    pattern = (
-        r"(?:^|[;&|]|^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)+)"
-        r"\s*git\s+commit(?:\s|$)"
-    )
-    if re.search(pattern, cleaned, flags=re.MULTILINE):
-        return True
-    if re.search(r"\bgit\s+commit\b(?!-)", cleaned):
-        chain_or_start = re.compile(
-            r"(?:^|[;&|\n])\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*git\s+commit\b"
-        )
-        return bool(chain_or_start.search(cleaned))
-    return False
+    return bool(GIT_COMMIT_COMMAND.search(cleaned))
 
 
 def main() -> None:

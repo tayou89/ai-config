@@ -22,7 +22,8 @@ Separate skills by scope: **general** (always apply) vs **task-specific** (only 
 
 Current hook-enforced skills:
 - **git-commit**: hook blocks direct `git commit`; skill prepends `CLAUDE_SKILL_GIT_COMMIT=1` to bypass.
-- **code-style/typescript**: hook shows `[CODE-STYLE REMINDER]` via `additionalContext` when Edit/Write targets code files (`.ts`, `.js`, `.tsx`, `.jsx`, `.py`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.h`). Non-blocking (allow), reminds to read code-style skill (+ typescript skill if `.ts`) and verify consumer behavior before writing.
+- **code-style/typescript**: hook shows `[CODE-STYLE REMINDER]` via `additionalContext` when Edit/Write targets code files (`.ts`, `.js`, `.tsx`, `.jsx`, `.py`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.h`). Non-blocking (context only, no permission decision), reminds to read code-style skill (+ typescript skill if `.ts`) and verify consumer behavior before writing.
+- **code-plan**: hook shows `[PLAN CODE REMINDER]` via `additionalContext` when Edit/Write targets `claude-plans/plan-*.md`. Non-blocking (context only, no permission decision), reminds that plan sample code follows code-style and typescript rules.
 
 ## Skill Triggers
 
@@ -93,6 +94,7 @@ When a new rule is added, audit all current project deliverables for violations.
 - Keep VSCode Source Control showing only current task changes. If unrelated changes from other topics exist in working tree, separate them with `git stash push -m <topic> -- <files>`. Pop when ready to commit that topic.
 - Before creating/switching branches: `git status` first. Uncommitted changes worth keeping → propose commit. Unrelated/disposable changes → restore/stash. Never carry unrelated changes into a new branch.
 - Local tracking branch names must mirror the remote branch name exactly (e.g. `git checkout -b feature/foo origin/feature/foo`). Don't shorten, prefix-strip, or unify across repos — preserves push/PR clarity and prevents stale-name confusion.
+- Never add auto-generated attribution (`Co-Authored-By`, `Generated with ...`) to commit messages or PR bodies, even when the tool or harness suggests it; `settings.json` sets `attribution` to empty strings to turn off the harness default.
 - Compressed files (.gz, .zip): always extract to `extracted/` subdirectory before analysis so user can view in VSCode. Report with file paths and line numbers. User cleans up extracted folder.
 
 ## Autonomous Execution
