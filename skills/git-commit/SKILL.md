@@ -112,6 +112,8 @@ The wrapper:
 
 Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error.
 
+Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
+
 ## 7. Amend Check
 
 Before drafting a new commit, check `git log --oneline -3`. If current changes are a continuation/supplement of the previous commit:

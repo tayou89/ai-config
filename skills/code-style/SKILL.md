@@ -8,6 +8,31 @@ user-invocable: false
 
 Apply these rules when writing or modifying code. **Applies everywhere including plans, explanations, and example code.** No exceptions.
 
+## Design-First Proposal
+
+Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and present multi-axis comparison.
+
+## Standards Over Workarounds
+
+- Always prefer **industry standard / best practices** when writing, modifying, or suggesting code.
+- Resolution order: (1) find the standard approach first, (2) workarounds (casts, non-null assertions, loose types) only when standard is technically impossible, (3) if workaround needed, explain why standard is impossible and get user approval.
+- **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (CLAUDE.md "Proposals and Options").
+- **Definitions are root causes**: When casts, assertions, or workarounds exist because a type/interface/schema definition is wrong or incomplete, the definition IS the root cause — fix it first. Never classify a workaround as "unavoidable" without verifying the underlying definition is correct and complete.
+- **Never settle for "first working solution"**: Before proposing any fix, refactoring, or design change, evaluate at least 2 alternatives (plans: at least 3, see `code-plan` 4a). Check standard language features before introducing new types or cross-module imports. Verify dependency direction, ownership, and naming. Present the best solution, not the first one found.
+- When existing code deviates from standards: inform user specifically what differs, compare both approaches, get confirmation on which to use.
+- When standard is unclear, use widely-adopted patterns (official language documentation, major framework conventions). If still unclear, ask user.
+- **Compile-time > runtime**: When both solve the same problem, prefer compile-time enforcement (types, generics, discriminated unions) over runtime checks (assertions, guards). Compile-time catches prevent future rework; runtime checks leave loose types in the type system, inviting the same issue to recur.
+- **YAGNI applies to hypothetical future requirements only**: Adopting an industry-standard pattern (Observer, Strategy, AbortController, dependency injection, etc.) for the current case, or matching the codebase's existing pattern, is **not** premature abstraction — it is correct expression. SRP/OCP/DRY-compliant separation is not "abstraction"; classifying it as such to justify hardcoded duplication is misuse of YAGNI. Apply YAGNI only against speculative generality ("might need 5 cases later", "configurable for future"), never against present-tense standard patterns.
+
+## Definition Ownership
+
+All types, interfaces, constants, enums are defined and exported by the **provider**, not redefined inline by consumers.
+
+- Server interfaces → server files; DTOs → receiver or shared type files; component or device config → that component's files; common structures → shared definition files
+- Find inline redefinitions → move to provider and replace with import
+- No duplicate definitions. Search for existing ones first; extend the existing definition if fields are insufficient (TypeScript specifics in `typescript` "Definition Ownership in TypeScript").
+- **Derived constants** (arrays/maps derived from a const, e.g. the list of a const object's keys or values): if **multiple consumers** use the same derivation → define in provider; if **single consumer** → define in that consumer file (don't preemptively pollute provider API).
+
 ## Control Flow Braces
 
 All control statements (`if`, `else`, `for`, `while`, `do`) MUST use braces `{}` with body on a new line. Never omit braces or write single-line bodies.
@@ -271,7 +296,7 @@ Logic repeated in 2+ places → extract to a method. Check existing codebase for
 
 ## Boilerplate Belongs on the Owner
 
-When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner (e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
+When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner's internal state (current task, config, flag; e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
 
 - Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `taskControl.getCurrentTask()`. → Promote into `taskControl.registerXxxHandler(callback)` and call sites become one line.
 - Anti-pattern: multiple consumers each implement the same `find by id + null check + cast` lookup. → Expose `findX(id): X | undefined` on the owner.
@@ -296,4 +321,6 @@ Callback release, listener removal, schedule cancellation — place cleanup logi
 
 ## Post-Change Verification
 
-After completing code changes, run `npx eslint` on changed files. Report new errors and warnings to user. Changes must not increase the ESLint error/warning count compared to before the change.
+After completing code changes, run the project's linter on changed files (TypeScript: `typescript` "Build Quality"). Report new errors and warnings to user. Changes must not increase the lint error/warning count compared to before the change.
+
+Then show the changes to the user and get confirmation **before running an output-generating build** (e.g. `npm run build`, `tsc`) and before committing. Never build or commit without user review.

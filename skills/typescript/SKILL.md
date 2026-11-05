@@ -289,6 +289,10 @@ Co-locate types near their module: `types/` folder with `{module}.types.ts`.
 - Cross-module shared types → `define/types.ts`
 - File-internal types → inline at file top
 
+## Definition Ownership in TypeScript
+
+Follow `code-style` "Definition Ownership". When the provider's definition lacks fields, extend it (`extends`, `&`, optional fields) instead of redefining it. For an unconverted JS module, define a temporary interface in the consumer with `// TODO: [module] replace with import after TS conversion`.
+
 ## Conditional Types for Input Shape Detection
 
 Type utilities handling multiple input shapes should use conditional types for automatic detection with a single entry point (like Zod's `z.infer<>`, `Awaited<T>`, `ReturnType<T>`).
