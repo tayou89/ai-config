@@ -11,7 +11,7 @@ Do not spawn subagents merely because this skill is loaded. Obtain explicit user
 
 Use Codex's available collaboration tools for subtasks, not new user-owned chats. Create or message another chat only when the user explicitly requests it. Follow actual tool availability and permission limits.
 
-For substantial cross-cutting reviews, consider two independent perspectives covering the full change, such as logic/contracts and style/completeness. Do not split a cross-cutting review only by file ranges. Ordinary small work needs self-review, not mandatory agents.
+For independent review, follow the decisions-and-collaboration skill: one reviewer, only at its checkpoints, preferring another model family, covering the full change rather than a file range. Ordinary small work needs self-review, not mandatory agents.
 
 Give each agent bounded ownership and shared contracts. Avoid concurrent edits to the same files. Reviewers read the actual applicable AGENTS.md and skills; they trace runtime behavior, type resolution, and test evidence rather than checking only for code presence.
 

@@ -10,7 +10,7 @@ Apply these rules before spawning any agent (sub-agent or team agent) and when c
 
 ## 1. Always Get Explicit Permission
 
-Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable.
+Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`, or the fallback reviewer in `/outside-review`) counts as that approval for the agents it describes; anything beyond them still needs approval.
 
 ## 2. Propose Splitting When Scope Grows
 
@@ -32,9 +32,9 @@ Before proposing agents, estimate token cost (file count × avg complexity) and 
 
 Team agent creation/deletion requires explicit approval.
 
-## 7. Cross-Validation
+## 7. Independent Review
 
-After non-trivial code changes (multi-file, structural) or plan writing, propose 2 sub-agents for independent review from different perspectives (e.g. code style / logic correctness, plan completeness / discussion alignment). Small changes (1-2 files, clear change) need only self-review. Must complete **before requesting user approval**.
+When, how many, and which model family follow `decisions-and-collaboration` "Checks and independent review": one reviewer, only at its checkpoints (just before presenting a decision, before a large change to the main deliverable, before a release or a large commit), and none for small edits, which need only self-review. At a checkpoint, propose `/outside-review` (another model family, read-only). Spawn a same-family reviewer subagent only when that is unavailable or the user prefers it. A checklist review gets a short brief and a smaller model; a reviewer standing in for the other family gets the `/outside-review` brief and a model strong enough for that full review. The review completes **before requesting user approval**.
 
 ## 8. Plan Rigor = Code Rigor
 
@@ -42,7 +42,7 @@ Apply the same verification depth to plans as to code. Every classification ("fi
 
 ## 9. Reviewer Scope
 
-All reviewers cover the **full change scope** from different perspectives, not split by file range. File-range splitting misses cross-cutting issues.
+A reviewer covers the **full change scope**, not a file range. File-range splitting misses cross-cutting issues.
 
 ## 10. Rule-Based Checklist Review
 
@@ -54,4 +54,4 @@ Verification agents must trace actual runtime variable values step-by-step, not 
 
 ## 12. Exhaustive Audits Need the Right Agent Config
 
-Never use fast-and-shallow exploration agents for exhaustive audits — they estimate/sample instead of checking every occurrence. For exhaustive work, use general-purpose subagent with an explicit strong model override, and include "Do not estimate. Check every single occurrence individually. Report exact counts, not approximations." in the prompt. If agent results look round-numbered or include phrases like "approximately" or "roughly", re-verify manually or re-run with stricter prompt.
+Never use fast-and-shallow exploration agents for exhaustive audits — they estimate/sample instead of checking every occurrence. Unlike checklist reviews (section 7), audits that must count every occurrence need a strong model. For exhaustive work, use general-purpose subagent with an explicit strong model override, and include "Do not estimate. Check every single occurrence individually. Report exact counts, not approximations." in the prompt. If agent results look round-numbered or include phrases like "approximately" or "roughly", re-verify manually or re-run with stricter prompt.
