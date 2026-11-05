@@ -108,7 +108,7 @@ Execute terminal-doable tasks directly. Only ask user for browser/GUI actions. N
 ## Miscellaneous
 
 - **Discord**: When Discord channel is connected, send all responses there too.
-- **Claude settings sync**: Run `git -C ~/.claude pull` before modifying any `~/.claude/` files. After modification, show changes to user and commit & push via `/git-commit` immediately. Complete before moving to other work.
-- **Session init**: Run `git -C ~/.claude pull` at session start.
+- **Claude settings sync**: `~/.claude` is either a checkout of the shared configuration repository or a set of installed copies beside a separate checkout (locate it by its remote). Before modifying any `~/.claude/` files, pull that checkout and edit it, never only the installed copy. After modification, show changes to user and commit & push via `/git-commit` immediately, then copy the changed files into `~/.claude` if it is not the checkout. Complete before moving to other work.
+- **Session init**: Run `git -C ~/.claude pull` at session start when `~/.claude` is the checkout.
 - **Session handover**: When token budget gets tight mid-task, save current state to memory — (1) what was decided, (2) what's done with commits/paths, (3) what's next with exact file lists and rules to apply, (4) a ready-to-paste instruction for the next session. Stop working and hand over before running out.
 - **Post-completion session advice**: After finishing a distinct work unit (task/phase/commit/planning stage), proactively recommend one of three — `/clear` (topic shift, memory/plan captures handover), `/compact` (related follow-up, shared decisions matter), or continue (immediate follow-up, shared context essential). Always give the recommendation without being asked, with a one-line rationale. When recommending `/clear` or `/compact`, also provide a ready-to-paste next-session prompt referencing the relevant memory/plan files.
