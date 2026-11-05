@@ -28,6 +28,7 @@ Apply in every project when asking the user for decisions, recording decision st
 - In documents, distinguish user-confirmed decisions, agent recommendations, agent defaults (not confirmed by the user), and pending decisions, with dates.
 - When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.
 - Before proposing, check the proposal against existing rules. If it conflicts, say so or revise it to fit the rules before proposing.
+- Before filing an item as a pending decision, check what it actually blocks (a screen, development, a launch step). If nothing is blocked now, file it as a later task with its deadline instead of asking now, and do not invent a quantity or choice the plan does not need.
 - Before proposing a new feature or idea, search the planning documents for it. If it already exists, mention that record first and start from it; do not present an existing idea as new.
 - When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn.
 
