@@ -132,4 +132,4 @@ Ask user about push after commit. Push only on approval.
 - Never stage/commit unrelated changes
 - Use `git add -A` / `git add .` with caution (the wrapper stages exactly what argv specifies)
 - **No `Co-Authored-By`** or auto-generated trailers
-- `~/.claude/settings.json` changes should **always be included** in commits (syncs allowedTools across environments)
+- Commit only portable entries to the shared `settings.json`: no machine-specific paths, one-off commands, or catch-all allows such as `Bash(*)`. A machine that needs its own entries installs a copy instead of using a checkout.
