@@ -114,6 +114,18 @@ Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mism
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
+## 6a. Shared Checkout (several sessions in one folder)
+
+Git's default index is shared by every session in the checkout: another session's commit can take what you staged, and if the index is left stale after your commit, its next commit silently reverts yours. Stage in a private index and sync the shared one in the same command:
+
+```bash
+idx="$(mktemp)" && GIT_INDEX_FILE="$idx" git read-tree HEAD &&
+  GIT_INDEX_FILE="$idx" ~/.claude/scripts/claude-commit.py "<message>" <file1> <file2>
+rm -f "$idx"; git reset -q -- <file1> <file2>
+```
+
+For a file that also holds another session's uncommitted edits, put only your change into the private index with `git hash-object -w` and `git update-index --cacheinfo` (same `GIT_INDEX_FILE`), then run the wrapper with `--no-stage`. Afterwards confirm with `git show --stat HEAD` that the commit has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history.
+
 ## 7. Amend Check
 
 Before drafting a new commit, check `git log --oneline -3`. If current changes are a continuation/supplement of the previous commit:

@@ -28,7 +28,9 @@ For release preparation, use `Chore: release vX.Y.Z` and bundle the files for th
 
 Show the file scope, proposed message, and review result before an unapproved commit. Existing explicit instructions to commit/publish the specific change authorize that action; do not ask again. Authorization to commit alone does not authorize pushing.
 
-Write the exact message to a temporary file and run `git commit --file <message-file>` after verifying the staged scope. For an already prepared merge/cherry-pick index, inspect that index rather than re-staging indiscriminately. Follow repository hooks; do not bypass them.
+Write the exact message to a temporary file and run `git commit --file <message-file>` after verifying the staged scope.
+
+When other sessions work in the same checkout, the default index is shared: their commit can take what you staged, and a stale index after your commit lets their next commit silently revert yours. Stage in a private index and sync the shared one in the same command: `idx="$(mktemp)" && GIT_INDEX_FILE="$idx" git read-tree HEAD && GIT_INDEX_FILE="$idx" git add <paths> && GIT_INDEX_FILE="$idx" git commit --file <message-file>; rm -f "$idx"; git reset -q -- <paths>`. For a file that also holds another session's uncommitted edits, put only your change into the private index with `git hash-object -w` and `git update-index --cacheinfo`. Then confirm with `git show --stat HEAD` that the commit has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history. For an already prepared merge/cherry-pick index, inspect that index rather than re-staging indiscriminately. Follow repository hooks; do not bypass them.
 
 Before amending, inspect recent history and determine whether the previous commit is owned, unpushed, and part of the same topic. Obtain authorization for history rewriting when not already given. Do not amend others' commits or force-push shared history on your own. If a force push is explicitly authorized, inspect the current remote head and use a lease.
 
