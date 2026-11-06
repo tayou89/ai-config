@@ -40,6 +40,10 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - Place gray placeholder text at the top left of empty input fields and remove it once the user types. Do not let blank lines push the placeholder to the middle of the field.
 - Do not put instructions meant for mockup reviewers (e.g., “Tap to see an example”) in product copy. Keep them in notes outside the screen or in frame names.
 
+## Choosing images
+
+- Show real images of the actual subject (the person's own photos or screenshots of the real work) before concept graphics or stock photos. If the subject itself was never photographed, use a real photo of the same place or object, say in the caption what it shows, and credit its source and license; keep concept graphics for what cannot be photographed, such as a system's structure, and label them as such.
+
 ## Missing images
 
 - Keep the image slot when there is no image; use a slot of the same size to preserve alignment.
