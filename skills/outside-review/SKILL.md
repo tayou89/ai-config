@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Outside Review
 
-Get an independent review of the work named in `$ARGUMENTS` (default: the change or document this conversation produced) from another model family, following `decisions-and-collaboration` "Independent review". The reviewer runs once and read-only; there is no automatic fix-and-review loop.
+Get an independent review of the work named in `$ARGUMENTS` (default: the change or document this conversation produced) from another model family, following `decisions-and-collaboration` "Independent review". Its purpose is to find problems and improvements that Claude's own perspective tends to miss, not to repeat Claude's check from the same viewpoint. The reviewer runs once and read-only; there is no automatic fix-and-review loop.
 
 ## 1. Before Running
 
@@ -21,10 +21,10 @@ Get an independent review of the work named in `$ARGUMENTS` (default: the change
 Create the output folder if missing, write the brief to `<output folder>/review-brief-<topic>.md`, then run in the background, quoting every path (notes folders often contain spaces):
 
 ```bash
-codex exec -s read-only --ephemeral -C "<project root>" -o "<output folder>/review-<topic>.md" "$(cat "<output folder>/review-brief-<topic>.md")" </dev/null
+codex exec -s read-only -C "<project root>" -o "<output folder>/review-<topic>.md" "$(cat "<output folder>/review-brief-<topic>.md")" </dev/null
 ```
 
-`-s read-only` lets it read any file but write none, `-o` saves its final answer, and closing stdin keeps piped input out of the prompt. Add `--skip-git-repo-check` outside a git repository. If `codex` is missing or fails, say why and run one fresh same-family subagent with the same brief instead; this invocation approves that one agent.
+`-s read-only` lets it read any file but write none, `-o` saves its final answer, and closing stdin keeps piped input out of the prompt. Leave out `--ephemeral` so Codex keeps the session log and the run shows in its usage history. Add `--skip-git-repo-check` outside a git repository. If `codex` is missing or fails, say why and run one fresh same-family subagent with the same brief instead; this invocation approves that one agent.
 
 The brief states:
 
