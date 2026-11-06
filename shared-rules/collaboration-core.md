@@ -14,6 +14,11 @@ Apply in every project and task. The rest of the decision and collaboration prin
 - Before showing any work (screens, documents, plans, code), run as automatic checks everything a rule makes checkable: repeated expressions on one screen, clipped, overflowing, or overlapping text, totals and example data that must agree, the narrowest supported width, broken links and inconsistent terms in documents, and type, lint, and test runs for code. Do not spend a model review on what a script can check.
 - Report what the automatic checks covered, what the reviewer found and what you changed, and what was not checked.
 
+## Handing over work
+
+- Give links that open in the app the user actually uses. If the chat client cannot open an app-specific link, give it as a one-line shell command that opens it. If the user cannot open a result file from a link, for example one in a notes folder outside the session's folders, send the file itself through the client's file-sending feature and add its path or open command only as a supplement (user decision, 2026-11-06).
+- Do not open or switch the user's apps or browser screens on your own. Hand over only the link, the open command, or the file itself, and open it only when the user asks at that moment.
+
 ## Decisions and corrections
 
 - When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.

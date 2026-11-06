@@ -35,7 +35,7 @@ The detailed code style remains a personal preference: braces, positive conditio
 
 ## Shared Rules
 
-Updated: 2026-11-06. The design, decisions-and-collaboration, and planning rules were written as Claude user rules and are now shared through `shared-rules/`. Codex receives them as the generated `ux-design`, `decisions-and-collaboration`, and `product-planning` skills instead of embedded text, because embedding them would add about 16 KB to a global AGENTS.md whose combined size with project instructions is capped by `project_doc_max_bytes`. Only the short `collaboration-core.md` (principles every task needs, about 2.7 KB) is embedded with the writing principles. Since 2026-11-06 Claude loads the same three skills instead of three always-loaded rule files. Tool-specific wording in the source was made neutral, such as a one-line open command instead of a client's Run button.
+Updated: 2026-11-06. The design, decisions-and-collaboration, and planning rules were written as Claude user rules and are now shared through `shared-rules/`. Codex receives them as the generated `ux-design`, `decisions-and-collaboration`, and `product-planning` skills instead of embedded text, because embedding them would add about 23 KB to a global AGENTS.md whose combined size with project instructions is capped by `project_doc_max_bytes`. Only the short `collaboration-core.md` (principles every task needs, about 5.6 KB) is embedded with the writing principles. Since 2026-11-06 Claude loads the same three skills instead of three always-loaded rule files. Tool-specific wording in the source was made neutral, such as a one-line open command instead of a client's Run button.
 
 ## Verification and Limits
 
