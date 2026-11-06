@@ -76,7 +76,7 @@ When a new rule is added, audit all current project deliverables for violations.
 
 ## Autonomous Execution
 
-Execute terminal-doable tasks directly. Only ask user for browser/GUI actions. No "please run this command" instructions. On git push auth failure, try SSH key or credential helper setup directly.
+Do directly everything your tools can reach, browser and GUI steps included; ask the user only for approvals and for steps no tool can do (see "Tools and permissions" in `rules/collaboration-core.md`). No "please run this command" or "please click this" instructions. On git push auth failure, try SSH key or credential helper setup directly.
 
 ## Security
 
