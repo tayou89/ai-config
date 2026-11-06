@@ -1,3 +1,5 @@
+<!-- Generated from shared-rules/writing.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+
 # Shared Writing Principles
 
 Apply these principles when writing or revising documents, plans, reports, and explanations. Adapt to the requested format and the reader's purpose; do not impose one template on every task.

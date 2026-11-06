@@ -36,6 +36,9 @@ Current hook-enforced skills:
 - **Integration/runtime test**: Read `integration-testing` skill before starting any test against a live or simulated environment (external dependencies: servers, simulators, databases, etc.).
 - **Config or env file**: Read `config-files` skill before creating or refactoring config modules, `.env` files, or env-driven setup.
 - **Agent use**: Read `agent-usage` skill before spawning any agent (sub-agent, team agent, parallel agents).
+- **Decisions, reviews, sessions, rules**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, proposing, starting, or closing another session, handling design-tool comments, or adding or changing a global rule.
+- **Screen/UX design**: Read `ux-design` before screen design, design review, UI copy, or design-tool work.
+- **Product planning**: Read `product-planning` before product planning, vendor or tool selection, pricing and quota research, or setting early-launch criteria.
 - **User-invoked only**: `/deep-prompt` (rewrite a request into a deeper prompt for a new session), `/outside-review` (read-only review by another model family), `/domain-pass` (sequential subagents, one per relevant field). Run them only when the user invokes them or asks for one in words (then read its skill file); at a review checkpoint, propose `/outside-review` instead of spawning a reviewer.
 
 ## Core Work Principles

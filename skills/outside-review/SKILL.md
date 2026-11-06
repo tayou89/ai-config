@@ -7,7 +7,7 @@ disable-model-invocation: true
 
 # Outside Review
 
-Get an independent review of the work named in `$ARGUMENTS` (default: the change or document this conversation produced) from another model family, following `decisions-and-collaboration` "Checks and independent review". The reviewer runs once and read-only; there is no automatic fix-and-review loop.
+Get an independent review of the work named in `$ARGUMENTS` (default: the change or document this conversation produced) from another model family, following `decisions-and-collaboration` "Independent review". The reviewer runs once and read-only; there is no automatic fix-and-review loop.
 
 ## 1. Before Running
 

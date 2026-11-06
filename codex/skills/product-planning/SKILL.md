@@ -3,7 +3,7 @@ name: product-planning
 description: Apply planning and research principles to product planning, vendor or tool selection, pricing and quota research, and early-launch criteria.
 ---
 
-<!-- Generated from rules/planning.md by scripts/sync-codex-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/planning.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
 
 # Planning and Research Principles
 

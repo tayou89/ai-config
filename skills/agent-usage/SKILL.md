@@ -34,7 +34,7 @@ Team agent creation/deletion requires explicit approval.
 
 ## 7. Independent Review
 
-When, how many, and which model family follow `decisions-and-collaboration` "Checks and independent review": one reviewer, only at its checkpoints (just before presenting a decision, before a large change to the main deliverable, before a release or a large commit), and none for small edits, which need only self-review. At a checkpoint, propose `/outside-review` (another model family, read-only). Spawn a same-family reviewer subagent only when that is unavailable or the user prefers it. A checklist review gets a short brief and a smaller model; a reviewer standing in for the other family gets the `/outside-review` brief and a model strong enough for that full review. The review completes **before requesting user approval**.
+When, how many, and which model family follow `decisions-and-collaboration` "Independent review": one reviewer, only at its checkpoints (just before presenting a decision, before a large change to the main deliverable, before a release or a large commit), and none for small edits, which need only self-review. At a checkpoint, propose `/outside-review` (another model family, read-only). Spawn a same-family reviewer subagent only when that is unavailable or the user prefers it. A checklist review gets a short brief and a smaller model; a reviewer standing in for the other family gets the `/outside-review` brief and a model strong enough for that full review. The review completes **before requesting user approval**.
 
 ## 8. Plan Rigor = Code Rigor
 

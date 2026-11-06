@@ -3,7 +3,7 @@ name: ux-design
 description: Apply screen and UX design principles to screen design, design review, UI copy, and design-tool work.
 ---
 
-<!-- Generated from rules/design.md by scripts/sync-codex-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/design.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
 
 # Screen and UX Design Principles
 

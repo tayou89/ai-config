@@ -1,13 +1,13 @@
 ---
 name: decisions-and-collaboration
-description: Present options for user decisions, record decision status, handle design-tool comments, coordinate with concurrent sessions, run automatic checks and checkpoint reviews before presenting work, or update the global rules.
+description: Present options for user decisions, record decision status, run checkpoint reviews, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.
 ---
 
-<!-- Generated from rules/decisions-and-collaboration.md by scripts/sync-codex-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/decisions-and-collaboration.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
 
 # Decision Requests and Collaboration Principles
 
-Apply in every project when asking the user for decisions, recording decision status, and working alongside other sessions. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
+Apply in every project when asking the user for decisions, recording decision status, running checkpoint reviews, coordinating other sessions, or changing the global rules. The principles every task needs are in `collaboration-core.md`. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
 
 ## Presenting decisions
 
@@ -26,36 +26,24 @@ Apply in every project when asking the user for decisions, recording decision st
 
 - Do not treat mockup defaults, placeholder values, or agent recommendations as settled principles. Before proposing to remove or change something, check the records for whether its basis is a user decision or a default, and what intent the user stated before.
 - In documents, distinguish user-confirmed decisions, agent recommendations, agent defaults (not confirmed by the user), and pending decisions, with dates.
-- When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.
 - Before proposing, check the proposal against existing rules. If it conflicts, say so or revise it to fit the rules before proposing.
 - Before filing an item as a pending decision, check what it actually blocks (a screen, development, a launch step). If nothing is blocked now, file it as a later task with its deadline instead of asking now, and do not invent a quantity or choice the plan does not need.
 - Before proposing a new feature or idea, search the planning documents for it. If it already exists, mention that record first and start from it; do not present an existing idea as new.
-- When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn.
 
-## Tools and permissions
+## Independent review
 
-- Try methods already in use first (e.g., reading through a signed-in browser). Propose methods that require tokens, passwords, or new accounts only when there is no other way.
-- For actions the user must perform, list in order which app, which screen, and what to press, including menu names and shortcuts. If the agent can do it instead, say how.
-
-## Checks and independent review
-
-- Before showing any work (screens, documents, plans, code), run as automatic checks everything a rule makes checkable: repeated expressions on one screen, clipped, overflowing, or overlapping text, totals and example data that must agree, the narrowest supported width, broken links and inconsistent terms in documents, and type, lint, and test runs for code. Do not spend a model review on what a script can check.
 - Use an independent reviewer agent only at checkpoints: just before presenting a decision to the user, before applying a large change to the main deliverable, and before a release or a large commit. Skip it for small edits. A reviewer starts without the conversation and must re-read rules and artifacts, so each review costs tens of thousands of tokens.
 - For a same-family checklist reviewer, give a short brief instead of the conversation: the goal, the applicable rules as a checklist, and the artifact or one or two captures. Prefer a smaller, cheaper model for checklist reviews, and run it in parallel when the tool allows.
 - Prefer a reviewer from a different model family than the author when one is available, because a model tends to miss its own habits. Let it gather the same information the author has by itself (files, rules, the conversation record, the latest user comments, captures at every checked width) under the same kind of approval checks the author works with, rather than preparing copies for it; keep its own writes in its own folder, and run it non-interactively without an automatic fix-and-review loop when the user makes the decisions. Do not narrow its scope or length: ask both what is wrong and how it would write or design the piece as the author, and say who wrote each text, since the small-revision rule protects only the user's own drafts. Show the user a proposal that differs materially from yours next to yours. Say what goes to that vendor, and leave personal photos out unless the user approves. Check each finding on the artifact before acting on it. If no other family is available, say why and use a fresh reviewer of the same family.
-- Report what the automatic checks covered, what the reviewer found and what you changed, and what was not checked.
 
 ## Working alongside other sessions
 
-- Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
 - Do not touch comparison boards, decisions, or screens made by other sessions. If two sessions must edit the same screen, ask the user which one takes it.
 - Propose a new session for work that finishes on its own: it leaves its own result (e.g., implementing another page or researching another topic), and the decisions it needs are already recorded, so a short brief is enough to start it. Keep in the current session work that carries out what was just decided or that needs context found only in the conversation.
 - Prefer a new session for such work even more when the current conversation is already long or has been summarized: carrying the whole history costs more every turn and summaries lose detail, while a new session re-reads only the recorded decisions it needs.
-- When the user designates a main session, keep it free for conversation: answer quick questions there, start each task the user asks for that needs edits or several steps in its own session right away without a separate proposal, send that task's follow-ups to its session, and report each result in the main session in one or two lines. Work you propose yourself still waits for the user's agreement. In a main session this replaces keeping just-decided work in the current session. If no session can be started from there, say so and do the task in the main session.
 - Outside a main session, open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
 - When a session you started has finished its task, check its result (work committed and recorded, nothing waiting on the user), then offer to close it, noting any proposals it left, and close it only after the user agrees. Leave open a session that is still working or waiting for the user.
 - Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
-- Let only one session edit the same file at a time. If work overlaps, agree the order with the user.
 - Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what.
 - Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
 - Check the shared to-do list for tasks other sessions handed to this session, finish those tasks, and then update the list.
@@ -63,9 +51,9 @@ Apply in every project when asking the user for decisions, recording decision st
 ## Growing the rules
 
 - When a user correction, decision, or question is likely to recur in other projects or tasks, compare it on the spot with previous conversation records and existing rules (project rules and these global rules).
-- If the global rules do not cover it, generalize it and add it to the right file immediately: screens, copy, and design tools in `design.md`; decisions, collaboration, and tool use in this file; planning, research, and vendor selection in `planning.md`; writing in `writing.md`. If no file fits, create a new file by topic.
+- If the global rules do not cover it, generalize it and add it to the right file immediately: principles every task needs (tool use, checks before showing work, shared files and sessions) in `collaboration-core.md`, which loads in every session, so keep it short; screens, copy, and design tools in `design.md`; decisions, reviews, and session coordination in this file; planning, research, and vendor selection in `planning.md`; writing in `writing.md`. If no file fits, create a new file by topic.
 - Keep project-specific colors, names, numbers, and decisions in project rules only. Record the generalized principle alongside the project rule, and tell the user in one line where it was recorded.
 - Treat planning, research, development, tool use, and writing the same way, not only design.
 - Keep only principles that fit any project in the global rules. Do not use project names, screen names, or project copy and numbers as examples; when an example is needed, use a generic one.
 - Write global rules in English and keep them tool-neutral so every AI tool can use them. User-facing replies and project documents follow the user's language.
-- The source of the global rules is `rules/` in the public shared configuration repository `tayou89/ai-config`. Installed local copies are not linked to it, so edit a checkout of the repository, regenerate the tool-specific copies with its sync script, re-check for project-specific terms, commit and push, and then refresh the installed copies. When adding a file, also add it to the README install table and the sync script.
+- The source of the global rules is `shared-rules/` in the public shared configuration repository `tayou89/ai-config`. Installed local copies are not linked to it, so edit a checkout of the repository, regenerate the tool-specific copies with its sync script, re-check for project-specific terms, commit and push, and then refresh the installed copies. When adding a file, register it in the sync script, whose check fails on unregistered files, and add it to the README.
