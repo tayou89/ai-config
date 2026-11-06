@@ -1,6 +1,6 @@
 ---
 name: decisions-and-collaboration
-description: Present options for user decisions, record decision status, run checkpoint reviews, propose or start other sessions, handle design-tool comments, or add and change the global rules.
+description: Present options for user decisions, record decision status, run checkpoint reviews, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.
 user-invocable: false
 ---
 
@@ -46,6 +46,7 @@ Apply in every project when asking the user for decisions, recording decision st
 - Prefer a new session for such work even more when the current conversation is already long or has been summarized: carrying the whole history costs more every turn and summaries lose detail, while a new session re-reads only the recorded decisions it needs.
 - Outside a main session, open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
 - Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
+- If closing a session the user agreed to close is refused because a remote-control connection to it is on, turn the connection off and close it without asking again, since the agreement covers it, and say so in one line of the report (user decision, 2026-11-06). If it is refused because the session is open on screen or pinned, give that reason and tell the user to close it from the session list, since they are using it.
 - Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what. Comments starting with an agent's name are change markers, not user feedback; leave them out when collecting the user's comments.
 - Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
 - Check the shared to-do list for tasks other sessions handed to this session, finish those tasks, and then update the list.

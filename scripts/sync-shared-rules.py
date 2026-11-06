@@ -52,7 +52,7 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, run checkpoint reviews, propose or start other sessions, handle design-tool comments, or add and change the global rules.",
+        "Present options for user decisions, record decision status, run checkpoint reviews, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.",
     ),
     "planning.md": (
         "product-planning",
