@@ -38,7 +38,8 @@ Current hook-enforced skills:
 - **Agent use**: Read `agent-usage` skill before spawning any agent (sub-agent, team agent, parallel agents).
 - **Decisions, reviews, sessions, rules**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, proposing, starting, or closing another session, handling design-tool comments, or adding or changing a global rule.
 - **Screen/UX design**: Read `ux-design` before screen design, design review, UI copy, or design-tool work.
-- **Product planning**: Read `product-planning` before product planning, vendor or tool selection, pricing and quota research, or setting early-launch criteria.
+- **Product planning and research**: Read `product-planning` before product planning, external research (web pages, video, papers, reviews, public data), vendor or tool selection, pricing and quota research, or setting early-launch criteria.
+- **Research access**: Read `research-access` before reading result lists or sources on video sites, review stores, or community sites, or when a search or fetch is refused or returns nothing.
 - **User-invoked only**: `/deep-prompt` (rewrite a request into a deeper prompt for a new session), `/outside-review` (read-only review by another model family), `/domain-pass` (sequential subagents, one per relevant field). Run them only when the user invokes them or asks for one in words (then read its skill file); at a review checkpoint, propose `/outside-review` instead of spawning a reviewer.
 
 ## Core Work Principles

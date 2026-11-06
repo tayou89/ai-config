@@ -56,7 +56,7 @@ SKILL_RULES = {
     ),
     "planning.md": (
         "product-planning",
-        "Apply planning and research principles to product planning, vendor or tool selection, pricing and quota research, and early-launch criteria.",
+        "Apply planning and research principles to product planning, external research and source selection, vendor or tool selection, pricing and quota research, and early-launch criteria.",
     ),
 }
 

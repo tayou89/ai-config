@@ -6,6 +6,9 @@ Apply to product planning, vendor and tool selection, and evidence research in e
 
 - Verify facts that change over time (pricing, free tiers, quotas, terms) in official documentation and note the date checked. Label blog and community answers as such, and state when a number could not be verified.
 - When the user asks how things are usually done, answer with real service examples and cite sources. Mark practices you could not verify directly as what you know.
+- Pick sources by what the question needs, not by what a search returns first. Take changing facts (pricing, limits, terms, version behavior) from official documentation, changelogs, and maintainers' issue trackers; when the question is how something is actually used or received, add at least one source of a different kind, such as a recorded talk or tutorial, app store reviews, community discussion, research papers, or public statistics (user decision, 2026-11-06).
+- For a product aimed at one country or language, include that market's own platforms in its language (its leading portal's blogs and forums, app reviews, public data), and say which of them could not be reached.
+- Search wide and read narrow, as a person would: skim each result list for relevance, source credibility, popularity (views, votes, review counts), and date, pick two or three items of each kind, and read only those in the cheapest form that answers the question (abstract, transcript, release notes); read a full text only when a conclusion rests on it (user decision, 2026-11-06). Label each source's kind and date, say when a video's visuals were not checked, summarize rather than reproduce, and leave out reviewers' and commenters' names.
 
 ## Choosing vendors and tools
 
