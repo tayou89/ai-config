@@ -70,8 +70,9 @@ Apply in every project and task. The rest of the decision and collaboration prin
 ### Tools and permissions
 
 - Try methods already in use first (e.g., reading through a signed-in browser). Propose methods that require tokens, passwords, or new accounts only when there is no other way.
-- Do every step your tools can reach yourself, GUI steps included (app automation, computer use, browser tools), and when one tool cannot reach a target, try the others before handing the step over. Ask the user only to approve actions that need approval, then carry them out yourself.
+- Do every step your tools can reach yourself, GUI steps included (app automation, computer use, browser tools), and when one tool cannot reach a target, try the others before handing the step over. Ask the user only to approve actions that need approval, gathering the approvals a step needs into one request, then carry them out yourself.
 - Hand the user only steps your rules forbid you or no tool can reach, say why, and list them in order: which app, which screen, and what to press, including menu names and shortcuts.
+- Before reporting a task done, clean up what it left behind (temporary copies and backups, processes it started, stale records): list each item with what it is and how to undo its removal, ask once, then remove the items reversibly yourself (to the Trash or an archive). Hand over permanent deletions as above.
 
 ### Checks before showing work
 
