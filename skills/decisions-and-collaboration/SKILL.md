@@ -1,6 +1,6 @@
 ---
 name: decisions-and-collaboration
-description: Present options for user decisions, record decision status, run checkpoint reviews, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.
+description: Present options for user decisions, record decision status, run checkpoint reviews, propose or start other sessions, handle design-tool comments, or add and change the global rules.
 user-invocable: false
 ---
 
@@ -44,7 +44,6 @@ Apply in every project when asking the user for decisions, recording decision st
 - Propose a new session for work that finishes on its own: it leaves its own result (e.g., implementing another page or researching another topic), and the decisions it needs are already recorded, so a short brief is enough to start it. Keep in the current session work that carries out what was just decided or that needs context found only in the conversation.
 - Prefer a new session for such work even more when the current conversation is already long or has been summarized: carrying the whole history costs more every turn and summaries lose detail, while a new session re-reads only the recorded decisions it needs.
 - Outside a main session, open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
-- When a session you started has finished its task, check its result (work committed and recorded, nothing waiting on the user), then offer to close it, noting any proposals it left, and close it only after the user agrees. Leave open a session that is still working or waiting for the user.
 - Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
 - Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what. Comments starting with an agent's name are change markers, not user feedback; leave them out when collecting the user's comments.
 - Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
