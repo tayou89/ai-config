@@ -21,6 +21,7 @@ Apply to product planning, vendor and tool selection, and evidence research in e
 
 - Do not compare existing services only; compare building it yourself, free public data, and starting without the feature on the same criteria.
 - Compare cost at the actual scale, free-tier conditions (per-account or per-app limits, etc.), storage and display restrictions in the terms, development effort, user familiarity, and ease of switching later.
+- When comparing tools or ways of working the user will use themselves, judge them by everyday use once set up and learned; list one-time costs (installation, initial setup, rewriting rules, learning) separately and keep them out of the recommendation unless the user asks to weigh them (user decision, 2026-11-08).
 - Keep your own data (identifiers, records) separate from external vendors so records survive a vendor switch.
 - Explain separately what is convenient to bundle (one vendor's map and search) and what is technically unrelated (login and maps).
 
