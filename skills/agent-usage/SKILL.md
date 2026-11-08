@@ -10,7 +10,7 @@ Apply these rules before spawning any agent (sub-agent or team agent) and when c
 
 ## 1. Always Get Explicit Permission
 
-Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`, or the fallback reviewer in `/outside-review`) counts as that approval for the agents it describes; anything beyond them still needs approval.
+Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`, or the fallback reviewer in `/outside-review`) counts as that approval for the agents it describes; anything beyond them still needs approval. Starting another session follows the session rules in `collaboration-core` and `decisions-and-collaboration` "Working alongside other sessions", not this section.
 
 ## 2. Propose Splitting When Scope Grows
 
@@ -18,15 +18,15 @@ Propose agent splitting when: accuracy drops on repetitive review, scope too wid
 
 ## 3. Parallelization Preferred
 
-For long-running tasks (exhaustive audits, large analysis), prefer splitting into parallel agents. Show split plan and get approval.
+For long-running tasks (exhaustive audits, large analysis), prefer splitting into parallel agents and show the split plan.
 
 ## 4. Proactive Agent Use
 
-When scope is large or thoroughness is needed, actively propose agents rather than doing everything sequentially. Approval is still required.
+When scope is large or thoroughness is needed, actively propose agents rather than doing everything sequentially.
 
 ## 5. Token Budgeting
 
-Before proposing agents, estimate token cost (file count × avg complexity) and remaining budget. Adjust agent count accordingly — fewer agents with broader scope when budget is tight. Always show proposed count + rationale and get approval.
+Before proposing agents, estimate token cost (file count × avg complexity) and remaining budget. Adjust agent count accordingly — fewer agents with broader scope when budget is tight, with the rationale for the count in the proposal.
 
 ## 6. Team Agent Approval
 
