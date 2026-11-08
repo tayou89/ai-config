@@ -54,7 +54,7 @@ Order imports by group, no blank lines between groups:
 1. **Node.js built-ins** (`events`, `fs`, `path`, `net`, etc.)
 2. **External packages** (`axios`, `lodash`, `ws`, etc.)
 3. **Internal modules** (relative `./` `../` imports)
-4. **Internal constants** (large destructured imports like `define/property`)
+4. **Internal constants** (large destructured imports from a shared constants module)
 5. **`import type`** (always last)
 
 Multiline destructured imports (4+ items) use one item per line with trailing comma.
@@ -114,14 +114,14 @@ All method and function names MUST use camelCase. PascalCase is reserved for cla
 Avoid filler prepositions (`of`, `in`, `at`, `on`) in identifier names when they don't disambiguate. Use compound-noun form.
 
 - `getNameOfPerson` → `getPersonName`
-- `enablePropagationOfEstop` → `enableEstopPropagation`
+- `enableRetryOfUpload` → `enableUploadRetry`
 - `listOfItems` → `items` or `itemList`
 
 Keep meaningful prepositions (`to`, `from`, `by`, `with`) that express direction or relationship:
 
 - `convertToString` (direction) ✓
 - `parseFromJson` (origin) ✓
-- `getWorkByAgvId` (relation) ✓
+- `getOrderByCustomerId` (relation) ✓
 - `mergeWithDefault` (combine) ✓
 
 ## Minimum Access Exposure
@@ -170,7 +170,7 @@ String/number literals with structural meaning that appear **2+ times** should b
 
 ## Constant Location by Scope
 
-- Referenced from multiple files → shared constant file (e.g. `property.js`)
+- Referenced from multiple files → shared constant file (e.g. `constants.js`)
 - Used in one file/class only → file top or class internal
 
 ## Pure Helper Placement
@@ -263,7 +263,7 @@ Name functions/utilities by **what they produce**, not what input shape they tak
 
 ## Function Name over Literal Argument
 
-If an argument is always a literal at every call site (never dynamic), encode it in the function name instead of passing it (e.g. `claimInSlot()` / `claimOutSlot()` rather than `claimSlot('in' | 'out')`).
+If an argument is always a literal at every call site (never dynamic), encode it in the function name instead of passing it (e.g. `openReadStream()` / `openWriteStream()` rather than `openStream('read' | 'write')`).
 
 ## No Duplicate Logic
 
@@ -273,7 +273,7 @@ Logic repeated in 2+ places → extract to a method. Check existing codebase for
 
 When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner (e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
 
-- Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `taskControl.getCurrentTask()`. → Promote into `taskControl.registerXxxHandler(callback)` and call sites become one line.
+- Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `jobQueue.getCurrentJob()`. → Promote into `jobQueue.registerXxxHandler(callback)` and call sites become one line.
 - Anti-pattern: multiple consumers each implement the same `find by id + null check + cast` lookup. → Expose `findX(id): X | undefined` on the owner.
 
 Rule of thumb: client code accessing owner internals with guards is a signal the owner is missing an API. Add the API on the owner.

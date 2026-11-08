@@ -18,10 +18,10 @@ When writing or revising documents, plans, reports, or explanations, follow the 
 
 Separate skills by scope: **general** (always apply) vs **task-specific** (only during that task type). When adding a new rule, place it in the most specific applicable skill first; only add to CLAUDE.md if the rule applies across all contexts. Always add a trigger rule in this CLAUDE.md specifying when a skill should be referenced. Propose splitting if a skill grows too large or mixes contexts.
 
-**Hook enforcement check**: When creating a new skill OR when a skill is being forgotten repeatedly, evaluate whether a `PreToolUse` hook should enforce it. Criteria: (1) skill has a specific triggering tool action (e.g. `git commit`, `npm publish`), (2) skipping the skill has non-trivial cost (missing staging review, unreviewed commits). If yes: add the hook to settings.json blocking the trigger, have the skill inject a bypass marker (env var like `CLAUDE_SKILL_XXX=1`) before the actual command. Propose to user before implementing.
+**Hook enforcement check**: When creating a new skill OR when a skill is being forgotten repeatedly, evaluate whether a `PreToolUse` hook should enforce it. Criteria: (1) skill has a specific triggering tool action (e.g. `git commit`, `npm publish`), (2) skipping the skill has non-trivial cost (missing staging review, unreviewed commits). If yes: add a hook to settings.json that blocks the trigger, and have the skill run the action through a wrapper script whose own subprocess the hook does not intercept. Propose to user before implementing.
 
 Current hook-enforced skills:
-- **git-commit**: hook blocks direct `git commit`; skill prepends `CLAUDE_SKILL_GIT_COMMIT=1` to bypass.
+- **git-commit**: hook denies direct `git commit`; the skill commits through `scripts/claude-commit.py`, whose `git commit` subprocess the hook does not see.
 - **code-style/typescript**: hook shows `[CODE-STYLE REMINDER]` via `additionalContext` when Edit/Write targets code files (`.ts`, `.js`, `.tsx`, `.jsx`, `.py`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.h`). Non-blocking (context only, no permission decision), reminds to read code-style skill (+ typescript skill if `.ts`) and verify consumer behavior before writing.
 - **code-plan**: hook shows `[PLAN CODE REMINDER]` via `additionalContext` when Edit/Write targets `claude-plans/plan-*.md`. Non-blocking (context only, no permission decision), reminds that plan sample code follows code-style and typescript rules.
 

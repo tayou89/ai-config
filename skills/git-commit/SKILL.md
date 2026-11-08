@@ -5,7 +5,7 @@ description: Review changes, write commit message, and commit with user approval
 
 # Commit Workflow
 
-All commits MUST go through `~/.claude/scripts/claude-commit.py`. Direct `git commit` is denied by a PreToolUse hook with no bypass. The wrapper enforces the full checklist (subject prefix, line-length, body-lines, bullet-count, internal-terms, amend check, staged-stat review, stage-matches-argv) automatically — Claude can no longer skip a step.
+All commits MUST go through `~/.claude/scripts/claude-commit.py`. Direct `git commit` is denied by a PreToolUse hook with no bypass. The wrapper enforces the full checklist (subject prefix, line-length, body-lines, bullet-count, internal-terms, amend check, staged-stat review, stage-matches-argv) automatically, so no step can be skipped.
 
 ## 1. Branch Check (First Commit of Session Only)
 

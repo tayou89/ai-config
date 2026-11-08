@@ -16,7 +16,7 @@ Never convert `this.xxx = ...` instance properties to local variables (`const xx
 
 **Before conversion, always grep for external property access:**
 ```bash
-grep -rn "\._comm\.socket\|\.ref\.socket" equipment/ controller/
+grep -rn "\.<property>" <consumer directories>
 ```
 
 ## Value Preservation

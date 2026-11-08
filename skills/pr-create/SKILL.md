@@ -1,3 +1,8 @@
+---
+name: pr-create
+description: Create or update a GitHub pull request with gh pr create. Apply whenever a PR is opened or its body rewritten; the body needs Purpose, Background, Changes, and Verification sections.
+---
+
 # PR Creation Workflow
 
 Use this skill when creating GitHub pull requests via `gh pr create`. PRs MUST include **Purpose** and **Background** sections so reviewers can grasp *why* before looking at the diff. A diff without context forces reviewers to reverse-engineer intent — state the problem and reasoning first, then the solution.
@@ -63,8 +68,8 @@ testing, future refactors. Helps reviewers see what's NOT in this PR.>
 ### Section content guidance
 
 **Purpose — focus on WHY**
-- Good: "Controller's safety logic and simulation behavior diverged, blocking integration test reliability."
-- Bad: "Add ESTOP handling to crane/AGV/PSD." (that's WHAT, belongs in Changes)
+- Good: "The service's retry logic and its test double diverged, making integration tests unreliable."
+- Bad: "Add retry handling to the upload, email, and payment clients." (that's WHAT, belongs in Changes)
 
 **Background — focus on what reviewers need to know upstream**
 - Sweep / audit findings that motivated the work (tables of findings welcome)

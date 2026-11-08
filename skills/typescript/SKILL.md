@@ -55,7 +55,7 @@ Don't use `import * as X`. Use named imports. **Exception**: CJS modules where `
 
 ## Type Safety
 
-- **`as const`**: Use for immutable constant data (PLC maps, configs). If `readonly` compatibility issues arise, adjust the **receiving interface** to accept `readonly`, don't remove `as const`.
+- **`as const`**: Use for immutable constant data (lookup tables, configs). If `readonly` compatibility issues arise, adjust the **receiving interface** to accept `readonly`, don't remove `as const`.
 - **`readonly` propagation**: Declare non-mutated array/object params as `readonly`.
 - **Type narrowing first**: Prefer type guards, generics, and interface design over `as` casts.
 - **Specific types**: Define concrete interfaces instead of `Record<string, unknown>`, `object`, `any`. Use base interface + extends for shared/individual fields. Get approval with justification if loose types are unavoidable.
@@ -66,15 +66,15 @@ Don't use `import * as X`. Use named imports. **Exception**: CJS modules where `
 - **`protected`**: Explicit. For subclass-accessed members.
 - **`private`**: Explicit. For class-internal members.
 
-Internal-only members MUST be `private` or `protected`.
+Internal-only members are `private` or `protected`.
 
 **`_` prefix**: Applied to `private` and `protected` members (properties and methods). Not applied to `public` members.
 
-**Class member order**: properties (public → protected → private) → constructor → methods (public → protected → private).
+**Class member order**: follow `code-style` "Class Member Ordering".
 
 ## Uniform Category Conventions
 
-Same-category modules (equipment, controllers, drivers) must share the **same level of type definition, naming patterns, and class structure**. Don't make one module specific while others are loose. When upgrading type precision, upgrade all in the category together.
+Same-category modules (devices, controllers, drivers) must share the **same level of type definition, naming patterns, and class structure**. Don't make one module specific while others are loose. When upgrading type precision, upgrade all in the category together.
 
 ## Typed Event/Callback Systems
 
@@ -110,7 +110,7 @@ type Event = { sid: string } & (
 
 ## Honest Nullability + Guard Narrowing
 
-Runtime에서 undefined/null 가능한 값은 타입에 optional/nullable로 선언하고 compound guard(`if (a && b)`)로 narrowing한다. Required로 선언 후 `as`로 억지 맞추지 않는다.
+Declare values that can be undefined or null at runtime as optional or nullable, and narrow them with a compound guard (`if (a && b)`). Do not declare them required and force them into place with `as`.
 
 ## Code Line Length
 
@@ -192,8 +192,8 @@ Distinguish **data fields** (identifiers, payload — what the entity carries) f
 interface Task<TMetadata> {
     code: string;
     inputEnable?: InputEnable;     // policy: user-input behavior
-    cancelEstop?: boolean;         // policy: cancel behavior (correct: top-level, peer of inputEnable)
-    metadata?: TMetadata;          // data: swapWorkIdx, agvId, slot — identifiers/payload
+    cancelOnTimeout?: boolean;     // policy: cancel behavior (correct: top-level, peer of inputEnable)
+    metadata?: TMetadata;          // data: orderId, customerId — identifiers/payload
 }
 ```
 
@@ -246,8 +246,8 @@ When the same type expression (object shape, union, intersection) appears in 2+ 
 Use `as const` objects with derived types instead of TypeScript `enum`.
 
 ```ts
-const DEVICE = { AGV: 'agv', CHARGER: 'charger' } as const;
-type DeviceType = (typeof DEVICE)[keyof typeof DEVICE];
+const STATUS = { ACTIVE: 'active', PAUSED: 'paused' } as const;
+type Status = (typeof STATUS)[keyof typeof STATUS];
 ```
 
 ## Function Style
@@ -286,7 +286,7 @@ Default to **`undefined`** (compatible with optional params `param?: Type`). Use
 
 Co-locate types near their module: `types/` folder with `{module}.types.ts`.
 - Module-shared types → module's `types/` folder
-- Cross-module shared types → `define/types.ts`
+- Cross-module shared types → a shared types file (e.g. `types/shared.ts`)
 - File-internal types → inline at file top
 
 ## Definition Ownership in TypeScript

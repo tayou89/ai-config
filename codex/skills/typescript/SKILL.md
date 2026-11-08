@@ -53,7 +53,7 @@ Don't use `import * as X`. Use named imports. **Exception**: CJS modules where `
 
 ## Type Safety
 
-- **`as const`**: Use for immutable constant data (PLC maps, configs). If `readonly` compatibility issues arise, adjust the **receiving interface** to accept `readonly`, don't remove `as const`.
+- **`as const`**: Use for immutable constant data (lookup tables, configs). If `readonly` compatibility issues arise, adjust the **receiving interface** to accept `readonly`, don't remove `as const`.
 - **`readonly` propagation**: Declare non-mutated array/object params as `readonly`.
 - **Type narrowing first**: Prefer type guards, generics, and interface design over `as` casts.
 - **Specific types**: Define concrete interfaces instead of `Record<string, unknown>`, `object`, `any`. Use base interface + extends for shared/individual fields. Get approval with justification if loose types are unavoidable.
@@ -72,7 +72,7 @@ Internal-only members MUST be `private` or `protected`.
 
 ## Uniform Category Conventions
 
-Same-category modules (equipment, controllers, drivers) must share the **same level of type definition, naming patterns, and class structure**. Don't make one module specific while others are loose. When upgrading type precision, upgrade all in the category together.
+Same-category modules (devices, controllers, drivers) must share the **same level of type definition, naming patterns, and class structure**. Don't make one module specific while others are loose. When upgrading type precision, upgrade all in the category together.
 
 ## Typed Event/Callback Systems
 
@@ -157,8 +157,8 @@ Distinguish **data fields** (identifiers, payload — what the entity carries) f
 interface Task<TMetadata> {
     code: string;
     inputEnable?: InputEnable;     // policy: user-input behavior
-    cancelEstop?: boolean;         // policy: cancel behavior (correct: top-level, peer of inputEnable)
-    metadata?: TMetadata;          // data: swapWorkIdx, agvId, slot — identifiers/payload
+    cancelOnTimeout?: boolean;     // policy: cancel behavior (correct: top-level, peer of inputEnable)
+    metadata?: TMetadata;          // data: orderId, customerId — identifiers/payload
 }
 ```
 
@@ -211,8 +211,8 @@ When the same type expression (object shape, union, intersection) appears in 2+ 
 Use `as const` objects with derived types instead of TypeScript `enum`.
 
 ```ts
-const DEVICE = { AGV: 'agv', CHARGER: 'charger' } as const;
-type DeviceType = (typeof DEVICE)[keyof typeof DEVICE];
+const STATUS = { ACTIVE: 'active', PAUSED: 'paused' } as const;
+type Status = (typeof STATUS)[keyof typeof STATUS];
 ```
 
 ## Function Style
@@ -251,7 +251,7 @@ Default to **`undefined`** (compatible with optional params `param?: Type`). Use
 
 Co-locate types near their module: `types/` folder with `{module}.types.ts`.
 - Module-shared types → module's `types/` folder
-- Cross-module shared types → `define/types.ts`
+- Cross-module shared types → a shared types file (e.g. `types/shared.ts`)
 - File-internal types → inline at file top
 
 ## Conditional Types for Input Shape Detection

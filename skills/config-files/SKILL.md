@@ -10,8 +10,8 @@ user-invocable: false
 
 - **1-2 files** → flat at root (`config.ts`, `util/env.ts`). Canonical for small projects — Vite, Next.js, Fastify, Drizzle, webpack all use this shape.
 - **3+ files with distinct concerns** → group in `config/` folder. Common shape: `index.ts` (assembly) + `env.ts` (primitives) + `helpers.ts` (domain parsers).
-- **5+ files split by concern** (equipment / server / notification / external) → folder with per-concern split. Medium project standard (NestJS-like).
-- **Per-instance split** (1 file per equipment unit, per channel, per record) → forbidden. Over-fragmentation that buys nothing over inline arrays.
+- **5+ files split by concern** (devices / server / notification / external services) → folder with per-concern split. Medium project standard (NestJS-like).
+- **Per-instance split** (1 file per device, per channel, per record) → forbidden. Over-fragmentation that buys nothing over inline arrays.
 
 Don't introduce a folder solely to host 1-2 files — that's speculative future-proofing. Folder needs ≥3 meaningfully-divided files to justify the extra indirection.
 
@@ -21,7 +21,7 @@ Singleton consumer → singleton config. Array consumer → array config. Don't 
 
 ## YAGNI for Config Abstractions
 
-Don't introduce dynamic count-driven generation (factory with count-env input + per-id builder) when deployment is fixed-size at the current site. Inline array literals are clearer at small scale, and adding one unit later is a single copy-paste — not a recurring cost worth abstracting. Only introduce factories when the same shape genuinely recurs across variable deployments (multi-tenant, multi-site, dynamic plant counts).
+Don't introduce dynamic count-driven generation (factory with count-env input + per-id builder) when the deployment has a fixed number of instances. Inline array literals are clearer at small scale, and adding one unit later is a single copy-paste — not a recurring cost worth abstracting. Only introduce factories when the same shape genuinely recurs across variable deployments (multi-tenant, multi-site, variable instance counts).
 
 ## Helpers in Same File as Config
 

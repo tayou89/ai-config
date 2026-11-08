@@ -70,7 +70,7 @@ Test-time only changes (config switches like `config.test.sim`, simulator-friend
 
 ## 12. Multi-Clone Integration Testing
 
-When integrating a test branch into a separate working clone (e.g., production `v1` clone consumes `typescript-migration` clone via `file:` reference), move changes between clones via standard git mechanisms — never ad-hoc directory copy:
+When integrating a test branch into a separate working clone (e.g., a production clone consumes a migration-branch clone through a `file:` reference), move changes between clones via standard git mechanisms — never ad-hoc directory copy:
 
 - **Preferred (no push needed)**: `git fetch ../<other-clone> <branch>` from the consuming clone, then `git checkout <branch>` or `git merge FETCH_HEAD`. Local-to-local fetch keeps the change set transparent and reversible.
 - **Alternative**: `git format-patch` from the source clone → `git am` in the consuming clone.
@@ -82,7 +82,7 @@ When integrating a test branch into a separate working clone (e.g., production `
 
 ## 13. Respect User-Stated Mutation Scope
 
-When the user authorizes a specific environment mutation (e.g., "switch nodered branch only", "do all work in dir X"), do NOT mutate anything outside that scope. Before any extra mutation (other files, other repos, package manifests, lockfiles, dependency caches, env vars, parallel clones), STOP and ask. Each unrelated mutation requires its own approval.
+When the user authorizes a specific environment mutation (e.g., "switch the service's branch only", "do all work in dir X"), do NOT mutate anything outside that scope. Before any extra mutation (other files, other repos, package manifests, lockfiles, dependency caches, env vars, parallel clones), STOP and ask. Each unrelated mutation requires its own approval.
 
 - **Examples of out-of-scope mutations to avoid**: editing `package.json` `file:` refs when the user said "change branch", running `npm install` that rewrites lockfiles, deleting `node_modules`, modifying sibling repos, applying patches to a "reference-only" clone, touching configs the user did not name.
 - **Designated work directory vs reference-only directory**: when the user says "work in dir X" and mentions another dir Y as "you can refer to its stash / configs", treat Y as **read-only**: read its files, read stash contents, read config patterns — but never `git checkout`, `git apply`, `git stash apply`, or any write to Y. Apply the learned patterns inside X instead.

@@ -69,19 +69,19 @@ Test-time only changes (config switches like `config.test.sim`, simulator-friend
 
 ## 12. Multi-Clone Integration Testing
 
-When integrating a test branch into a separate working clone (e.g., production `v1` clone consumes `typescript-migration` clone via `file:` reference), move changes between clones via standard git mechanisms — never ad-hoc directory copy:
+When integrating a test branch into a separate working clone (e.g., a production clone consumes a migration-branch clone through a `file:` reference), move changes between clones via standard git mechanisms — never ad-hoc directory copy:
 
 - **Preferred (no push needed)**: `git fetch ../<other-clone> <branch>` from the consuming clone, then `git checkout <branch>` or `git merge FETCH_HEAD`. Local-to-local fetch keeps the change set transparent and reversible.
 - **Alternative**: `git format-patch` from the source clone → `git am` in the consuming clone.
 - **Forbidden**: `cp -r <other-clone>/<files> <this-clone>/` or rsync-style copy. Bypasses git tracking, mixes test changes with working tree, and produces unreviewable state.
-- **Symlink-based consumer with two source clones — workflow varies by user habit**: when the downstream consumer uses a `file:` npm symlink and there are multiple parallel source clones (e.g., `bss-core/v1` and `bss-core/typescript-migration`), there are two valid integration patterns. **Confirm with the user which one applies before any environment write**:
+- **Symlink-based consumer with two source clones — workflow varies by user habit**: when the downstream consumer uses a `file:` npm symlink and there are multiple parallel source clones (e.g., `library/main` and `library/test-branch`), there are two valid integration patterns. **Confirm with the user which one applies before any environment write**:
   - **Pattern A (consumer ref swap)**: edit the consumer's `package.json` `file:` to point at the test clone, run `npm install` to relink. Revert at session end. The source clones stay on their own branches.
   - **Pattern B (source branch swap)**: keep consumer's `file:` ref unchanged; in the source clone behind the symlink, `git checkout <test-branch>` so the working tree behind the symlink becomes the test code.
   - **Anti-pattern**: assuming one is "the standard" without asking. The user's habit determines which is correct. Picking the wrong one will either corrupt the production source clone or appear to do nothing.
 
 ## 13. Respect User-Stated Mutation Scope
 
-When the user authorizes a specific environment mutation (e.g., "switch nodered branch only", "do all work in dir X"), do NOT mutate anything outside that scope. Before any extra mutation (other files, other repos, package manifests, lockfiles, dependency caches, env vars, parallel clones), STOP and ask. Each unrelated mutation requires its own approval.
+When the user authorizes a specific environment mutation (e.g., "switch the service's branch only", "do all work in dir X"), do NOT mutate anything outside that scope. Before any extra mutation (other files, other repos, package manifests, lockfiles, dependency caches, env vars, parallel clones), STOP and ask. Each unrelated mutation requires its own approval.
 
 - **Examples of out-of-scope mutations to avoid**: editing `package.json` `file:` refs when the user said "change branch", running `npm install` that rewrites lockfiles, deleting `node_modules`, modifying sibling repos, applying patches to a "reference-only" clone, touching configs the user did not name.
 - **Designated work directory vs reference-only directory**: when the user says "work in dir X" and mentions another dir Y as "you can refer to its stash / configs", treat Y as **read-only**: read its files, read stash contents, read config patterns — but never `git checkout`, `git apply`, `git stash apply`, or any write to Y. Apply the learned patterns inside X instead.

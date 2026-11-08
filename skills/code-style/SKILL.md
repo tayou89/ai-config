@@ -35,7 +35,7 @@ All types, interfaces, constants, enums are defined and exported by the **provid
 
 ## Control Flow Braces
 
-All control statements (`if`, `else`, `for`, `while`, `do`) MUST use braces `{}` with body on a new line. Never omit braces or write single-line bodies.
+All control statements (`if`, `else`, `for`, `while`, `do`) use braces `{}` with the body on a new line. Never omit braces or write single-line bodies.
 
 ## No Early Void Return / Guard Throw — Use if-else or Check Functions
 
@@ -79,7 +79,7 @@ Order imports by group, no blank lines between groups:
 1. **Node.js built-ins** (`events`, `fs`, `path`, `net`, etc.)
 2. **External packages** (`axios`, `lodash`, `ws`, etc.)
 3. **Internal modules** (relative `./` `../` imports)
-4. **Internal constants** (large destructured imports like `define/property`)
+4. **Internal constants** (large destructured imports from a shared constants module)
 5. **`import type`** (always last)
 
 Multiline destructured imports (4+ items) use one item per line with trailing comma.
@@ -90,7 +90,7 @@ All `import`/`require` at file top. No inline `import()` or `require()` mid-code
 
 ## Line Wrapping Style
 
-When wrapping a line over 120 chars: **one item per line** (destructuring, literals, params, args, imports) and **trailing operator** (`&&`, `||` at line end, not line start). Exceptions: type union `|` stays **leading**, ternary `?`/`:` stays **leading**, intersection `&` stays trailing. For long `if`/`while` conditions, break right after `(` and put `)` on its own line. 문자열/템플릿 리터럴을 `+` 연결로 쪼개지 않는다 — 호출 구조를 줄바꿈하되 문자열 자체는 한 줄 유지 (120자 초과 시 예외 허용).
+When wrapping a line over 120 chars: **one item per line** (destructuring, literals, params, args, imports) and **trailing operator** (`&&`, `||` at line end, not line start). Exceptions: type union `|` stays **leading**, ternary `?`/`:` stays **leading**, intersection `&` stays trailing. For long `if`/`while` conditions, break right after `(` and put `)` on its own line. Do not split string or template literals with `+`; wrap the call structure and keep the literal on one line, even past 120 characters.
 
 ## Type/Interface Section — No Blank Lines Between
 
@@ -132,21 +132,21 @@ Same-prefix methods must be adjacent. The numbered order above is the default; a
 
 ## Method Naming Convention
 
-All method and function names MUST use camelCase. PascalCase is reserved for classes, interfaces, types, and enums only.
+Method and function names use camelCase. PascalCase is reserved for classes, interfaces, types, and enums only.
 
 ## Avoid Filler Prepositions in Identifier Names
 
 Avoid filler prepositions (`of`, `in`, `at`, `on`) in identifier names when they don't disambiguate. Use compound-noun form.
 
 - `getNameOfPerson` → `getPersonName`
-- `enablePropagationOfEstop` → `enableEstopPropagation`
+- `enableRetryOfUpload` → `enableUploadRetry`
 - `listOfItems` → `items` or `itemList`
 
 Keep meaningful prepositions (`to`, `from`, `by`, `with`) that express direction or relationship:
 
 - `convertToString` (direction) ✓
 - `parseFromJson` (origin) ✓
-- `getWorkByAgvId` (relation) ✓
+- `getOrderByCustomerId` (relation) ✓
 - `mergeWithDefault` (combine) ✓
 
 ## Minimum Access Exposure
@@ -155,7 +155,7 @@ Prefer the most restrictive access modifier: private > protected > public. Use p
 
 **No speculative exceptions**: interface implementations must match the interface. Everything else follows the "no external caller → private" rule strictly.
 
-**Underscore prefix**: All non-public members (both `private` and `protected` — methods *and* fields) MUST use `_` prefix. Public members never use `_`. Rationale: the prefix gives a visible cue at call sites (`this._foo`) so consumers can spot accidental access to non-public API without jumping to the definition. Renaming a member's visibility therefore also renames it (and updates all call sites in the class hierarchy).
+**Underscore prefix**: All non-public members (both `private` and `protected` — methods *and* fields) use the `_` prefix. Public members never use `_`. Rationale: the prefix gives a visible cue at call sites (`this._foo`) so consumers can spot accidental access to non-public API without jumping to the definition. Renaming a member's visibility therefore also renames it (and updates all call sites in the class hierarchy).
 
 ## No Unnecessary Blank Lines Inside Methods
 
@@ -195,7 +195,7 @@ String/number literals with structural meaning that appear **2+ times** should b
 
 ## Constant Location by Scope
 
-- Referenced from multiple files → shared constant file (e.g. `property.js`)
+- Referenced from multiple files → shared constant file (e.g. `constants.js`)
 - Used in one file/class only → file top or class internal
 
 ## Pure Helper Placement
@@ -248,7 +248,7 @@ Use full words in variable names, function names, and **type/interface names** u
 
 ## Value Names Follow Source of Truth
 
-When a data source (backend API, protocol, external system) already defines value names (enum values, status strings, constants), consumers MUST use the same names directly. Never create consumer-specific aliases that require a mapping layer (e.g. backend `'FULL'` → frontend `'fullCharge'`). Display labels that differ from data values belong in the rendering layer (e.g. a label map for UI text), not as renamed data values.
+When a data source (backend API, protocol, external system) already defines value names (enum values, status strings, constants), consumers use the same names directly. Never create consumer-specific aliases that require a mapping layer (e.g. backend `'FULL'` → frontend `'fullCharge'`). Display labels that differ from data values belong in the rendering layer (e.g. a label map for UI text), not as renamed data values.
 
 ## check vs is Naming
 
@@ -288,7 +288,7 @@ Name functions/utilities by **what they produce**, not what input shape they tak
 
 ## Function Name over Literal Argument
 
-If an argument is always a literal at every call site (never dynamic), encode it in the function name instead of passing it (e.g. `claimInSlot()` / `claimOutSlot()` rather than `claimSlot('in' | 'out')`).
+If an argument is always a literal at every call site (never dynamic), encode it in the function name instead of passing it (e.g. `openReadStream()` / `openWriteStream()` rather than `openStream('read' | 'write')`).
 
 ## No Duplicate Logic
 
@@ -298,7 +298,7 @@ Logic repeated in 2+ places → extract to a method. Check existing codebase for
 
 When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner's internal state (current task, config, flag; e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
 
-- Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `taskControl.getCurrentTask()`. → Promote into `taskControl.registerXxxHandler(callback)` and call sites become one line.
+- Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `jobQueue.getCurrentJob()`. → Promote into `jobQueue.registerXxxHandler(callback)` and call sites become one line.
 - Anti-pattern: multiple consumers each implement the same `find by id + null check + cast` lookup. → Expose `findX(id): X | undefined` on the owner.
 
 Rule of thumb: client code accessing owner internals with guards is a signal the owner is missing an API. Add the API on the owner.

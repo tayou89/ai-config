@@ -70,8 +70,8 @@ testing, future refactors. Helps reviewers see what's NOT in this PR.>
 ### Section content guidance
 
 **Purpose — focus on WHY**
-- Good: "Controller's safety logic and simulation behavior diverged, blocking integration test reliability."
-- Bad: "Add ESTOP handling to crane/AGV/PSD." (that's WHAT, belongs in Changes)
+- Good: "The service's retry logic and its test double diverged, making integration tests unreliable."
+- Bad: "Add retry handling to the upload, email, and payment clients." (that's WHAT, belongs in Changes)
 
 **Background — focus on what reviewers need to know upstream**
 - Sweep / audit findings that motivated the work (tables of findings welcome)
