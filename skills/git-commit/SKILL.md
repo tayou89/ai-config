@@ -107,10 +107,11 @@ The wrapper:
 3. Stages exact files passed as argv (skipped with `--no-stage`)
 4. Prints `git diff --cached --stat`
 5. Verifies no extra files staged beyond argv (skipped with `--no-stage`; FAIL exit 3 otherwise)
-6. Prints verification table
-7. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker
+6. Refuses a staged `.env` or credential file, judged by `scripts/secret_files.py` (FAIL exit 5)
+7. Prints verification table
+8. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker
 
-Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error.
+Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file staged.
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
@@ -138,7 +139,7 @@ Don't amend: different purpose, already pulled by others.
 
 ## 8. Push
 
-Ask user about push after commit. Push only on approval.
+Where the shell guard hook is installed, start `git push` right after the commit without asking in chat: the hook's permission prompt is the user's separate approval (user decision, 2026-11-08). If the user rejects it, stop and report. Without the hook, ask the user about push after commit and push only on approval.
 
 ## Rules
 

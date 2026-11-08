@@ -62,11 +62,12 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Monitor|mcp__terminal__run_in_terminal",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"$HOME/.claude/scripts/git-commit-hook.py\""
+            "command": "python3 \"$HOME/.claude/scripts/shell-guard-hook.py\"",
+            "timeout": 30
           }
         ]
       },

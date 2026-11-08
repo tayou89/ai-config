@@ -22,6 +22,7 @@ Separate skills by scope: **general** (always apply) vs **task-specific** (only 
 
 Current hook-enforced skills:
 - **git-commit**: hook denies direct `git commit`; the skill commits through `scripts/claude-commit.py`, whose `git commit` subprocess the hook does not see.
+- **shell guard** (`scripts/shell-guard-hook.py`, user decision 2026-11-08): for Bash, Monitor, and terminal-tab commands, after expanding shell aliases and functions, wrappers, `sh -c`, `eval`, scripts, `cd`, and `git -C`, it denies direct `git commit` and staging `.env` or credential files (the commit wrapper also refuses them when staged), and asks the user before `git push` and before production, staging, or live-mode runs.
 - **code-style/typescript**: hook shows `[CODE-STYLE REMINDER]` via `additionalContext` when Edit/Write targets code files (`.ts`, `.js`, `.tsx`, `.jsx`, `.py`, `.go`, `.rs`, `.java`, `.c`, `.cpp`, `.h`). Non-blocking (context only, no permission decision), reminds to read code-style skill (+ typescript skill if `.ts`) and verify consumer behavior before writing.
 - **code-plan**: hook shows `[PLAN CODE REMINDER]` via `additionalContext` when Edit/Write targets `claude-plans/plan-*.md`. Non-blocking (context only, no permission decision), reminds that plan sample code follows code-style and typescript rules.
 
@@ -30,7 +31,7 @@ Current hook-enforced skills:
 - **JS to TS conversion**: Read `typescript-migration` skill before starting. Grep for external `this.xxx` property access and verify callback values are preserved.
 - **Code writing/editing**: Read `code-style` before writing or proposing any code change (it also holds the design and standards rules), plus `typescript` for `.ts`/`.tsx` files.
 - **Non-trivial implementation**: Use `/code-plan` skill to write a plan and wait for explicit approval before coding. Simple Q&A, explanations, or minor fixes (typos, 1-2 line changes) skip this.
-- **Git commit**: Use `/git-commit` skill when a phase/unit of work completes. Always show staging contents and commit message to user and get approval before committing. Push also requires separate approval.
+- **Git commit**: Use `/git-commit` skill when a phase/unit of work completes. Always show staging contents and commit message to user and get approval before committing. Push also requires separate approval; where the shell guard hook is installed, its permission prompt is that approval, so start the push right after the commit instead of asking in chat (user decision, 2026-11-08).
 - **Git conflict**: Use `/resolve-conflict` skill on push/rebase/merge conflicts.
 - **GitHub PR create**: Use `/pr-create` skill when creating any PR via `gh pr create`. Body MUST include Purpose / Background / Changes / Verification sections — never compose PR body purely from commit messages or use `--fill`.
 - **Integration/runtime test**: Read `integration-testing` skill before starting any test against a live or simulated environment (external dependencies: servers, simulators, databases, etc.).

@@ -36,6 +36,8 @@ Start a new conversation to load the complete instruction set. Codex normally de
 
 Edit shared principles only in `shared-rules/`, in English and without tool- or project-specific details. Then run `python3 scripts/sync-shared-rules.py` to regenerate the Claude and Codex copies, and `python3 scripts/sync-shared-rules.py --check` to confirm they match before committing. When adding a rule file, register it in the script as always-loaded or task-scoped (the check fails on unregistered files in `shared-rules/` or `rules/`) and update the contents above.
 
+Install `scripts/` as a whole: the shell guard hook (`shell-guard-hook.py`) and the commit wrapper (`claude-commit.py`) import `shell_command.py` and `secret_files.py` from beside them, and a hook that cannot start lets every command through. After changing any of these four scripts, run `python3 tests/test_shell_guard.py`; add `--table` to print every case with its decision.
+
 Review changes to the original Claude engineering rules for corresponding updates under `codex/`; do not copy Claude-only execution settings blindly. GitHub updates do not synchronize installed local copies automatically. Refresh local files deliberately after reviewing the changes.
 
 ## References

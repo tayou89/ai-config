@@ -6,7 +6,8 @@ Usage:
 
 Validates message format (subject prefix/length, body line length/count,
 bullet count, no internal terms), runs amend check, stages exact files,
-verifies no extras, prints verification table, then commits with
+verifies no extras, refuses staged .env and credential files (see
+secret_files.py), prints verification table, then commits with
 CLAUDE_SKILL_GIT_COMMIT=1 marker. Subprocess git commit does NOT trigger
 Claude's PreToolUse hook (hooks fire at tool boundary only), so the
 checklist becomes the single enforced path.
@@ -22,15 +23,19 @@ Exit codes:
     2  message validation failure
     3  staging mismatch
     4  usage error
+    5  credential file staged
 """
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import subprocess
 import sys
 from typing import Sequence
+
+from secret_files import get_credential_reason
 
 
 VALID_PREFIXES = ("Feat", "Fix", "Refactor", "Chore", "Merge")
@@ -45,6 +50,7 @@ EXIT_GIT_ERROR = 1
 EXIT_VALIDATION = 2
 EXIT_STAGING_MISMATCH = 3
 EXIT_USAGE = 4
+EXIT_CREDENTIAL_FILE = 5
 
 
 def fail(message: str, code: int) -> None:
@@ -153,6 +159,37 @@ def verify_staging(expected_files: Sequence[str]) -> None:
         sys.exit(EXIT_STAGING_MISMATCH)
 
 
+def read_staged_content(path: str) -> bytes | None:
+    blob_proc = subprocess.run(
+        ["git", "cat-file", "blob", f":{path}"],
+        capture_output=True,
+        check=False,
+    )
+    return blob_proc.stdout if blob_proc.returncode == 0 else None
+
+
+def check_credential_files() -> None:
+    staged_proc = run_git(
+        ["diff", "--cached", "--name-only", "-z", "--diff-filter=d"],
+        capture_output=True,
+    )
+    if staged_proc.returncode != 0:
+        fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
+    offenders = []
+    for path in staged_proc.stdout.split("\0"):
+        reason = get_credential_reason(path, functools.partial(read_staged_content, path)) if path else None
+        if reason:
+            offenders.append(f"  {path} ({reason})")
+    if offenders:
+        fail(
+            "FAIL: credential files staged:\n"
+            + "\n".join(offenders)
+            + "\n\nResolve: git restore --staged <file>, add it to .gitignore, "
+            "and commit a redacted copy such as .env.example instead",
+            EXIT_CREDENTIAL_FILE,
+        )
+
+
 def print_verification(
     subject_length: int,
     body_max_length: int,
@@ -169,6 +206,7 @@ def print_verification(
     print(f"| {'Bullets 3-5':<30} | OK ({bullet_count})")
     print(f"| {'No internal terms':<30} | OK")
     print(f"| {'Stage matches argv':<30} | OK")
+    print(f"| {'No credential files':<30} | OK")
 
 
 def do_commit(message: str, amend: bool) -> None:
@@ -223,6 +261,7 @@ def main(argv: list[str]) -> None:
         print("=== Staged changes ===")
         run_git(["diff", "--cached", "--stat"])
         verify_staging(files)
+    check_credential_files()
     print_verification(*metrics)
     print("=== Committing ===")
     do_commit(message, amend)
