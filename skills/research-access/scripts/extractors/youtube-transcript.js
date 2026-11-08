@@ -1,32 +1,44 @@
 async (options) => {
   const SEGMENT_SELECTOR = "transcript-segment-view-model, ytd-transcript-segment-renderer";
+  const PANEL_SELECTOR = "ytd-engagement-panel-section-list-renderer";
+  const VISIBILITY_ATTRIBUTE = "visibility";
+  const EXPANDED_VISIBILITY = "ENGAGEMENT_PANEL_VISIBILITY_EXPANDED";
   const BUTTON_SELECTOR = "ytd-video-description-transcript-section-renderer button, button[aria-label]";
   const SHOW_TRANSCRIPT_PATTERN = /스크립트 표시|show transcript/i;
   const TRANSCRIPT_PATTERN = /스크립트|transcript/i;
   const TIME_PATTERN = /^(\d{1,2}:)?\d{1,2}:\d{2}/;
   const SPOKEN_TIME_PATTERN = /^(\d+\s*(시간|분|초|hours?|minutes?|seconds?),?\s*)+/i;
   const MARK_INTERVAL_SECONDS = 30;
-  const POLL_COUNT = 10;
-  const POLL_INTERVAL_MS = 750;
+  // ego-browser stops page.evaluate after about 15 seconds, so both waits together stay under that.
+  const BUTTON_TIMEOUT_MS = 6000;
+  const SEGMENT_TIMEOUT_MS = 6000;
+  const POLL_INTERVAL_MS = 250;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   const labelOf = (button) => (button.innerText || "") + " " + (button.getAttribute("aria-label") || "");
   const toSeconds = (time) => time.split(":").reduce((total, part) => total * 60 + Number(part), 0);
-  const findTranscriptButton = () => {
+  const findButton = (pattern) => {
     const buttons = [...document.querySelectorAll(BUTTON_SELECTOR)];
 
-    return (
-      buttons.find((button) => SHOW_TRANSCRIPT_PATTERN.test(labelOf(button))) ??
-      buttons.find((button) => TRANSCRIPT_PATTERN.test(labelOf(button)))
-    );
+    return buttons.find((button) => pattern.test(labelOf(button)));
   };
-  const waitForSegments = async () => {
-    let segments = [];
+  const findTranscriptButton = () => findButton(SHOW_TRANSCRIPT_PATTERN) ?? findButton(TRANSCRIPT_PATTERN);
+  const hasShowTranscriptButton = () => Boolean(findButton(SHOW_TRANSCRIPT_PATTERN));
+  const isExpandedPanel = (panel) => panel?.getAttribute(VISIBILITY_ATTRIBUTE) === EXPANDED_VISIBILITY;
+  const findSegments = () => {
+    // YouTube can keep a hidden copy of the transcript panel; reading the whole page returns every line twice.
+    const segments = [...document.querySelectorAll(SEGMENT_SELECTOR)];
+    const panels = [...new Set(segments.map((segment) => segment.closest(PANEL_SELECTOR)))];
+    const panel = panels.find(isExpandedPanel) ?? panels[0];
 
-    for (let attempt = 0; attempt < POLL_COUNT && segments.length === 0; attempt += 1) {
+    return segments.filter((segment) => segment.closest(PANEL_SELECTOR) === panel);
+  };
+  const hasSegments = () => findSegments().length > 0;
+  const waitUntil = async (isReady, timeoutMs) => {
+    const deadline = Date.now() + timeoutMs;
+
+    while (!isReady() && Date.now() < deadline) {
       await sleep(POLL_INTERVAL_MS);
-      segments = [...document.querySelectorAll(SEGMENT_SELECTOR)];
     }
-    return segments;
   };
   const toText = (segments) => {
     let nextMark = 0;
@@ -57,9 +69,10 @@ async (options) => {
   };
 
   document.querySelector("#description-inline-expander #expand")?.click();
-  await sleep(POLL_INTERVAL_MS);
+  await waitUntil(hasShowTranscriptButton, BUTTON_TIMEOUT_MS);
   findTranscriptButton()?.click();
-  const segments = await waitForSegments();
+  await waitUntil(hasSegments, SEGMENT_TIMEOUT_MS);
+  const segments = findSegments();
 
   if (segments.length > 0) {
     const text = toText(segments);
