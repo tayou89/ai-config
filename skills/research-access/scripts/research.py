@@ -11,9 +11,10 @@ Usage:
     research.py appstore <app-id> [--limit N]
     research.py page <url> [--max-chars N]
 
-Each command runs one script in ego-browser and prints compact JSON. Lists
-carry only what is needed to pick sources (title, source, popularity, date,
-link); the other commands return the text of one source, cut at --max-chars.
+Each command runs one script in its own ego-browser task space and prints
+compact JSON. Lists carry only what is needed to pick sources (title, source,
+popularity, date, link); the other commands return the text of one source,
+cut at --max-chars.
 The review and comment commands leave out reviewer and commenter names.
 
 Exit codes:
@@ -26,6 +27,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import secrets
 import subprocess
 import sys
 import urllib.parse
@@ -34,7 +37,11 @@ from pathlib import Path
 
 
 EXTRACTOR_DIR = Path(__file__).resolve().parent / "extractors"
-TASK_SPACE_NAME = "research-access"
+TASK_SPACE_PREFIX = "research-access"
+SESSION_ID_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+SHELL_SESSION_TAG = "shell"
+SESSION_TAG_LENGTH = 8
+CALL_TAG_BYTES = 3
 NAVIGATION_TIMEOUT_MS = 30000
 NOTICE_PREFIX = "[ego-browser:"
 DEFAULT_LIMIT = 5
@@ -42,14 +49,18 @@ DEFAULT_MAX_CHARS = 6000
 EXIT_TOOL_FAILURE = 1
 EXIT_HUMAN_CHECK = 2
 
+# finish() runs even on failure: no later call resumes a per-call space, so leaving it open only holds a page.
 SCRIPT_TEMPLATE = """const task = await taskSpace({space});
-const page = task.page("p1");
-const extract = {extractor};
-await page.goto({url}, {{ timeout: {timeout} }});
-await page.waitForTimeout({wait});
-const result = await page.evaluate(extract, {options});
-console.log(JSON.stringify(result));
-await task.finish({{ keep: [] }});
+try {{
+  const page = task.page("p1");
+  const extract = {extractor};
+  await page.goto({url}, {{ timeout: {timeout} }});
+  await page.waitForTimeout({wait});
+  const result = await page.evaluate(extract, {options});
+  console.log(JSON.stringify(result));
+}} finally {{
+  await task.finish({{ keep: [] }});
+}}
 """
 
 
@@ -83,12 +94,20 @@ def make_url(command_name: str, target: str) -> str:
         return command.url_template.format(target)
 
 
+def make_space_name() -> str:
+    # One space per call: calls sharing a name read each other's pages,
+    # and one call's finish() closes the space under another.
+    session_tag = os.environ.get(SESSION_ID_VARIABLE, "")[:SESSION_TAG_LENGTH] or SHELL_SESSION_TAG
+
+    return f"{TASK_SPACE_PREFIX}-{session_tag}-{secrets.token_hex(CALL_TAG_BYTES)}"
+
+
 def make_script(command_name: str, target: str, options: dict[str, int]) -> str:
     command = COMMANDS[command_name]
     extractor = (EXTRACTOR_DIR / command.extractor).read_text(encoding="utf-8").strip()
 
     return SCRIPT_TEMPLATE.format(
-        space=json.dumps(TASK_SPACE_NAME),
+        space=json.dumps(make_space_name()),
         extractor=extractor,
         url=json.dumps(make_url(command_name, target)),
         timeout=NAVIGATION_TIMEOUT_MS,
