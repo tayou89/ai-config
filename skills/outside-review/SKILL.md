@@ -14,6 +14,7 @@ Get an independent review of the work named in `$ARGUMENTS` (default: the change
 - Run the automatic checks the rules make checkable first (types, lint, tests, layout checks), so the reviewer spends nothing on what a script can check.
 - Choose the reviewer's output folder: the session's shared notes folder if it has one, otherwise `claude-plans/reviews/` in the project root.
 - List what the reviewer reads by itself: the artifacts, the applicable rules (`~/.claude/CLAUDE.md`, the relevant skills, project instructions), the latest user comments, captures at every checked width, and this conversation's transcript, `~/.claude/projects/<working-directory-slug>/${CLAUDE_SESSION_ID}.jsonl`. Confirm that file exists; never substitute the newest file in that folder, which may belong to another session. Without it, say the review lacks the conversation record.
+- Read the remaining Codex quota with `python3 ~/.claude/skills/outside-review/codex-limits.py`, which asks Codex's own server and spends nothing. If either window is 90% used or more, or the read fails, say so with the reset time and use the same-family fallback in section 2, since a review cut off by the limit wastes what it already spent.
 - Tell the user in one or two lines what goes to OpenAI. Parse the transcript as JSON lines and look at every image content block and every image file path in it, and check what the listed captures show. Leave personal photos out unless the user approves; if the transcript contains one, leave the transcript itself out of the list and tell the reviewer the decisions from it in the brief instead.
 
 ## 2. Run the Reviewer
@@ -21,10 +22,10 @@ Get an independent review of the work named in `$ARGUMENTS` (default: the change
 Create the output folder if missing, write the brief to `<output folder>/review-brief-<topic>.md`, then run in the background, quoting every path (notes folders often contain spaces):
 
 ```bash
-codex exec -s read-only -C "<project root>" -o "<output folder>/review-<topic>.md" "$(cat "<output folder>/review-brief-<topic>.md")" </dev/null
+codex exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s read-only -C "<project root>" -o "<output folder>/review-<topic>.md" "$(cat "<output folder>/review-brief-<topic>.md")" </dev/null
 ```
 
-`-s read-only` lets it read any file but write none, `-o` saves its final answer, and closing stdin keeps piped input out of the prompt. Leave out `--ephemeral` so Codex keeps the session log and the run shows in its usage history. Add `--skip-git-repo-check` outside a git repository. If `codex` is missing or fails, say why and run one fresh same-family subagent with the same brief instead; this invocation approves that one agent.
+`-m` and `-c model_reasoning_effort` follow the reviews row of the work-type table in `decisions-and-collaboration`: Codex's strongest model at xhigh, set here so the Codex app's own default does not decide it (user decision, 2026-11-08). Do not drop to a cheaper model or lower effort to save quota until a comparison on real reviews shows it finds as much; change the model name when a stronger one ships. State the model, effort, and quota used in one line when the run starts. `-s read-only` lets it read any file but write none, `-o` saves its final answer, and closing stdin keeps piped input out of the prompt. Leave out `--ephemeral` so Codex keeps the session log and the run shows in its usage history. Add `--skip-git-repo-check` outside a git repository. If `codex` is missing, fails, or the quota check stops it, say why and run one fresh same-family subagent with the same brief instead, at the strongest model and xhigh; this invocation approves that one agent.
 
 The brief states:
 

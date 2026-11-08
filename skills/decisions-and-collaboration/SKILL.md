@@ -1,6 +1,6 @@
 ---
 name: decisions-and-collaboration
-description: Present options for user decisions, record decision status, run checkpoint reviews, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.
+description: Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.
 user-invocable: false
 ---
 
@@ -8,7 +8,7 @@ user-invocable: false
 
 # Decision Requests and Collaboration Principles
 
-Apply in every project when asking the user for decisions, recording decision status, running checkpoint reviews, coordinating other sessions, or changing the global rules. The principles every task needs are in `collaboration-core.md`. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
+Apply in every project when asking the user for decisions, recording decision status, running checkpoint reviews, choosing the model and effort for a run you start, coordinating other sessions, or changing the global rules. The principles every task needs are in `collaboration-core.md`. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
 
 ## Presenting decisions
 
@@ -36,6 +36,25 @@ Apply in every project when asking the user for decisions, recording decision st
 - Use an independent reviewer agent only at checkpoints: just before presenting a decision to the user, before applying a large change to the main deliverable, and before a release or a large commit. Skip it for small edits. A reviewer starts without the conversation and must re-read rules and artifacts, so each review costs tens of thousands of tokens.
 - For a same-family checklist reviewer, give a short brief instead of the conversation: the goal, the applicable rules as a checklist, and the artifact or one or two captures. Prefer a smaller, cheaper model for checklist reviews, and run it in parallel when the tool allows.
 - Prefer a reviewer from a different model family than the author when one is available, because a model tends to miss its own habits. Let it gather the same information the author has by itself (files, rules, the conversation record, the latest user comments, captures at every checked width) under the same kind of approval checks the author works with, rather than preparing copies for it; keep its own writes in its own folder, and run it non-interactively without an automatic fix-and-review loop when the user makes the decisions. Do not narrow its scope or length: ask both what is wrong and how it would write or design the piece as the author, and say who wrote each text, since the small-revision rule protects only the user's own drafts. Show the user a proposal that differs materially from yours next to yours. Say what goes to that vendor, and leave personal photos out unless the user approves. Check each finding on the artifact before acting on it. If no other family is available, say why and use a fresh reviewer of the same family.
+
+## Model and effort for runs you start
+
+Choose each run's model and reasoning effort by its work type from this table (user decision, 2026-11-08), not by guessing how hard the task is: a model picking effort from a task description alone did about as well as chance, and higher effort sometimes failed tasks that lower effort solved, at many times the cost. "Strongest" is the tool's top model and "smaller" its cheaper general model.
+
+| Work type | Start at | Raise to after a verified failure |
+| --- | --- | --- |
+| Main session (relaying and managing sessions) | Strongest · xhigh, since it caps every session it starts | — |
+| Reviews (independent, code, security) and second opinions | Strongest · xhigh | max, only with the user's approval |
+| Code with many hidden edge cases (parsers, concurrency, security, data migration, anything that can lose data or money) | Strongest · xhigh | max, only with the user's approval |
+| Judgment work: decisions and plans, architecture, screen and UX design, decision and research reports, writing rules, other code changes, exhaustive audits | Strongest · high | Strongest · xhigh |
+| Checklist review against written rules | Smaller · high | Strongest · high |
+| Mechanical or read-only work: finding files, captures, format and link checks, collecting logs or numbers, applying an exact edit already decided | Smaller · medium | Smaller · high, then strongest · high |
+
+- Never start judgment work, reviews, or edge-case-heavy code on the smaller model or below high, however small it looks: their results decide what the user acts on and what later work builds on, so a weak first pass costs more than it saves. Give work that mixes types the highest row any part needs, and use the judgment row when unsure.
+- A verified failure is a failing check or test the run could not fix, a reviewer's finding that reproduces, or the user's correction of something missed. Then raise one step and say why in one line: raise effort when the run skipped a file, step, or check, and the model when it was wrong with full context. Do not raise on a hunch, and start the next task from the table again.
+- Set the values with the starting tool's own options and state them in one line as the run starts (for example, "smaller · medium: captures only"). A session cannot start runs above its own model or effort, so keep the main session at its row. Project rules come first.
+- A session cannot change its own model or effort. When its level clearly mismatches the row of the work it starts, propose the change once in one line, and do not repeat a declined proposal in that session.
+- Before a run that draws on a limited usage quota, read the remaining quota when the tool can do so without spending it. If the quota cannot cover the run, say so with the reset time and use the fallback reviewer rather than a weaker model.
 
 ## Working alongside other sessions
 

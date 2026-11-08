@@ -35,8 +35,8 @@ Current hook-enforced skills:
 - **GitHub PR create**: Use `/pr-create` skill when creating any PR via `gh pr create`. Body MUST include Purpose / Background / Changes / Verification sections — never compose PR body purely from commit messages or use `--fill`.
 - **Integration/runtime test**: Read `integration-testing` skill before starting any test against a live or simulated environment (external dependencies: servers, simulators, databases, etc.).
 - **Config or env file**: Read `config-files` skill before creating or refactoring config modules, `.env` files, or env-driven setup.
-- **Agent use**: Read `agent-usage` skill before spawning any agent (sub-agent, team agent, parallel agents).
-- **Decisions, reviews, sessions, rules**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, proposing, starting, or closing another session, handling design-tool comments, or adding or changing a global rule.
+- **Agent use**: Read `agent-usage` skill before spawning any agent (sub-agent, team agent, parallel agents) or starting another session; it maps the work-type model and effort table to Claude's options.
+- **Decisions, reviews, sessions, rules**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, choosing the model and effort for a run you start, proposing, starting, or closing another session, handling design-tool comments, or adding or changing a global rule.
 - **Screen/UX design**: Read `ux-design` before screen design, design review, UI copy, or design-tool work.
 - **Product planning and research**: Read `product-planning` before product planning, external research (web pages, video, papers, reviews, public data), vendor or tool selection, pricing and quota research, or setting early-launch criteria.
 - **Research access**: Read `research-access` before reading result lists or sources on video sites, review stores, or community sites, or when a search or fetch is refused or returns nothing.

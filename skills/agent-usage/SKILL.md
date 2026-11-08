@@ -55,3 +55,12 @@ Verification agents must trace actual runtime variable values step-by-step, not 
 ## 12. Exhaustive Audits Need the Right Agent Config
 
 Never use fast-and-shallow exploration agents for exhaustive audits — they estimate/sample instead of checking every occurrence. Unlike checklist reviews (section 7), audits that must count every occurrence need a strong model. For exhaustive work, use general-purpose subagent with an explicit strong model override, and include "Do not estimate. Check every single occurrence individually. Report exact counts, not approximations." in the prompt. If agent results look round-numbered or include phrases like "approximately" or "roughly", re-verify manually or re-run with stricter prompt.
+
+## 13. Model and Effort for Subagents and Sessions
+
+Apply the work-type table in `decisions-and-collaboration` "Model and effort for runs you start" (user decision, 2026-11-08). In Claude, "strongest" is Opus 5.5 (alias `opus`, id `claude-opus-5-5`) and "smaller" is Sonnet 5.5 (alias `sonnet`, id `claude-sonnet-5-5`).
+
+- **Subagents**: pass `model` (alias) and `effort` on every Agent call; this rule is the explicit instruction the tool needs before it passes `effort`. Without `effort`, a subagent on a model other than the session's runs at that model's default, not the table's. Built-in search agents keep their own model and count as mechanical work. To raise one, run or resume it again with the higher value.
+- **Sessions you start**: pass `model` (full id) and `effort` on the session-start tool with fresh context. A fork inherits the starting session's values, so when its row is lower, lower it right after the start with the session-effort tool. Raise a running session with the session-effort and session-model tools, which need no prompt up to the starting session's own level.
+- **Codex runs**: `/outside-review` sets them; a project's own review command comes first.
+- **Not reachable by these options**: your own session (propose instead), cloud sessions (the values do not apply there), and sessions the user opens, whose values come from the app's model and effort picker or a saved environment; a main session runs at xhigh.

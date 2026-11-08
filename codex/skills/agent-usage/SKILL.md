@@ -15,6 +15,6 @@ For independent review, follow the decisions-and-collaboration skill: one review
 
 Give each agent bounded ownership and shared contracts. Avoid concurrent edits to the same files. Reviewers read the actual applicable AGENTS.md and skills; they trace runtime behavior, type resolution, and test evidence rather than checking only for code presence.
 
-Verify important agent claims against source and outputs before reporting them. Exhaustive audits require checking every occurrence and reporting exact counts; estimates or round numbers are not proof. Use a suitable available model and reasoning setting rather than hard-coding a Claude-specific agent type. For unfamiliar tool/model options, consult current supported capabilities.
+Verify important agent claims against source and outputs before reporting them. Exhaustive audits require checking every occurrence and reporting exact counts; estimates or round numbers are not proof. Choose each subagent's model and reasoning effort from the work-type table in the decisions-and-collaboration skill, set with Codex's own options, rather than hard-coding a Claude-specific agent type. For unfamiliar tool/model options, consult current supported capabilities.
 
 Complete and integrate all authorized subtasks before declaring the parent work complete. Do not turn an agent suggestion into permission for unrelated changes or external messages.
