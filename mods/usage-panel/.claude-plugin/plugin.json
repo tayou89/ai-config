@@ -1,0 +1,6 @@
+{
+  "name": "usage-panel",
+  "version": "0.1.0",
+  "description": "사용 한도, 답변별 토큰, 최근 7일 사용 기록을 채팅 옆 패널에 보여 줍니다",
+  "types": "./types/index.d.ts"
+}

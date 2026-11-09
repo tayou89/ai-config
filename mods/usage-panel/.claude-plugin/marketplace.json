@@ -1,0 +1,5 @@
+{
+  "name": "local-mods",
+  "owner": { "name": "Tayou" },
+  "plugins": [{ "name": "usage-panel", "source": "./" }]
+}
