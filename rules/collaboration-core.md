@@ -45,3 +45,8 @@ Apply in every project and task. The rest of the decision and collaboration prin
 - Before a batch over thousands of files or any parallel job, run a sample and measure peak memory per process, confirm it stays flat as the sample grows, and set the number of parallel processes so their combined peak fits in free memory; lowering CPU priority does not limit memory.
 - Track and stop background jobs by the process IDs you started, not by a name pattern.
 - After a freeze, crash, or forced restart, find and fix the cause from logs and crash reports before resuming sessions or rerunning jobs, and say in any resume message what the cause was or that it is still unknown, so no session reruns the job that caused it (user decision, 2026-11-09).
+
+## Time estimates and progress
+
+- At the start of a task with several steps, tell the user a rough time estimate and what it depends on (approvals, reviews, builds, other sessions), and give a new estimate when the plan changes a lot; skip this for tasks of a few minutes (user decision, 2026-11-09).
+- On a long task, give a one-line progress note at each milestone, not on a timer; a session started by another session also sends that line to the session that started it.
