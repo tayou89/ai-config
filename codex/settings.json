@@ -1,0 +1,11 @@
+{
+  "config": {
+    "model": "gpt-6-astra",
+    "model_reasoning_effort": "xhigh",
+    "project_doc_max_bytes": 65536
+  },
+  "marketplaces": {
+    "taste-skill": "https://github.com/Leonxlnx/taste-skill.git"
+  },
+  "plugins": ["taste-skill@taste-skill"]
+}
