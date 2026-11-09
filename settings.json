@@ -1,6 +1,7 @@
 {
   "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+    "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
   },
   "permissions": {
     "allow": [
@@ -105,18 +106,34 @@
     "command": "/usr/bin/python3 \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || python3 \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || python \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || \"$LOCALAPPDATA/Programs/Python/Python312/python.exe\" \"$HOME/.claude/statusline-command.sh\""
   },
   "enabledPlugins": {
+    "cloudflare@cloudflare": true,
     "discord@claude-plugins-official": true,
     "frontend-design@claude-plugins-official": true,
-    "taste-skill@taste-skill": true
+    "taste-skill@taste-skill": true,
+    "usage-panel@local-mods": true
   },
   "autoUpdatesChannel": "latest",
   "theme": "dark",
   "extraKnownMarketplaces": {
+    "claude-plugins-official": {
+      "source": {
+        "source": "github",
+        "repo": "anthropics/claude-plugins-official"
+      }
+    },
+    "cloudflare": {
+      "source": {
+        "source": "github",
+        "repo": "cloudflare/skills"
+      }
+    },
     "taste-skill": {
       "source": {
         "source": "github",
         "repo": "Leonxlnx/taste-skill"
       }
     }
-  }
+  },
+  "inputNeededNotifEnabled": true,
+  "agentPushNotifEnabled": true
 }
