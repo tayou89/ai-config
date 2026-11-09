@@ -39,9 +39,10 @@ review has run.
 
 Git cannot tell which session wrote a line, so a whole-file add or a
 hand-built partial file can carry another session's uncommitted lines.
-In a Claude session whose write record exists (session_writes.py), the
-wrapper refuses staged lines that record does not show as the session's
-own, and --own-lines stages each file as the base plus only those lines.
+In a Claude session whose write record covers the whole session
+(session_writes.py), the wrapper refuses staged lines that record does
+not show as the session's own, and --own-lines stages each file as the
+base plus only those lines.
 --include-unrecorded <file> commits that file whole after the user has
 seen its lines; the shell guard asks before such a call.
 
@@ -83,6 +84,7 @@ from session_writes import (
     decode_content,
     has_record,
     is_line_tracked,
+    is_record_complete,
     is_whole_file_own,
     load_file_history,
     read_session_id,
@@ -527,11 +529,11 @@ def stage_changes(arguments: CommitArguments, expected_head: str | None) -> None
 
     if arguments.no_stage:
         print("=== Staging skipped (--no-stage) ===")
-    elif arguments.own_lines and session_id is not None and has_record(session_id):
+    elif arguments.own_lines and session_id is not None and is_record_complete(session_id):
         stage_own_lines(session_id, arguments.files, arguments.included_paths, expected_head)
     elif arguments.own_lines:
         fail(
-            f"FAIL: {OWN_LINES_OPTION} needs this session's write record, which exists only in sessions started after the record hook was installed.\n"
+            f"FAIL: {OWN_LINES_OPTION} needs a write record that covers this whole session, which only sessions started after the record hook was installed have.\n"
             f"Resolve: commit without {OWN_LINES_OPTION}; for a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, stage it with `git hash-object -w` and `git update-index --cacheinfo`, and run with --no-stage.",
             EXIT_USAGE,
         )
@@ -581,6 +583,8 @@ def find_own_lines_skip_reason() -> str | None:
         return "not checked (not a Claude session)"
     elif not has_record(session_id):
         return "not checked (no write record: the session started before the record hook)"
+    elif not is_record_complete(session_id):
+        return "not checked (write record started mid-session: new sessions are checked)"
     elif any(os.path.exists(os.path.join(git_directory, name)) for name in SEQUENCER_STATE_FILES):
         return "not checked (merge in progress)"
     else:

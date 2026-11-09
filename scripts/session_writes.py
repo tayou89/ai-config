@@ -29,6 +29,7 @@ import time
 from collections import Counter
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 
 from own_lines import FileHistory, OwnWrite, build_own_content, list_foreign_lines
@@ -39,6 +40,22 @@ _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _RECORD_DIRECTORY_NAME = "session-writes"
 _RECORD_SUFFIX = ".jsonl"
 _PENDING_SUFFIX = ".pending.json"
+_STARTED_FILE = "started"
+_PROJECTS_DIRECTORY_NAME = "projects"
+_TRANSCRIPT_SUFFIX = ".jsonl"
+_TOOL_USE_MARKER = '"tool_use"'
+_TOOL_RESULT_MARKER = '"tool_result"'
+_TOOL_USE_TYPE = "tool_use"
+_TOOL_RESULT_TYPE = "tool_result"
+_RECORDED_TOOLS = frozenset({"Edit", "Write", "NotebookEdit", "Bash", "Monitor", "mcp__terminal__run_in_terminal"})
+_TIMESTAMP_KEY = "timestamp"
+_UTC_SUFFIX = "Z"
+_UTC_OFFSET = "+00:00"
+_UNKNOWN_TIME = 0.0
+_INCOMPLETE_RECORD_WARNING = (
+    "Note: this session's write record started after its first tool call, so lines it wrote earlier count as "
+    "not its own here; the commit wrapper skips its own-lines check for this session."
+)
 _RECORD_LIFETIME_SECONDS = 14 * 24 * 60 * 60
 _MAX_TRACKED_BYTES = 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 10
@@ -83,10 +100,22 @@ def has_record(session_id: str) -> bool:
     return (get_record_directory() / session_id).is_dir()
 
 
-def get_record_directory() -> Path:
-    config_directory = os.environ.get(_CONFIG_DIRECTORY_VARIABLE) or _DEFAULT_CONFIG_DIRECTORY
+def is_record_complete(session_id: str) -> bool:
+    """Whether the record began before this session's first recorded tool call ended, so it holds every write.
 
-    return Path(os.path.expanduser(config_directory)) / _RECORD_DIRECTORY_NAME
+    A session that was already running when the hook was installed starts its
+    record mid-session: its earlier writes are missing and would read as
+    another session's lines, so such a record is not complete.
+    """
+    started = _read_record_start(session_id)
+    transcript = _find_transcript(session_id)
+    first_result = _read_first_recorded_result_time(transcript) if transcript is not None else None
+
+    return started is not None and (first_result is None or started <= first_result)
+
+
+def get_record_directory() -> Path:
+    return _get_config_directory() / _RECORD_DIRECTORY_NAME
 
 
 def find_repository_root(path: str) -> str | None:
@@ -146,10 +175,13 @@ def append_events(session_id: str, events: Iterable[WriteEvent]) -> None:
 
 
 def save_pending(session_id: str, tool_use_id: str, snapshots: Sequence[RepositorySnapshot]) -> None:
-    pending = get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}"
+    directory = get_record_directory() / session_id
+    pending = directory / f"{tool_use_id}{_PENDING_SUFFIX}"
     payload = {"start": time.time(), "snapshots": [asdict(snapshot) for snapshot in snapshots]}
 
-    pending.parent.mkdir(parents=True, exist_ok=True)
+    if not directory.is_dir():
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / _STARTED_FILE).write_text(str(payload["start"]), encoding=_TEXT_ENCODING)
     pending.write_text(json.dumps(payload, ensure_ascii=False), encoding=_TEXT_ENCODING)
 
 
@@ -228,6 +260,8 @@ def _print_report(paths: Sequence[str]) -> int:
     session_id = read_session_id()
 
     if session_id:
+        if not is_record_complete(session_id):
+            print(_INCOMPLETE_RECORD_WARNING)
         for path in paths:
             print(_describe_file(session_id, os.path.realpath(path)))
         return 0
@@ -255,6 +289,83 @@ def _describe_file(session_id: str, absolute_path: str) -> str:
         entangled = f"\n{len(own.entangled)} own lines cannot be separated from them:{tangled}" if own.entangled else ""
 
         return summary + entangled
+
+
+def _get_config_directory() -> Path:
+    return Path(os.path.expanduser(os.environ.get(_CONFIG_DIRECTORY_VARIABLE) or _DEFAULT_CONFIG_DIRECTORY))
+
+
+def _read_record_start(session_id: str) -> float | None:
+    """When the record began: the marker the hook writes, or the folder's creation time for older records."""
+    directory = get_record_directory() / session_id
+    marker = directory / _STARTED_FILE
+
+    if marker.is_file():
+        return _parse_float(marker.read_text(encoding=_TEXT_ENCODING))
+    elif directory.is_dir():
+        return getattr(directory.stat(), "st_birthtime", None)
+    else:
+        return None
+
+
+def _find_transcript(session_id: str) -> Path | None:
+    matches = sorted((_get_config_directory() / _PROJECTS_DIRECTORY_NAME).glob(f"*/{session_id}{_TRANSCRIPT_SUFFIX}"))
+
+    return matches[0] if matches else None
+
+
+def _read_first_recorded_result_time(transcript: Path) -> float | None:
+    """When the session's first call of a tool the hook records ended; an unreadable time counts as earliest."""
+    recorded_ids: set[str] = set()
+
+    with transcript.open(encoding=_TEXT_ENCODING, errors="replace") as file:
+        for line in file:
+            result_time = _read_recorded_result_time(line, recorded_ids)
+
+            if result_time is not None:
+                return result_time
+    return None
+
+
+def _read_recorded_result_time(line: str, recorded_ids: set[str]) -> float | None:
+    """Collect recorded tool calls from one transcript line, and return its time if it holds one's result."""
+    blocks = _read_content_blocks(line) if _TOOL_USE_MARKER in line or _TOOL_RESULT_MARKER in line else []
+    is_result = False
+
+    for block in blocks:
+        if block.get("type") == _TOOL_USE_TYPE and block.get("name") in _RECORDED_TOOLS:
+            recorded_ids.add(str(block.get("id")))
+        elif block.get("type") == _TOOL_RESULT_TYPE and block.get("tool_use_id") in recorded_ids:
+            is_result = True
+    return _parse_entry_time(line) if is_result else None
+
+
+def _read_content_blocks(line: str) -> list[dict[str, object]]:
+    try:
+        content = json.loads(line).get("message", {}).get("content")
+    except (ValueError, AttributeError):
+        return []
+    else:
+        return [block for block in content if isinstance(block, dict)] if isinstance(content, list) else []
+
+
+def _parse_entry_time(line: str) -> float:
+    try:
+        stamp = str(json.loads(line)[_TIMESTAMP_KEY]).replace(_UTC_SUFFIX, _UTC_OFFSET)
+        entry_time = datetime.fromisoformat(stamp).timestamp()
+    except (ValueError, KeyError, TypeError):
+        return _UNKNOWN_TIME
+    else:
+        return entry_time
+
+
+def _parse_float(text: str) -> float | None:
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    else:
+        return value
 
 
 def _read_events(session_id: str) -> list[WriteEvent]:

@@ -125,6 +125,9 @@ MERGE_MESSAGE = "Merge: bring in the other branch\n\n- one\n- two\n- three"
 CRLF_FILE = "windows.txt"
 NEW_FOLDER_FILE = "new/page.md"
 BROKEN_INDEX_TEXT = "not an index"
+TRANSCRIPT_PROJECT = "project"
+READ_TOOL = "Read"
+HOUR_SECONDS = 60 * 60
 
 
 @dataclass
@@ -1023,6 +1026,16 @@ class SessionWritesFixture:
 
         return result.stdout
 
+    def write_transcript(self, session: str, tool: str, seconds_ago: int) -> None:
+        """A session transcript whose first call of the given tool ended some time ago."""
+        transcript = self.config_directory / "projects" / TRANSCRIPT_PROJECT / f"{session}.jsonl"
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - seconds_ago))
+        use = {"type": "assistant", "timestamp": stamp, "message": {"content": [{"type": "tool_use", "id": "t0", "name": tool}]}}
+        result = {"type": "user", "timestamp": stamp, "message": {"content": [{"type": "tool_result", "tool_use_id": "t0"}]}}
+
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text(json.dumps(use) + "\n" + json.dumps(result) + "\n")
+
     def read_events(self, session: str) -> list[dict]:
         record = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}.jsonl"
 
@@ -1209,6 +1222,23 @@ class SessionWritesTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
         self.assertIn("commit without --own-lines", result.stderr)
+
+    def test_record_started_mid_session_is_not_checked(self) -> None:
+        self.write_mixed_log()
+        self.fixture.write_transcript(OWN_SESSION, BASH_TOOL, HOUR_SECONDS)
+        own_lines = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        whole = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(own_lines.returncode, USAGE_EXIT, own_lines.stderr)
+        self.assertEqual(whole.returncode, 0, whole.stdout + whole.stderr)
+        self.assertIn("not checked (write record started mid-session", whole.stdout)
+
+    def test_record_from_session_start_is_checked(self) -> None:
+        self.write_mixed_log()
+        self.fixture.write_transcript(OWN_SESSION, READ_TOOL, HOUR_SECONDS)
+        result = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
 
     def test_option_errors(self) -> None:
         both = self.fixture.run_wrapper("--no-stage", "--own-lines", HEAD_COMMIT_MESSAGE)
