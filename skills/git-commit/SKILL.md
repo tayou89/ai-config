@@ -154,7 +154,7 @@ Don't amend: different purpose, already pulled by others.
 
 ## 8. Push
 
-Where the shell guard hook is installed, start `git push` right after the commit without asking in chat: the hook's permission prompt is the user's separate approval (user decision, 2026-11-08). If the user rejects it, stop and report. Without the hook, ask the user about push after commit and push only on approval.
+Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps, so the permission prompt shows only the push (user decision, 2026-11-09). Where the shell guard hook is installed, start that push without asking in chat: the hook's permission prompt is the user's separate approval (user decision, 2026-11-08). If the user rejects it, stop and report. Without the hook, ask the user about push once the task's commits are done and push only on approval.
 
 ## Rules
 
