@@ -60,6 +60,7 @@ The script does not install apps or sign in. On a new computer, in this order:
 1. Install the apps and command-line tools.
    - macOS: Command Line Tools (`xcode-select --install`, which brings `git` and `python3`), the Claude app, the ChatGPT app, Node.js, the GitHub CLI (`gh`), Claude Code (official installer), and the Codex CLI; also Figma, Chrome, and ego lite if you use them.
    - Windows: Git for Windows (it provides Git Bash, which Claude Code uses to run the hooks), Python 3 with `python3` available in Git Bash, the Claude app, the ChatGPT app, Node.js, the GitHub CLI, Claude Code, and the Codex CLI. This setup has not been run on Windows yet, so run the dry run first and read its notes.
+   - Linux: `git`, `python3`, Node.js, and the GitHub CLI from the distribution's packages, Claude Code (official installer), and the Codex CLI; the Claude desktop app has a Linux beta installed with apt. This setup has not been run on Linux yet either, so run the dry run first and read its notes.
 2. Sign in yourself: the Claude app and `claude`, the ChatGPT app and `codex login`, and `gh auth login` (HTTPS, credential in the system keychain). Set `git config --global user.name` and `user.email`.
 3. Clone this repository and run the dry run, then `--apply` (with `--first-merge` if it asks).
 4. In a Claude session, run `/mcp` and authorize the plugin servers you use. Plugins a project enables only for itself (`--scope local` or `project`) are not installed by this script; install them again in that project.

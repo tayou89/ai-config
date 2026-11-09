@@ -84,6 +84,7 @@ FIRST_MERGE_KEEP_LOCAL = "keep-local"
 FIRST_MERGE_USE_REPOSITORY = "use-repository"
 SYSTEM_MACOS = "Darwin"
 SYSTEM_WINDOWS = "Windows"
+SYSTEM_LINUX = "Linux"
 REQUIRED_COMMANDS = ("claude", "codex", "git", "gh", "node")
 HOOK_COMMANDS = ("python3",)
 WINDOWS_HOOK_COMMANDS = ("python3", "bash")
@@ -156,32 +157,39 @@ def run_command(arguments: Sequence[str]) -> "subprocess.CompletedProcess[str]":
 def detect_platform(environment: Mapping[str, str], system_name: str) -> Platform:
     """Return the per-OS folders and checks; the only place that branches on the OS."""
     if system_name == SYSTEM_MACOS:
-        home = Path(environment["HOME"])
         applications = tuple(MACOS_APPLICATIONS_DIRECTORY / f"{name}.app" for name in MACOS_APPLICATIONS)
 
-        return Platform(
-            system_name=system_name,
-            home=home,
-            claude_home=resolve_tool_home(environment, "CLAUDE_CONFIG_DIR", home / ".claude"),
-            codex_home=resolve_tool_home(environment, "CODEX_HOME", home / ".codex"),
-            application_paths=applications,
-            hook_commands=HOOK_COMMANDS,
-            links_ego_skill=True,
-        )
+        return make_platform(environment, system_name, Path(environment["HOME"]), applications, HOOK_COMMANDS, True)
+    elif system_name == SYSTEM_LINUX:
+        return make_platform(environment, system_name, Path(environment["HOME"]), (), HOOK_COMMANDS, False)
     elif system_name == SYSTEM_WINDOWS:
         home = Path(environment["USERPROFILE"])
 
-        return Platform(
-            system_name=system_name,
-            home=home,
-            claude_home=resolve_tool_home(environment, "CLAUDE_CONFIG_DIR", home / ".claude"),
-            codex_home=resolve_tool_home(environment, "CODEX_HOME", home / ".codex"),
-            application_paths=(),
-            hook_commands=WINDOWS_HOOK_COMMANDS,
-            links_ego_skill=False,
-        )
+        return make_platform(environment, system_name, home, (), WINDOWS_HOOK_COMMANDS, False)
     else:
-        raise InstallError(EXIT_UNSUPPORTED_PLATFORM, f"This script supports macOS and Windows, not {system_name}.")
+        raise InstallError(
+            EXIT_UNSUPPORTED_PLATFORM,
+            f"This script supports macOS, Linux, and Windows, not {system_name}.",
+        )
+
+
+def make_platform(
+    environment: Mapping[str, str],
+    system_name: str,
+    home: Path,
+    application_paths: Tuple[Path, ...],
+    hook_commands: Tuple[str, ...],
+    links_ego_skill: bool,
+) -> Platform:
+    return Platform(
+        system_name=system_name,
+        home=home,
+        claude_home=resolve_tool_home(environment, "CLAUDE_CONFIG_DIR", home / ".claude"),
+        codex_home=resolve_tool_home(environment, "CODEX_HOME", home / ".codex"),
+        application_paths=application_paths,
+        hook_commands=hook_commands,
+        links_ego_skill=links_ego_skill,
+    )
 
 
 def resolve_tool_home(environment: Mapping[str, str], variable: str, default: Path) -> Path:

@@ -96,6 +96,15 @@ class DetectPlatformTest(unittest.TestCase):
         self.assertIn("bash", detected.hook_commands)
         self.assertFalse(detected.links_ego_skill)
 
+    def test_linux_uses_home_without_app_checks(self):
+        detected = install.detect_platform({"HOME": "/home/someone"}, "Linux")
+
+        self.assertEqual(detected.claude_home, Path("/home/someone/.claude"))
+        self.assertEqual(detected.codex_home, Path("/home/someone/.codex"))
+        self.assertEqual(detected.application_paths, ())
+        self.assertNotIn("bash", detected.hook_commands)
+        self.assertFalse(detected.links_ego_skill)
+
     def test_environment_variables_override_tool_homes(self):
         environment = {
             "HOME": "/Users/someone",
