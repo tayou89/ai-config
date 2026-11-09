@@ -10,6 +10,14 @@ user-invocable: false
 
 Apply to screen design, design review, and UI copy in every project. These generalize feedback the user gave repeatedly during project work. Follow the project's own design rules first; use this document as the default where they are silent.
 
+## Design skills
+
+- For visual design (a new or reshaped screen, layout, typography, color, motion), read the `frontend-design` skill as well and follow its process: a short plan of palette, type, layout, and principles, a check of that plan against generic defaults, the build, then a critique of captures. Decisions the user or the project already made win over its list of generic defaults; where they overlap, point it out instead of changing them (user decision, 2026-11-09).
+- Use the tool's dedicated skills where it has them: `design-critique` for design critique, `ux-copy` for UI copy, and `accessibility-review` for accessibility checks.
+- Give each installed design skill one role so they do not compete (user decision, 2026-11-09): `frontend-design` sets the direction and plan; `design-taste-frontend` (Taste) builds and browser-checks pages, and a site of a kind it does not define (for example a personal site) follows the nearest kind it does define, with the steps that break a higher rule left out; `emil-design-eng` and `apple-design` decide motion and interaction details, `web-motion-techniques` supplies tested recipes for the chosen motion, and `review-animations` reviews them; an anti-pattern detector or critique skill, where installed, reviews the result.
+- When skills conflict, follow this order: the user's decisions, then the project's rules, then these shared rules, then the skills. Skip a skill step that breaks a higher rule, and say in the report which step was skipped and why. A skill never adds stand-in or stock media, credits, page metadata, or dependencies the project has not approved, and never overrides a choice the user made because the skill lists it as a generic default.
+- Give an independent design reviewer the same design skill files to read, so author and reviewer judge by one standard.
+
 ## Hierarchy
 
 - Use one primary button per screen. Do not stack buttons of the same shape and weight; demote other actions to secondary buttons, text buttons, or text links.
