@@ -15,6 +15,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 - Before showing any work (screens, documents, plans, code), run as automatic checks everything a rule makes checkable: repeated expressions on one screen, clipped, overflowing, or overlapping text, totals and example data that must agree, the narrowest supported width, broken links and inconsistent terms in documents, and type, lint, and test runs for code. Do not spend a model review on what a script can check.
 - Report what the automatic checks covered, what the reviewer found and what you changed, and what was not checked.
+- Let the user follow every review of your work, whoever reviews it and whether it covers planning, design, or code, without asking anything (user decisions, 2026-11-09): as soon as it starts, show them what changed and what the reviewer was asked to look at, with the changed documents, screens, and code as clickable links (a file with its line, a preview URL with the widths and states to check, a design-tool node) and one or two captures for a screen, so they can skim it while it runs; record any comments they make meanwhile; and when findings return, show their comments first and then each finding with what it points at and your verdict, accepted or not and why. When the review ends within a few minutes, one message holding both is enough.
 
 ## Handing over work
 
