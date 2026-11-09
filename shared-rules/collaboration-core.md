@@ -16,7 +16,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 ## Handing over work
 
-- Give links that open in the app the user actually uses: write every file, document, or page you hand over or ask the user to look at as a clickable link in the reply itself, not as code text alone, and wrap a path containing spaces in `<…>`. If the chat client cannot open an app-specific link, give it as a one-line shell command that opens it. If it cannot open a result file from a link, for example one outside the session's folders, also send the file itself through the client's file-sending feature (user decisions, 2026-11-06 and 2026-11-08).
+- Give links that open in the app the user actually uses: write every file, document, or page you hand over or ask the user to look at as a clickable link in the reply itself, not as code text alone, and wrap a path containing spaces in `<…>`; give a file outside the session's main working folder by its absolute path, since a relative link resolves against that folder (user decision, 2026-11-09). If the chat client cannot open an app-specific link, give it as a one-line shell command that opens it. If it cannot open a result file from a link, for example one outside the session's folders, also send the file itself through the client's file-sending feature (user decisions, 2026-11-06 and 2026-11-08).
 - Do not open or switch the user's apps or browser screens on your own. Hand over only the link, the open command, or the file itself, and open it only when the user asks at that moment.
 
 ## Decisions and corrections
