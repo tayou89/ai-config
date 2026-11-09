@@ -1,0 +1,3 @@
+#!/bin/sh
+# Runs this repository's pre-commit check; install.py points core.hooksPath here.
+exec python3 scripts/check-commit.py

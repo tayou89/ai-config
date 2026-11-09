@@ -14,8 +14,9 @@ from dataclasses import dataclass
 AMEND_OPTION = "--amend"
 NO_STAGE_OPTION = "--no-stage"
 EXPECT_HEAD_OPTION = "--expect-head"
+REVIEWED_OPTION = "--reviewed"
 OPTION_PREFIX = "--"
-USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] "<message>" [<file1> ...]'
+USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] [{REVIEWED_OPTION}] "<message>" [<file1> ...]'
 
 
 class CommitArgumentsError(ValueError):
@@ -26,6 +27,7 @@ class CommitArgumentsError(ValueError):
 class CommitArguments:
     amend: bool
     no_stage: bool
+    reviewed: bool
     expected_head: str | None
     message: str
     files: tuple[str, ...]
@@ -34,6 +36,7 @@ class CommitArguments:
 def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
     amend = False
     no_stage = False
+    reviewed = False
     expected_head: str | None = None
     index = 0
 
@@ -46,13 +49,23 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
         elif option == NO_STAGE_OPTION:
             no_stage = True
             index += 1
+        elif option == REVIEWED_OPTION:
+            reviewed = True
+            index += 1
         elif option == EXPECT_HEAD_OPTION and index + 1 < len(argv):
             expected_head = argv[index + 1]
             index += 2
         else:
             raise CommitArgumentsError(f"Unknown option: {option}")
     check_positional_count(len(argv) - index, no_stage)
-    return CommitArguments(amend, no_stage, expected_head, argv[index], tuple(argv[index + 1 :]))
+    return CommitArguments(
+        amend=amend,
+        no_stage=no_stage,
+        reviewed=reviewed,
+        expected_head=expected_head,
+        message=argv[index],
+        files=tuple(argv[index + 1 :]),
+    )
 
 
 def check_positional_count(count: int, no_stage: bool) -> None:

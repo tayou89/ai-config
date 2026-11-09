@@ -2,12 +2,14 @@
 """claude-commit.py — wrapper enforcing git-commit skill checklist.
 
 Usage:
-    claude-commit.py [--amend] [--no-stage] [--expect-head <sha>] "<message>" [<file1> ...]
+    claude-commit.py [--amend] [--no-stage] [--expect-head <sha>] [--reviewed] "<message>" [<file1> ...]
 
 Validates message format (subject prefix/length, body line length/count,
 bullet count, no internal terms), runs amend check, stages exact files,
-verifies no extras, refuses staged .env and credential files (see
-secret_files.py), prints verification table, then commits with
+verifies no extras, refuses staged .env and credential files and added
+lines that hold a live-looking token (see secret_files.py), refuses a
+large code change without --reviewed, prints verification table, then
+commits with
 CLAUDE_SKILL_GIT_COMMIT=1 marker. Subprocess git commit does NOT trigger
 Claude's PreToolUse hook (hooks fire at tool boundary only), so the
 checklist becomes the single enforced path.
@@ -28,14 +30,21 @@ another commit, like `git update-ref <ref> <new> <old>` and
 wrapper checks that git commit replaced the expected HEAD and undoes the
 commit with the same compare-and-swap when HEAD moved while it started.
 
+Commits need no user approval (user decision, 2026-11-09), so a large
+change gets a checklist review instead: when the staged change touches
+LARGE_COMMIT_LINES or more lines outside documents and lock files, the
+wrapper requires --reviewed, which the session passes only after that
+review has run.
+
 Exit codes:
     0  success (commit created)
     1  git error
     2  message validation failure
     3  staging mismatch
     4  usage error
-    5  credential file staged
+    5  credential file or live-looking token staged
     6  HEAD moved since the index was built (nothing committed)
+    7  large code change without --reviewed (nothing committed)
 """
 
 from __future__ import annotations
@@ -54,7 +63,7 @@ from commit_arguments import (
     CommitArgumentsError,
     parse_commit_arguments,
 )
-from secret_files import get_credential_reason
+from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 HEAD_REVISION = "HEAD"
@@ -70,6 +79,12 @@ MAX_BODY_LINE_LENGTH = 72
 MAX_BODY_NONBLANK_LINES = 8
 MIN_BULLETS = 3
 MAX_BULLETS = 5
+LARGE_COMMIT_LINES = 200
+UNCOUNTED_SUFFIXES = (".md", ".txt", ".lock")
+UNCOUNTED_NAMES = frozenset({"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "go.sum"})
+BINARY_NUMSTAT = "-"
+NUMSTAT_SEPARATOR = "\0"
+NUMSTAT_COLUMN_SEPARATOR = "\t"
 
 EXIT_GIT_ERROR = 1
 EXIT_VALIDATION = 2
@@ -77,6 +92,7 @@ EXIT_STAGING_MISMATCH = 3
 EXIT_USAGE = 4
 EXIT_CREDENTIAL_FILE = 5
 EXIT_HEAD_MOVED = 6
+EXIT_REVIEW_MISSING = 7
 
 
 def fail(message: str, code: int) -> NoReturn:
@@ -368,12 +384,73 @@ def check_credential_files() -> None:
         )
 
 
+def check_secret_tokens() -> None:
+    diff_proc = run_git(STAGED_DIFF_ARGUMENTS, capture_output=True)
+    if diff_proc.returncode != 0:
+        fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
+    offenders = find_added_secret_tokens(diff_proc.stdout)
+    if offenders:
+        fail(
+            "FAIL: staged lines hold what looks like a live secret:\n"
+            + "\n".join(f"  {offender}" for offender in offenders)
+            + "\n\nResolve: remove the value, load it from an environment variable "
+            "or an ignored .env file, and stage the file again",
+            EXIT_CREDENTIAL_FILE,
+        )
+
+
+def check_large_commit_reviewed(changed_lines: int, reviewed: bool) -> None:
+    if changed_lines >= LARGE_COMMIT_LINES and not reviewed:
+        message = (
+            f"FAIL: {changed_lines} changed lines outside documents (limit {LARGE_COMMIT_LINES}) "
+            "need a checklist review first\n"
+            "Resolve: run a checklist review of the staged diff against the code and commit rules "
+            "(git-commit skill), fix what it finds, then pass --reviewed"
+        )
+        fail(message, EXIT_REVIEW_MISSING)
+
+
+def count_code_lines() -> int:
+    numstat_proc = run_git(["diff", "--cached", "--numstat", "-z"], capture_output=True)
+    if numstat_proc.returncode != 0:
+        fail("FAIL: git diff --cached --numstat failed", EXIT_GIT_ERROR)
+    return sum(count_numstat_lines(*entry) for entry in parse_numstat(numstat_proc.stdout))
+
+
+def parse_numstat(output: str) -> list[tuple[str, str, str]]:
+    """Read `git diff --numstat -z`: a rename leaves the path empty and gives the old and new paths next."""
+    fields = output.split(NUMSTAT_SEPARATOR)
+    entries: list[tuple[str, str, str]] = []
+    index = 0
+
+    while index < len(fields) and fields[index]:
+        added, deleted, path = fields[index].split(NUMSTAT_COLUMN_SEPARATOR, 2)
+        is_rename = not path
+
+        entries.append((added, deleted, fields[index + 2] if is_rename else path))
+        index += 3 if is_rename else 1
+    return entries
+
+
+def count_numstat_lines(added: str, deleted: str, path: str) -> int:
+    is_counted = BINARY_NUMSTAT not in (added, deleted) and not is_uncounted_path(path)
+
+    return int(added) + int(deleted) if is_counted else 0
+
+
+def is_uncounted_path(path: str) -> bool:
+    name = os.path.basename(path)
+
+    return name in UNCOUNTED_NAMES or name.lower().endswith(UNCOUNTED_SUFFIXES)
+
+
 def print_verification(
     subject_length: int,
     body_max_length: int,
     body_nonblank_count: int,
     bullet_count: int,
     expected_head: str | None,
+    code_lines: int,
 ) -> None:
     print("=== Verification ===")
     print(f"| {'Item':<30} | Status")
@@ -386,6 +463,8 @@ def print_verification(
     print(f"| {'No internal terms':<30} | OK")
     print(f"| {'Stage matches argv':<30} | OK")
     print(f"| {'No credential files':<30} | OK")
+    print(f"| {'No live-looking tokens':<30} | OK")
+    print(f"| {'Large change reviewed':<30} | OK ({code_lines} code lines)")
     print(f"| {'HEAD is the index base':<30} | OK ({shorten(expected_head)})")
 
 
@@ -434,7 +513,10 @@ def main(argv: list[str]) -> None:
     if files:
         verify_staging(files)
     check_credential_files()
-    print_verification(*metrics, expected_head)
+    check_secret_tokens()
+    code_lines = count_code_lines()
+    check_large_commit_reviewed(code_lines, arguments.reviewed)
+    print_verification(*metrics, expected_head, code_lines)
     print("=== Committing ===")
     do_commit(arguments.message, arguments.amend)
     check_commit_base(read_new_head(), expected_head, arguments.amend, files)

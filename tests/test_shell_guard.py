@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for scripts/shell-guard-hook.py, secret_files.py and claude-commit.py.
+"""Tests for scripts/shell-guard-hook.py, secret_files.py, commit_arguments.py and claude-commit.py.
 
 Each case feeds the hook the same JSON that Claude Code sends and checks
 its decision: deny, ask, or pass (no output). Fixture repositories and a
@@ -68,12 +68,18 @@ WRAPPER_COMMAND = (
 )
 DEEP_NESTING = "echo " + "$(" * 400 + "x" + ")" * 400
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
+PUSH_BRANCH = "main"
+PUSH_LOCATIONS = ("pushing", "matching", "guarded", "detached")
 SEED_FILES = ("a.txt", "b.txt", "shared.txt")
 OTHER_SESSION_SUBJECT = "Feat: land the other session's change"
 HEAD_COMMIT_MESSAGE = "Feat: commit this session's change\n\n- one\n- two\n- three"
 STAGING_MISMATCH_EXIT = 3
 USAGE_EXIT = 4
 HEAD_MOVED_EXIT = 6
+CREDENTIAL_EXIT = 5
+REVIEW_MISSING_EXIT = 7
+LARGE_CHANGE_LINES = 200
+FAKE_GITHUB_TOKEN = "gh" + "p_" + "A" * 36
 VALIDATION_EXIT = 2
 INTERNAL_TERM_FAILURE = "FAIL: internal terms"
 SECTION_NUMBER_MESSAGES = (
@@ -103,6 +109,7 @@ class GuardCase:
     expected: str
     location: str = "plain"
     tool: str = BASH_TOOL
+    tab_id: str = ""
 
 
 CASES = [
@@ -129,6 +136,11 @@ CASES = [
     GuardCase("commit", "./commit.sh", DENY),
     GuardCase("commit", "git commit -m x", DENY, tool=TERMINAL_TOOL),
     GuardCase("commit", WRAPPER_COMMAND, PASS),
+    GuardCase("commit", 'F=(a.txt b.txt) && ~/.claude/scripts/claude-commit.py "Fix: x" "${F[@]}"', DENY),
+    GuardCase("commit", 'files=$(git status --porcelain | cut -c4-) && ~/.claude/scripts/claude-commit.py "Fix: x" $files', DENY),
+    GuardCase("commit", '~/.claude/scripts/claude-commit.py --expect-head $(git rev-parse HEAD) "Fix: x" a.txt', PASS),
+    GuardCase("commit", '~/.claude/scripts/claude-commit.py "Fix: x" *.py', DENY),
+    GuardCase("commit", 'git ls-files -m | xargs ~/.claude/scripts/claude-commit.py "Fix: x"', DENY),
     GuardCase("commit", "git log --grep 'git commit'", PASS),
     GuardCase("commit", 'echo "git commit -m x"', PASS),
     GuardCase("commit", "command -v git", PASS),
@@ -175,30 +187,69 @@ CASES = [
     GuardCase("credential", "find . -name '*.txt' -exec wc -l {} +", PASS, "secrets"),
     GuardCase("credential", "git add -A", PASS, "ignored"),
     GuardCase("credential", "git add .", PASS, "ignored"),
-    GuardCase("push", "git push", ASK),
-    GuardCase("push", "gp", ASK),
-    GuardCase("push", "ggp", ASK),
-    GuardCase("push", "gpf", ASK),
-    GuardCase("push", "cd {plain} && git push origin main", ASK),
-    GuardCase("push", "git -C {plain} push", ASK),
-    GuardCase("push", "sh -c 'git push'", ASK),
-    GuardCase("push", "git push --force origin main", ASK),
-    GuardCase("push", "git push origin :old-branch", ASK),
-    GuardCase("push", "G=git; $G push", ASK),
-    GuardCase("push", "$(which git) push", ASK),
-    GuardCase("push", "echo 'git push' | sh", ASK),
-    GuardCase("push", "bash <<EOF\ngit push\nEOF", ASK),
-    GuardCase("push", "gp", ASK, tool=MONITOR_TOOL),
-    GuardCase("push", 'echo "$(git push)"', ASK),
-    GuardCase("push", "cat <<EOF\n$(git push)\nEOF", ASK),
-    GuardCase("push", "for r in a b; do git -C $r push; done", ASK),
-    GuardCase("push", "alias p='git push'; p", ASK),
-    GuardCase("push", "git push --dry-run", PASS),
-    GuardCase("push", "cat <<'EOF'\n$(git push)\nEOF", PASS),
-    GuardCase("push", "ls # git push", PASS),
-    GuardCase("push", "git log origin/main..HEAD", PASS),
-    GuardCase("push", 'echo "git push"', PASS),
-    GuardCase("push", "git status", PASS),
+    GuardCase("push", "git push", PASS, "pushing"),
+    GuardCase("push", "gp", PASS, "pushing"),
+    GuardCase("push", "git push -u origin main", PASS, "pushing"),
+    GuardCase("push", "git push origin HEAD", PASS, "pushing"),
+    GuardCase("push", "git push origin main:main", PASS, "pushing"),
+    GuardCase("push", "git push -q", PASS, "pushing"),
+    GuardCase("push", "cd {pushing} && git push origin main", PASS),
+    GuardCase("push", "git -C {pushing} push", PASS),
+    GuardCase("push", "sh -c 'git push'", PASS, "pushing"),
+    GuardCase("push", "G=git; $G push", PASS, "pushing"),
+    GuardCase("push", "echo 'git push' | sh", PASS, "pushing"),
+    GuardCase("push", "bash <<EOF\ngit push\nEOF", PASS, "pushing"),
+    GuardCase("push", "gp", PASS, "pushing", tool=MONITOR_TOOL),
+    GuardCase("push", 'echo "$(git push)"', PASS, "pushing"),
+    GuardCase("push", "cat <<EOF\n$(git push)\nEOF", PASS, "pushing"),
+    GuardCase("push", "alias p='git push'; p", PASS, "pushing"),
+    GuardCase("push", "git push --dry-run --force", PASS, "pushing"),
+    GuardCase("push", "cat <<'EOF'\n$(git push)\nEOF", PASS, "pushing"),
+    GuardCase("push", "ls # git push", PASS, "pushing"),
+    GuardCase("push", "git log origin/main..HEAD", PASS, "pushing"),
+    GuardCase("push", 'echo "git push"', PASS, "pushing"),
+    GuardCase("push", "git status", PASS, "pushing"),
+    GuardCase("push", "gpf", ASK, "pushing"),
+    GuardCase("push", "ggp", ASK, "pushing"),
+    GuardCase("push", "git push --force origin main", ASK, "pushing"),
+    GuardCase("push", "git push origin +main", ASK, "pushing"),
+    GuardCase("push", "git push origin :old-branch", ASK, "pushing"),
+    GuardCase("push", "git push --delete origin old-branch", ASK, "pushing"),
+    GuardCase("push", "git push --mirror", ASK, "pushing"),
+    GuardCase("push", "git push --all", ASK, "pushing"),
+    GuardCase("push", "git push --tags", ASK, "pushing"),
+    GuardCase("push", "git push origin v1.0", ASK, "pushing"),
+    GuardCase("push", "git push upstream main", ASK, "pushing"),
+    GuardCase("push", "git push https://example.com/x.git main", ASK, "pushing"),
+    GuardCase("push", "git push --no-verify", ASK, "pushing"),
+    GuardCase("push", "git push -o ci.skip", ASK, "pushing"),
+    GuardCase("push", "git -c push.default=matching push", ASK, "pushing"),
+    GuardCase("push", "git push", ASK, "matching"),
+    GuardCase("push", "git push", ASK, "guarded"),
+    GuardCase("push", "git push origin HEAD", ASK, "detached"),
+    GuardCase("push", "$(which git) push", ASK, "pushing"),
+    GuardCase("push", "for r in a b; do git -C $r push; done", ASK, "pushing"),
+    GuardCase("push", "git push", ASK, "pushing", tool=TERMINAL_TOOL, tab_id="1"),
+    GuardCase("push", "git push -fu origin main", ASK, "pushing"),
+    GuardCase("push", "git push --force-with-lease=main:abc", ASK, "pushing"),
+    GuardCase("push", "git push --repo=other", ASK, "pushing"),
+    GuardCase("push", "git push origin HEAD:refs/heads/other", ASK, "pushing"),
+    GuardCase("push", "git push origin refs/tags/v1", ASK, "pushing"),
+    GuardCase("push", "git push -o -n --force origin main", ASK, "pushing"),
+    GuardCase("push", "git push -vn --no-dry-run origin main:other", ASK, "pushing"),
+    GuardCase("push", "git push --no-dry-run -n --force", PASS, "pushing"),
+    GuardCase("push", "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=push.default GIT_CONFIG_VALUE_0=matching git push", ASK, "pushing"),
+    GuardCase("push", "env GIT_DIR=../x/.git git push", ASK, "pushing"),
+    GuardCase("push", "export GIT_WORK_TREE=/x; git push", ASK, "pushing"),
+    GuardCase("push", "git -c push.followTags=true push", ASK, "pushing"),
+    GuardCase("push", "git -c shellGuard.askBeforePush=2 push", ASK, "pushing"),
+    GuardCase("push", "git -c push.default=upstream -c branch.main.merge=refs/heads/other push", ASK, "pushing"),
+    GuardCase("push", "git -c push.default=upstream push", PASS, "pushing"),
+    GuardCase("push", "git -c branch.main.pushRemote=upstream push upstream main", PASS, "pushing"),
+    GuardCase("push", "git -c remote.pushDefault=upstream push origin main", ASK, "pushing"),
+    GuardCase("push", "git -c remote.origin.mirror=true push", ASK, "pushing"),
+    GuardCase("push", "git -c remote.origin.push=refs/heads/*:refs/heads/* push", ASK, "pushing"),
+    GuardCase("push", "git push -- origin main", PASS, "pushing"),
     GuardCase("production", "NODE_ENV=production node server.js", ASK),
     GuardCase("production", "export NODE_ENV=production && npm start", ASK),
     GuardCase("production", "env RAILS_ENV=production rails server", ASK),
@@ -238,6 +289,10 @@ class GuardFixture:
             "plain": self.root / "plain",
             "secrets": self.root / "secrets",
             "ignored": self.root / "ignored",
+            "pushing": self.root / "pushing",
+            "matching": self.root / "matching",
+            "guarded": self.root / "guarded",
+            "detached": self.root / "detached",
         }
 
     def create(self) -> None:
@@ -248,13 +303,26 @@ class GuardFixture:
         self.git_config.write_text("[user]\n\tname = Guard Test\n\temail = guard@example.com\n")
         for location in self.locations.values():
             location.mkdir()
-            self.run_git(location, "init", "-q")
+            self.run_git(location, "init", "-q", "-b", PUSH_BRANCH)
             (location / "a.txt").write_text("a\n")
+        for name in PUSH_LOCATIONS:
+            self.create_push_repository(self.locations[name])
+        self.run_git(self.locations["matching"], "config", "push.default", "matching")
+        self.run_git(self.locations["guarded"], "config", "shellGuard.askBeforePush", "true")
+        self.run_git(self.locations["detached"], "add", "a.txt")
+        self.run_git(self.locations["detached"], "commit", "-q", "-m", "Chore: seed")
+        self.run_git(self.locations["detached"], "checkout", "-q", "--detach")
         self.create_secret_files(self.locations["secrets"])
         self.create_secret_files(self.locations["ignored"])
         (self.locations["ignored"] / ".gitignore").write_text(".env\n.npmrc\nkey.pem\nconfig/\n")
         (self.locations["plain"] / "commit.sh").write_text("#!/bin/sh\ngit commit -m scripted\n")
         (self.locations["plain"] / "commit.sh").chmod(0o755)
+
+    def create_push_repository(self, location: Path) -> None:
+        self.run_git(location, "remote", "add", "origin", str(self.root / "remote.git"))
+        self.run_git(location, "remote", "add", "upstream", str(self.root / "upstream.git"))
+        self.run_git(location, "config", f"branch.{PUSH_BRANCH}.remote", "origin")
+        self.run_git(location, "config", f"branch.{PUSH_BRANCH}.merge", f"refs/heads/{PUSH_BRANCH}")
 
     def create_secret_files(self, location: Path) -> None:
         (location / ".env").write_text("TOKEN=fake\n")
@@ -290,11 +358,8 @@ class GuardFixture:
 
         for name, path in self.locations.items():
             command = command.replace(f"{{{name}}}", str(path))
-        payload = {
-            "tool_name": case.tool,
-            "tool_input": {"command": command, "description": "test"},
-            "cwd": cwd,
-        }
+        tool_input = {"command": command, "description": "test", **({"tab_id": case.tab_id} if case.tab_id else {})}
+        payload = {"tool_name": case.tool, "tool_input": tool_input, "cwd": cwd}
         result = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
             input=json.dumps(payload),
@@ -543,6 +608,72 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
         self.assertIn("was undone", result.stderr)
+
+    def test_added_token_is_refused_without_showing_it(self) -> None:
+        self.fixture.edit("b.txt", f"key = {FAKE_GITHUB_TOKEN}\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, CREDENTIAL_EXIT, result.stderr)
+        self.assertIn("b.txt: GitHub token (ghp_AA…)", result.stderr)
+        self.assertNotIn(FAKE_GITHUB_TOKEN, result.stderr)
+        self.assertEqual(self.fixture.read_head(), base)
+
+    def test_token_placeholder_passes(self) -> None:
+        self.fixture.edit("b.txt", "key = ghp_xxxx (set GITHUB_TOKEN)\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_large_code_change_needs_review(self) -> None:
+        self.fixture.edit("tool.py", "value = 1\n" * LARGE_CHANGE_LINES)
+        base = self.fixture.build_private_index("tool.py")
+        refused = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "tool.py")
+        head_after_refusal = self.fixture.read_head()
+        reviewed_arguments = ["--expect-head", base, "--no-stage", "--reviewed", HEAD_COMMIT_MESSAGE, "tool.py"]
+        reviewed = self.fixture.run_wrapper(*reviewed_arguments)
+
+        self.assertEqual(refused.returncode, REVIEW_MISSING_EXIT, refused.stderr)
+        self.assertIn("checklist review", refused.stderr)
+        self.assertEqual(head_after_refusal, base)
+        self.assertEqual(reviewed.returncode, 0, reviewed.stdout + reviewed.stderr)
+
+    def test_change_below_the_limit_needs_no_review(self) -> None:
+        self.fixture.edit("tool.py", "value = 1\n" * (LARGE_CHANGE_LINES - 1))
+        base = self.fixture.build_private_index("tool.py")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "tool.py")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_lock_file_change_needs_no_review(self) -> None:
+        self.fixture.edit("go.sum", "module v1.0.0 h1:x\n" * LARGE_CHANGE_LINES)
+        base = self.fixture.build_private_index("go.sum")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "go.sum")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_token_on_a_line_starting_with_plus_signs_is_refused(self) -> None:
+        self.fixture.edit("notes.txt", f"++ {FAKE_GITHUB_TOKEN}\n")
+        base = self.fixture.build_private_index("notes.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "notes.txt")
+
+        self.assertEqual(result.returncode, CREDENTIAL_EXIT, result.stderr)
+        self.assertIn("notes.txt: GitHub token", result.stderr)
+
+    def test_slug_that_looks_like_a_key_passes(self) -> None:
+        self.fixture.edit("b.txt", "name = sk-user-management-service-configuration-x\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_large_document_change_needs_no_review(self) -> None:
+        self.fixture.edit("notes.md", "line\n" * LARGE_CHANGE_LINES)
+        base = self.fixture.build_private_index("notes.md")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "notes.md")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_amend_as_head_moves_is_undone(self) -> None:
         self.fixture.edit("b.txt", "mine\n")

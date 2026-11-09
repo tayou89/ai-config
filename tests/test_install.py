@@ -45,6 +45,7 @@ class StubCommands:
         plugins = [plugin for plugin, enabled in repository_settings.get("enabledPlugins", {}).items() if enabled]
 
         self.calls: List[List[str]] = []
+        self.git_config: dict = {}
         self._codex_config = codex_config
         self._marketplaces = [{"name": plugin.split("@", 1)[1]} for plugin in plugins]
         self._plugins = [{"id": plugin, "scope": "user"} for plugin in plugins]
@@ -62,6 +63,11 @@ class StubCommands:
             return self._answer(self._codex_plugins)
         elif command[:4] == ["codex", "plugin", "marketplace", "add"]:
             self._record_codex_marketplace(command[4])
+            return self._answer("")
+        elif command[:1] == ["git"] and command[3:5] == ["config", "--get"]:
+            return self._answer(self.git_config.get(command[5], ""))
+        elif command[:1] == ["git"] and command[3:4] == ["config"]:
+            self.git_config[command[4]] = command[5]
             return self._answer("")
         else:
             return self._answer("")
@@ -231,6 +237,7 @@ class InstallerTest(unittest.TestCase):
             hook_commands=("python3",),
             links_ego_skill=True,
         )
+        self._commands = StubCommands(self._platform.codex_home / "config.toml")
 
     def tearDown(self):
         self._directory.cleanup()
@@ -249,6 +256,15 @@ class InstallerTest(unittest.TestCase):
 
         self.assertTrue(installer._changes)
         self.assertFalse(self._platform.claude_home.exists())
+
+    def test_points_hooks_path_at_commit_check(self):
+        dry_run = self._run_installer(apply=False)
+        applied = self._run_installer(apply=True)
+
+        self.assertTrue(any(install.HOOKS_PATH_KEY in change for change in dry_run._changes))
+        self.assertEqual(self._commands.git_config, {install.HOOKS_PATH_KEY: install.COMMIT_HOOKS_DIRECTORY})
+        self.assertFalse(any(install.HOOKS_PATH_KEY in change for change in self._run_installer(apply=True)._changes))
+        self.assertTrue(applied._changes)
 
     def test_local_line_survives_a_refresh(self):
         self._run_installer(apply=True)
@@ -298,8 +314,7 @@ class InstallerTest(unittest.TestCase):
 
     def _run_installer(self, apply: bool, prune: bool = False, first_merge: str = "") -> "install.Installer":
         options = install.Options(apply=apply, prune=prune, allow_dirty=True, first_merge=first_merge)
-        commands = StubCommands(self._platform.codex_home / "config.toml")
-        installer = install.Installer(self._platform, options, commands.run, find_any_command)
+        installer = install.Installer(self._platform, options, self._commands.run, find_any_command)
 
         with redirect_stdout(io.StringIO()):
             installer.install()

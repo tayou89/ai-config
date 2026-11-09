@@ -19,6 +19,9 @@ computer's own lines (keep-local) or stale lines to replace (use-repository).
 Plugins named in settings.json and codex/settings.json are installed with
 the claude and codex commands. Sign-ins stay manual and are listed at the end.
 
+It also points this checkout's core.hooksPath at .githooks, so every commit
+here runs scripts/check-commit.py on the content being committed.
+
 Exit codes:
     0  done, or nothing to change
     1  the repository has uncommitted changes or is behind its upstream
@@ -75,7 +78,9 @@ RUNTIME_SCRIPTS = (
     "secret_files.py",
     "commit_arguments.py",
 )
-MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py")
+MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py")
+HOOKS_PATH_KEY = "core.hooksPath"
+COMMIT_HOOKS_DIRECTORY = ".githooks"
 MERGE_BY_NAME_KEYS = ("enabledPlugins", "extraKnownMarketplaces", "env")
 ENABLED_PLUGINS_KEY = "enabledPlugins"
 MARKETPLACES_KEY = "extraKnownMarketplaces"
@@ -409,6 +414,7 @@ class Installer:
 
     def install(self) -> None:
         self._report_prerequisites()
+        self._set_commit_hooks_path()
         self._install_claude_files()
         self._install_codex_files()
         self._install_claude_plugins()
@@ -446,6 +452,13 @@ class Installer:
                 self._notes.append(f"App {application.name} is missing.")
         if self._which("gh") and self._run(["gh", "auth", "status"]).returncode != 0:
             self._notes.append("GitHub CLI is not signed in (`gh auth login`).")
+
+    def _set_commit_hooks_path(self) -> None:
+        repository = str(REPOSITORY_ROOT)
+        current = self._run(["git", "-C", repository, "config", "--get", HOOKS_PATH_KEY]).stdout.strip()
+
+        if current != COMMIT_HOOKS_DIRECTORY:
+            self._run_action(["git", "-C", repository, "config", HOOKS_PATH_KEY, COMMIT_HOOKS_DIRECTORY])
 
     def _install_claude_files(self) -> None:
         claude_home = self._platform.claude_home
