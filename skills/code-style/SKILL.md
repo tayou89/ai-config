@@ -323,4 +323,4 @@ Callback release, listener removal, schedule cancellation — place cleanup logi
 
 After completing code changes, run the project's linter on changed files (TypeScript: `typescript` "Build Quality"; Python: `python` "Tooling"). Report new errors and warnings to user. Changes must not increase the lint error/warning count compared to before the change.
 
-Then show the changes to the user and get confirmation **before running an output-generating build** (e.g. `npm run build`, `tsc`) and before committing. Never build or commit without user review.
+Then show the changes to the user and get confirmation **before running an output-generating build** (e.g. `npm run build`, `tsc`). Never run such a build without user review. Commits follow `git-commit`, which needs no approval for routine work (user decision, 2026-11-09).

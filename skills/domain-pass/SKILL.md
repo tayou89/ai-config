@@ -29,4 +29,4 @@ Only one subagent edits at a time. Before the next field, verify the result your
 
 ## 4. Stop and Report
 
-At the stop point, stop and give a table per completed field: looked at, artifact, changes, check results, open issues. List the remaining fields so the user can continue later. Commit only through `git-commit` with the user's approval.
+At the stop point, stop and give a table per completed field: looked at, artifact, changes, check results, open issues. List the remaining fields so the user can continue later. Commit only through `git-commit`, which needs no approval for routine work (user decision, 2026-11-09).

@@ -1,11 +1,13 @@
 ---
 name: git-commit
-description: Review changes, write commit message, and commit with user approval via the claude-commit.py wrapper.
+description: Review changes, write the commit message, and commit and push without asking through the claude-commit.py wrapper, stopping only when a check fails.
 ---
 
 # Commit Workflow
 
 All commits MUST go through `~/.claude/scripts/claude-commit.py`. Direct `git commit` is denied by a PreToolUse hook with no bypass. The wrapper enforces the full checklist (subject prefix, line-length, body-lines, bullet-count, internal-terms, amend check, staged-stat review, stage-matches-argv) automatically, so no step can be skipped.
+
+Routine commits and pushes need no user approval (user decision, 2026-11-09, replacing the per-commit approval and the 2026-11-08 push prompt): this skill's self-check, the wrapper, the shell guard, and a repository's pre-commit check stand where that approval was. Changes to rules, skills, hooks, and shared settings still need the user's review before they are applied (section 5).
 
 ## 1. Branch Check (First Commit of Session Only)
 
@@ -55,19 +57,19 @@ This applies regardless of language or build system (any version manifest, any l
 
 The wrapper rejects messages violating any of: type prefix, subject ≤72, line length ≤72, body lines 1-8, bullets 3-5, internal-term ban.
 
-## 5. Show User Before Invoking Wrapper
+## 5. Self-Check Before Invoking Wrapper
 
-Every commit gets its own approval (user decision, 2026-11-09: kept per commit rather than approved with the plan). Ask in the same layout every time, in the user's language and plain words, so the scope reads at a glance:
+Check on your own, in this order, and fix what fails before running the wrapper:
 
-1. Title line: what the commit does, in one phrase.
-2. What and why, in one or two sentences.
-3. Files table: each file as a link, lines added and removed, and what changed.
-4. Left out: changed files not included and why (another session's work, another topic), or none.
-5. The exact message in a code block, with the line-length self-check noted.
-6. Checks: code-review result, secrets, other sessions' changes kept out, and type, lint, and test results when code changed.
-7. After the commit: the push prompt and any notification or record update that follows.
+1. **Scope:** list each file you changed by name, from your own edits, never from `git status` output; leave out other sessions' changes and other topics. The shell guard refuses a file list known only at run time.
+2. **Secrets:** no `.env`, keys, or tokens. The wrapper refuses credential files and live-looking tokens on added lines.
+3. **Checks:** type, lint, and test runs pass when code changed. The shared configuration repository also runs its pre-commit check.
+4. **Message:** the rules in section 4, including those the wrapper cannot check (why rather than what, no shorthand a reader cannot decode).
+5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run.
 
-Get explicit approval ("응 진행해줘" or equivalent). The wrapper then runs deterministically and commits.
+Stop and ask the user only when a check fails and cannot be fixed within the task, when your change cannot be separated from another session's edits in the same file, or when the shell guard asks. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
+
+After pushing, report each commit in one line of your closing message: short hash, subject, and file count.
 
 ## 6. Run the Wrapper
 
@@ -81,6 +83,14 @@ Get explicit approval ("응 진행해줘" or equivalent). The wrapper then runs 
 EOF
 )" <file1> <file2> ...
 ```
+
+For a large change, after the checklist review, add `--reviewed` before the message:
+
+```bash
+~/.claude/scripts/claude-commit.py --reviewed "<message>" <file1> ...
+```
+
+The wrapper counts the staged change only: on `--amend` that is the new part, so review the whole amended commit when a series of amends grows past the limit, and on a `--no-stage` merge it is everything the merge brings in.
 
 For amend:
 
@@ -113,12 +123,13 @@ The wrapper:
 4. Stages exact files passed as argv (skipped with `--no-stage`)
 5. Prints `git diff --cached --stat`
 6. Verifies no extra files staged beyond argv (with `--no-stage`, only when files are given; FAIL exit 3)
-7. Refuses a staged `.env` or credential file, judged by `scripts/secret_files.py` (FAIL exit 5)
-8. Prints verification table
-9. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker
-10. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
+7. Refuses a staged `.env` or credential file, or an added line holding a live-looking token, judged by `scripts/secret_files.py` (FAIL exit 5)
+8. Refuses a change of 200 or more lines outside documents and lock files without `--reviewed` (FAIL exit 7)
+9. Prints verification table
+10. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker; the repository's own pre-commit hook still runs
+11. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
 
-Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file staged, `6` HEAD moved since the index was built (nothing committed).
+Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed).
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
@@ -144,17 +155,15 @@ Then, as its own command before `git push` and never chained with it, run `git s
 
 ## 7. Amend Check
 
-Before drafting a new commit, check `git log --oneline -3`. If current changes are a continuation/supplement of the previous commit:
-1. Propose `--amend` to user
-2. On approval: invoke wrapper with `--amend`
-3. If already pushed: warn about `--force-with-lease` requirement
-
-Amend when: same file/same purpose, filling gaps from previous commit, same plan/feature.
-Don't amend: different purpose, already pulled by others.
+Before drafting a new commit, check `git log --oneline -3`. When the current changes continue your own previous commit (same file and purpose, filling its gaps, same plan or feature) and that commit is not pushed yet, amend it with `--amend` instead of adding a commit. Never amend a pushed commit or someone else's: rewriting pushed history needs a force push, which the shell guard asks the user about.
 
 ## 8. Push
 
-Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps, so the permission prompt shows only the push (user decision, 2026-11-09). Where the shell guard hook is installed, start that push without asking in chat: the hook's permission prompt is the user's separate approval (user decision, 2026-11-08). If the user rejects it, stop and report. Without the hook, ask the user about push once the task's commits are done and push only on approval.
+Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps (user decision, 2026-11-09). A routine push, the current branch to its own remote, runs without asking (user decision, 2026-11-09, replacing the 2026-11-08 push prompt). The shell guard still asks before force pushes, deletions, mirror and tag pushes, pushes to another remote or ref, and every push in a repository where `git config shellGuard.askBeforePush true` is set; if the user rejects it, stop and report. Where the hook is not installed, push routine pushes the same way and ask before the others yourself.
+
+## 9. Pull Requests and Deploying Pushes
+
+Commit straight to the branch a repository works on, its default branch for a solo repository, without a pull request unless the project's rules say otherwise: with no reviewer and no deploy on push, a pull request adds a step nobody reads (user decision, 2026-11-09). When a push to that branch starts deploying, set `git config shellGuard.askBeforePush true` in the checkout and say so in the project's rules, or move that repository to pull requests with required checks.
 
 ## Rules
 
