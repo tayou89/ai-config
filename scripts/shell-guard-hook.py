@@ -7,6 +7,8 @@ sh -c, eval, scripts, cd and git -C) and applies these checks:
   deny  direct git commit; commits go through claude-commit.py
   deny  a commit-wrapper call whose file list is known only at run time
   deny  staging or committing .env and other credential files
+  ask   a commit-wrapper call with --include-unrecorded, which commits
+        lines this session's write record does not show as its own
   ask   a git push that is not routine: force, deletion, mirror, tags,
         all branches, another remote or ref, unknown options, or a
         repository that sets shellGuard.askBeforePush
@@ -31,7 +33,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from commit_arguments import CommitArgumentsError, parse_commit_arguments
+from commit_arguments import CommitArguments, CommitArgumentsError, parse_commit_arguments
 from secret_files import get_credential_reason, read_file_head
 from shell_command import (
     CommandCall,
@@ -71,6 +73,11 @@ DYNAMIC_FILES_REASON = (
     "variable, a wildcard, or a list piped in): "
     "{command}{origin}. List each file you changed by name, never from git "
     "status output, so the commit holds only your own work."
+)
+INCLUDE_UNRECORDED_REASON = (
+    "This commit keeps lines that this session's write record does not show as its own, in "
+    "{files}: {command}{origin}. Approve only if you have seen those lines (python3 "
+    "~/.claude/scripts/session_writes.py report <file> lists them) and want them in this commit."
 )
 PUSH_REASON = "This push needs your approval because it {risks}: {command}{origin}."
 PRODUCTION_REASON = (
@@ -284,7 +291,7 @@ def decide(command: str, cwd: str | None) -> dict | None:
             + find_credential_reasons(calls, git_commands)
         )
         push_reasons = find_push_reasons(git_commands, find_git_environment_names(calls))
-        ask_reasons = push_reasons + find_production_reasons(calls)
+        ask_reasons = push_reasons + find_unrecorded_include_reasons(calls) + find_production_reasons(calls)
     except Exception as error:
         deny_reasons = []
         ask_reasons = [ANALYSIS_FAILURE_REASON.format(error=f"{type(error).__name__}: {error}")]
@@ -485,20 +492,38 @@ def find_commit_wrapper_credentials(call: CommandCall) -> list[str]:
     return describe_credentials(find_commit_wrapper_files(call.argv), call.cwd)
 
 
+def find_unrecorded_include_reasons(calls: list[CommandCall]) -> list[str]:
+    reasons: list[str] = []
+
+    for call in calls:
+        arguments = read_commit_wrapper_arguments(call.argv)
+
+        if arguments is not None and arguments.included_paths:
+            files = ", ".join(arguments.included_paths)
+            reasons.append(INCLUDE_UNRECORDED_REASON.format(files=files, command=show_command(call), origin=show_origin(call)))
+    return reasons
+
+
 def find_commit_wrapper_files(argv: list[str]) -> list[str]:
+    arguments = read_commit_wrapper_arguments(argv)
+
+    return list(arguments.files) if arguments is not None else []
+
+
+def read_commit_wrapper_arguments(argv: list[str]) -> CommitArguments | None:
     script_index = find_commit_wrapper_index(argv)
 
     if script_index < 0:
-        return []
+        return None
     else:
-        return read_commit_wrapper_files(argv[script_index + 1 :])
+        return parse_wrapper_arguments(argv[script_index + 1 :])
 
 
-def read_commit_wrapper_files(arguments: list[str]) -> list[str]:
+def parse_wrapper_arguments(arguments: list[str]) -> CommitArguments | None:
     try:
-        return list(parse_commit_arguments(arguments).files)
+        return parse_commit_arguments(arguments)
     except CommitArgumentsError:
-        return []
+        return None
 
 
 def find_commit_wrapper_index(argv: list[str]) -> int:

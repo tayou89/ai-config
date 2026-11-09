@@ -2,7 +2,8 @@
 """claude-commit.py — wrapper enforcing git-commit skill checklist.
 
 Usage:
-    claude-commit.py [--amend] [--no-stage] [--expect-head <sha>] [--reviewed] "<message>" [<file1> ...]
+    claude-commit.py [--amend] [--no-stage | --own-lines] [--expect-head <sha>] [--reviewed]
+                     [--include-unrecorded <file>]... "<message>" [<file1> ...]
 
 Validates message format (subject prefix/length, body line length/count,
 bullet count, no internal terms), runs amend check, stages exact files,
@@ -36,6 +37,14 @@ LARGE_COMMIT_LINES or more lines outside documents and lock files, the
 wrapper requires --reviewed, which the session passes only after that
 review has run.
 
+Git cannot tell which session wrote a line, so a whole-file add or a
+hand-built partial file can carry another session's uncommitted lines.
+In a Claude session whose write record exists (session_writes.py), the
+wrapper refuses staged lines that record does not show as the session's
+own, and --own-lines stages each file as the base plus only those lines.
+--include-unrecorded <file> commits that file whole after the user has
+seen its lines; the shell guard asks before such a call.
+
 Exit codes:
     0  success (commit created)
     1  git error
@@ -45,6 +54,8 @@ Exit codes:
     5  credential file or live-looking token staged
     6  HEAD moved since the index was built (nothing committed)
     7  large code change without --reviewed (nothing committed)
+    8  staged lines this session's write record does not show as its own,
+       or own lines that cannot be separated from them (nothing committed)
 """
 
 from __future__ import annotations
@@ -59,11 +70,24 @@ from typing import NoReturn
 
 from commit_arguments import (
     EXPECT_HEAD_OPTION,
+    INCLUDE_UNRECORDED_OPTION,
+    OWN_LINES_OPTION,
     CommitArguments,
     CommitArgumentsError,
     parse_commit_arguments,
 )
+from own_lines import FileHistory, OwnContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
+from session_writes import (
+    SessionWritesError,
+    decode_content,
+    has_record,
+    is_line_tracked,
+    is_whole_file_own,
+    load_file_history,
+    read_session_id,
+    store_text,
+)
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 HEAD_REVISION = "HEAD"
@@ -93,6 +117,11 @@ EXIT_USAGE = 4
 EXIT_CREDENTIAL_FILE = 5
 EXIT_HEAD_MOVED = 6
 EXIT_REVIEW_MISSING = 7
+EXIT_FOREIGN_LINES = 8
+SEQUENCER_STATE_FILES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+REGULAR_FILE_MODE = "100644"
+EXECUTABLE_FILE_MODE = "100755"
+MAX_SHOWN_FOREIGN_LINES = 12
 
 
 def fail(message: str, code: int) -> NoReturn:
@@ -181,10 +210,14 @@ def print_header() -> None:
 def stage_files(files: Sequence[str]) -> None:
     print("=== Staging files ===")
     for path in files:
-        result = run_git(["add", "-A", "--", path])
-        if result.returncode != 0:
-            fail(f"FAIL: git add failed for {path}", EXIT_GIT_ERROR)
-        print(f"  + {path}")
+        stage_file(path)
+
+
+def stage_file(path: str) -> None:
+    result = run_git(["add", "-A", "--", path])
+    if result.returncode != 0:
+        fail(f"FAIL: git add failed for {path}", EXIT_GIT_ERROR)
+    print(f"  + {path}")
 
 
 def verify_staging(expected_files: Sequence[str]) -> None:
@@ -444,6 +477,178 @@ def is_uncounted_path(path: str) -> bool:
     return name in UNCOUNTED_NAMES or name.lower().endswith(UNCOUNTED_SUFFIXES)
 
 
+def read_repository_root() -> str:
+    return run_git(["rev-parse", "--show-toplevel"], capture_output=True).stdout.strip()
+
+
+def read_base_text(expected_head: str | None, path: str) -> str:
+    """Base content as text that keeps its line endings and bytes, matching session_writes."""
+    base_args = ["git", "cat-file", "blob", f"{expected_head}:{path}"]
+    base_proc = subprocess.run(base_args, capture_output=True, check=False) if expected_head else None
+
+    return decode_content(base_proc.stdout) if base_proc is not None and base_proc.returncode == 0 else ""
+
+
+def read_base_blob(expected_head: str | None, path: str) -> str | None:
+    return read_revision(f"{expected_head}:{path}") if expected_head else None
+
+
+def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnContent | None:
+    history = read_file_history(session_id, root, path)
+
+    if history is not None:
+        return build_own_content(base, history)
+    else:
+        return None
+
+
+def read_file_history(session_id: str, root: str, path: str) -> FileHistory | None:
+    try:
+        return load_file_history(session_id, root, path)
+    except SessionWritesError as error:
+        fail(
+            f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart.\n"
+            f"Resolve: leave it out, or, if the user confirms its changes belong in this commit, add {INCLUDE_UNRECORDED_OPTION} {path}.",
+            EXIT_FOREIGN_LINES,
+        )
+
+
+def read_index_mode(root: str, path: str) -> str:
+    entry = run_git(["ls-files", "-s", "--", path], capture_output=True).stdout.split()
+
+    if entry:
+        return entry[0]
+    else:
+        return EXECUTABLE_FILE_MODE if os.access(os.path.join(root, path), os.X_OK) else REGULAR_FILE_MODE
+
+
+def stage_changes(arguments: CommitArguments, expected_head: str | None) -> None:
+    session_id = read_session_id()
+
+    if arguments.no_stage:
+        print("=== Staging skipped (--no-stage) ===")
+    elif arguments.own_lines and session_id is not None and has_record(session_id):
+        stage_own_lines(session_id, arguments.files, arguments.included_paths, expected_head)
+    elif arguments.own_lines:
+        fail(
+            f"FAIL: {OWN_LINES_OPTION} needs this session's write record, which exists only in sessions started after the record hook was installed.\n"
+            f"Resolve: commit without {OWN_LINES_OPTION}; for a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, stage it with `git hash-object -w` and `git update-index --cacheinfo`, and run with --no-stage.",
+            EXIT_USAGE,
+        )
+    else:
+        stage_files(arguments.files)
+    print("=== Staged changes ===")
+    run_git(["diff", "--cached", "--stat"])
+
+
+def stage_own_lines(session_id: str, files: Sequence[str], included: Sequence[str], expected_head: str | None) -> None:
+    root = read_repository_root()
+
+    print("=== Staging own lines ===")
+    for path in files:
+        if path in included or not is_line_tracked(root, path):
+            stage_file(path)
+        else:
+            stage_own_content(session_id, root, path, read_base_text(expected_head, path))
+
+
+def stage_own_content(session_id: str, root: str, path: str, base: str) -> None:
+    own = read_own_content(session_id, root, path, base)
+
+    if own is None:
+        fail(make_unrecorded_message(path), EXIT_FOREIGN_LINES)
+    elif own.entangled:
+        fail(make_entangled_message(path, own.entangled), EXIT_FOREIGN_LINES)
+    elif own.text == "" and not os.path.exists(os.path.join(root, path)):
+        run_git(["update-index", "--force-remove", "--", path])
+        print(f"  - {path} (removed)")
+    else:
+        cacheinfo = f"{read_index_mode(root, path)},{store_text(root, own.text)},{path}"
+        result = run_git(["update-index", "--add", "--cacheinfo", cacheinfo])
+
+        if result.returncode == 0:
+            print(f"  + {path} (own lines)")
+        else:
+            fail(f"FAIL: git update-index failed for {path}", EXIT_GIT_ERROR)
+
+
+def find_own_lines_skip_reason() -> str | None:
+    """Why the own-lines check does not apply to this commit, or None when it does."""
+    session_id = read_session_id()
+    git_directory = run_git(["rev-parse", "--git-dir"], capture_output=True).stdout.strip()
+
+    if session_id is None:
+        return "not checked (not a Claude session)"
+    elif not has_record(session_id):
+        return "not checked (no write record: the session started before the record hook)"
+    elif any(os.path.exists(os.path.join(git_directory, name)) for name in SEQUENCER_STATE_FILES):
+        return "not checked (merge in progress)"
+    else:
+        return None
+
+
+def check_staged_lines(included: Sequence[str], expected_head: str | None) -> None:
+    session_id = read_session_id() or ""
+    root = read_repository_root()
+    staged_output = run_git(["diff", "--cached", "--name-only", "-z", "--no-renames"], capture_output=True).stdout
+    staged_paths = [path for path in staged_output.split("\0") if path]
+    problems = [describe_foreign_lines(session_id, root, path, expected_head) for path in staged_paths if path not in included]
+    shown = [problem for problem in problems if problem]
+
+    if shown:
+        resolve = f"Resolve: rerun with {OWN_LINES_OPTION} to stage only your lines, or, if the user confirms the listed lines belong in this commit, add {INCLUDE_UNRECORDED_OPTION} <file>."
+        fail("\n".join([*shown, resolve]), EXIT_FOREIGN_LINES)
+
+
+def describe_foreign_lines(session_id: str, root: str, path: str, expected_head: str | None) -> str | None:
+    staged = read_staged_content(path)
+
+    if staged is None or not is_line_tracked(root, path) or not is_utf8(staged):
+        return describe_whole_file(session_id, root, path, expected_head)
+    else:
+        base = read_base_text(expected_head, path)
+        own = read_own_content(session_id, root, path, base)
+        foreign = list_foreign_lines(base, decode_content(staged), own.text if own is not None else base)
+        entangled = own.entangled if own is not None else ()
+        shown = [f"  {line.kind.value} {line.line_number}: {line.text}" for line in foreign[:MAX_SHOWN_FOREIGN_LINES]]
+        more = [f"  ... and {len(foreign) - MAX_SHOWN_FOREIGN_LINES} more"] if len(foreign) > MAX_SHOWN_FOREIGN_LINES else []
+        header = f"FAIL: {path} has {len(foreign)} staged lines this session's write record does not show as its own (another session's, a person's, or a command the record did not see):"
+        foreign_message = "\n".join([header, *shown, *more]) if foreign else None
+
+        return make_entangled_message(path, entangled) if entangled else foreign_message
+
+
+def describe_whole_file(session_id: str, root: str, path: str, expected_head: str | None) -> str | None:
+    if is_whole_file_own(session_id, root, path, read_base_blob(expected_head, path)):
+        return None
+    else:
+        return f"FAIL: {path} is binary, large, or removed, so it is committed whole, and its changes are not all this session's recorded writes."
+
+
+def make_unrecorded_message(path: str) -> str:
+    return f"FAIL: this session has no recorded writes to {path}, so none of its changes are known to be yours.\nResolve: leave it out, or, if the user confirms its changes belong in this commit, add {INCLUDE_UNRECORDED_OPTION} {path}."
+
+
+def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
+    shown = [f"  ! {line.rstrip()}" for line in entangled[:MAX_SHOWN_FOREIGN_LINES]]
+    lines = [
+        f"FAIL: in {path}, {len(entangled)} of your lines change or split lines another session has not committed, so they cannot be committed apart:",
+        *shown,
+        f"Resolve: ask the user; the other session can commit first, or, if the user agrees, commit both with {INCLUDE_UNRECORDED_OPTION} {path}.",
+    ]
+
+    return "\n".join(lines)
+
+
+def is_utf8(content: bytes) -> bool:
+    try:
+        content.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    else:
+        return True
+
+
 def print_verification(
     subject_length: int,
     body_max_length: int,
@@ -451,6 +656,7 @@ def print_verification(
     bullet_count: int,
     expected_head: str | None,
     code_lines: int,
+    own_lines_status: str,
 ) -> None:
     print("=== Verification ===")
     print(f"| {'Item':<30} | Status")
@@ -466,6 +672,7 @@ def print_verification(
     print(f"| {'No live-looking tokens':<30} | OK")
     print(f"| {'Large change reviewed':<30} | OK ({code_lines} code lines)")
     print(f"| {'HEAD is the index base':<30} | OK ({shorten(expected_head)})")
+    print(f"| {'Only own lines staged':<30} | {own_lines_status}")
 
 
 def do_commit(message: str, amend: bool) -> None:
@@ -503,20 +710,17 @@ def main(argv: list[str]) -> None:
     check_head_unchanged(expected_head, files)
     print("=== Recent commits ===")
     run_git(["log", "--oneline", "-3"])
-    if arguments.no_stage:
-        print("=== Staging skipped (--no-stage) ===")
-        run_git(["diff", "--cached", "--stat"])
-    else:
-        stage_files(files)
-        print("=== Staged changes ===")
-        run_git(["diff", "--cached", "--stat"])
+    stage_changes(arguments, expected_head)
     if files:
         verify_staging(files)
     check_credential_files()
     check_secret_tokens()
+    own_lines_skip_reason = find_own_lines_skip_reason()
+    if own_lines_skip_reason is None:
+        check_staged_lines(arguments.included_paths, expected_head)
     code_lines = count_code_lines()
     check_large_commit_reviewed(code_lines, arguments.reviewed)
-    print_verification(*metrics, expected_head, code_lines)
+    print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK")
     print("=== Committing ===")
     do_commit(arguments.message, arguments.amend)
     check_commit_base(read_new_head(), expected_head, arguments.amend, files)

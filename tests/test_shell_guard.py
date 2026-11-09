@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tests for scripts/shell-guard-hook.py, secret_files.py, commit_arguments.py and claude-commit.py.
+"""Tests for scripts/shell-guard-hook.py, secret_files.py, commit_arguments.py, claude-commit.py,
+own_lines.py, session_writes.py and session-writes-hook.py.
 
 Each case feeds the hook the same JSON that Claude Code sends and checks
 its decision: deny, ask, or pass (no output). Fixture repositories and a
@@ -10,6 +11,7 @@ its actual decision as a Markdown table instead of running unittest.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import shutil
@@ -18,6 +20,7 @@ import sys
 import tempfile
 import time
 import unittest
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -101,6 +104,28 @@ fi
 exec "{real_git}" "$@"
 """
 
+EDIT_TOOL = "Edit"
+PRE_TOOL_USE = "PreToolUse"
+POST_TOOL_USE = "PostToolUse"
+POST_TOOL_USE_FAILURE = "PostToolUseFailure"
+FOREIGN_LINES_EXIT = 8
+SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
+RECORD_DIRECTORY_NAME = "session-writes"
+RECORD_HOOK = SCRIPTS_DIRECTORY / "session-writes-hook.py"
+SESSION_WRITES_SCRIPT = SCRIPTS_DIRECTORY / "session_writes.py"
+OWN_LINES_MODULE = SCRIPTS_DIRECTORY / "own_lines.py"
+OWN_SESSION = "session-own"
+OTHER_SESSION = "session-other"
+LOG_FILE = "log.md"
+OTHER_FILE = "notes.md"
+BINARY_FILE = "image.bin"
+BINARY_TEXT = "\0\1binary"
+MERGE_MESSAGE = "Merge: bring in the other branch\n\n- one\n- two\n- three"
+CRLF_FILE = "windows.txt"
+NEW_FOLDER_FILE = "new/page.md"
+BROKEN_INDEX_TEXT = "not an index"
+
 
 @dataclass
 class GuardCase:
@@ -140,6 +165,10 @@ CASES = [
     GuardCase("commit", 'files=$(git status --porcelain | cut -c4-) && ~/.claude/scripts/claude-commit.py "Fix: x" $files', DENY),
     GuardCase("commit", '~/.claude/scripts/claude-commit.py --expect-head $(git rev-parse HEAD) "Fix: x" a.txt', PASS),
     GuardCase("commit", '~/.claude/scripts/claude-commit.py "Fix: x" *.py', DENY),
+    GuardCase("own lines", "python3 ~/.claude/scripts/claude-commit.py --own-lines --expect-head 0123abc 'Fix: x' a.txt", PASS),
+    GuardCase("own lines", "python3 ~/.claude/scripts/claude-commit.py --include-unrecorded a.txt 'Fix: x' a.txt", ASK),
+    GuardCase("own lines", "python3 ~/.claude/scripts/claude-commit.py --own-lines --include-unrecorded .env 'Fix: x' .env", DENY, "secrets"),
+    GuardCase("own lines", "python3 ~/.claude/scripts/claude-commit.py --include-unrecorded key.pem 'Fix: x' key.pem a.txt", DENY, "secrets"),
     GuardCase("commit", 'git ls-files -m | xargs ~/.claude/scripts/claude-commit.py "Fix: x"', DENY),
     GuardCase("commit", "git log --grep 'git commit'", PASS),
     GuardCase("commit", 'echo "git commit -m x"', PASS),
@@ -336,6 +365,7 @@ class GuardFixture:
     def environment(self) -> dict[str, str]:
         environment = dict(os.environ)
 
+        environment.pop(SESSION_VARIABLE, None)
         environment.update({
             "CLAUDE_CONFIG_DIR": str(self.config_directory),
             "GIT_CONFIG_GLOBAL": str(self.git_config),
@@ -477,6 +507,7 @@ class WrapperHeadFixture:
         environment = dict(os.environ)
 
         environment.pop(PRIVATE_INDEX_VARIABLE, None)
+        environment.pop(SESSION_VARIABLE, None)
         environment.update({"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1"})
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
@@ -684,6 +715,507 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+
+
+@dataclass(frozen=True)
+class OwnLinesCase:
+    name: str
+    first_before: str
+    writes: tuple[tuple[str, str], ...]
+    working_tree: str
+    base: str
+    expected: str
+    entangled: tuple[str, ...] = ()
+    others_in_last_window: str = ""
+
+
+LOG_BASE = "# log\n\n## base\ntext\n"
+MINE_1 = "\n## mine 1\nmy text\n"
+THEIRS = "\n## theirs\ntheir text\n"
+MINE_2 = "\n## mine 2\nmore\n"
+OWN_LINES_CASES = (
+    OwnLinesCase(
+        "another session's section between two of mine",
+        LOG_BASE,
+        ((LOG_BASE, LOG_BASE + MINE_1), (LOG_BASE + MINE_1 + THEIRS, LOG_BASE + MINE_1 + THEIRS + MINE_2)),
+        LOG_BASE + MINE_1 + THEIRS + MINE_2,
+        LOG_BASE,
+        LOG_BASE + MINE_1 + MINE_2,
+    ),
+    OwnLinesCase(
+        "that section committed before mine",
+        LOG_BASE,
+        ((LOG_BASE, LOG_BASE + MINE_1), (LOG_BASE + MINE_1 + THEIRS, LOG_BASE + MINE_1 + THEIRS + MINE_2)),
+        LOG_BASE + MINE_1 + THEIRS + MINE_2,
+        LOG_BASE + THEIRS,
+        LOG_BASE + MINE_1 + THEIRS + MINE_2,
+    ),
+    OwnLinesCase(
+        "another session's later edit of one line",
+        "a\nrow old\nb\nstep old\nc\n",
+        (("a\nrow old\nb\nstep old\nc\n", "a\nrow new\nb\nstep old\nc\n"),),
+        "a\nrow new\nb\nstep new\nc\n",
+        "a\nrow old\nb\nstep old\nc\n",
+        "a\nrow new\nb\nstep old\nc\n",
+    ),
+    OwnLinesCase(
+        "their deletion restored",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", "a\nb\nc\nmine\n"),),
+        "a\nc\nmine\n",
+        "a\nb\nc\n",
+        "a\nb\nc\nmine\n",
+    ),
+    OwnLinesCase(
+        "my deletion kept, their insert dropped",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", "a\nc\n"), ("a\nc\ntheirs\n", "a\nc\ntheirs\nmine\n")),
+        "a\nc\ntheirs\nmine\n",
+        "a\nb\nc\n",
+        "a\nc\nmine\n",
+    ),
+    OwnLinesCase(
+        "dirty before my first write",
+        "a\ntheirs\nb\n",
+        (("a\ntheirs\nb\n", "a\ntheirs\nb\nmine\n"),),
+        "a\ntheirs\nb\nmine\n",
+        "a\nb\n",
+        "a\nb\nmine\n",
+    ),
+    OwnLinesCase(
+        "my committed line not repeated",
+        "a\nb\n",
+        (("a\nb\n", "a\nm1\nb\n"), ("a\nm1\nb\n", "a\nm1\nb\n\nm2\n")),
+        "a\nm1\nb\n\nm2\n",
+        "a\nm1\nb\n",
+        "a\nm1\nb\n\nm2\n",
+    ),
+    OwnLinesCase(
+        "my line between base lines",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", "a\nmine\nb\nc\n"),),
+        "a\nmine\nb\ntheirs\nc\n",
+        "a\nb\nc\n",
+        "a\nmine\nb\nc\n",
+    ),
+    OwnLinesCase(
+        "my deletion of a line they committed",
+        "a\nb\n",
+        (("a\nx\nb\n", "a\nb\nmine\n"),),
+        "a\nb\nmine\n",
+        "a\nx\nb\n",
+        "a\nb\nmine\n",
+    ),
+    OwnLinesCase(
+        "their deletion beside my insert",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", "a\nm\nb\nc\n"),),
+        "a\nm\nc\n",
+        "a\nb\nc\n",
+        "a\nm\nb\nc\n",
+    ),
+    OwnLinesCase(
+        "overlapping own commands",
+        "a\n",
+        (("a\n", "a\nfrom-a\n"), ("a\n", "a\nfrom-a\nfrom-b\n")),
+        "a\nfrom-a\nfrom-b\n",
+        "a\n",
+        "a\nfrom-a\nfrom-b\n",
+    ),
+    OwnLinesCase("new file", "", (("", "x\ny\n"),), "x\ny\n", "", "x\ny\n"),
+    OwnLinesCase(
+        "their line written during my command",
+        "a\n",
+        (("a\n", "a\nmine\ntheirs\n"),),
+        "a\nmine\ntheirs\n",
+        "a\n",
+        "a\nmine\n",
+        others_in_last_window="theirs\n",
+    ),
+    OwnLinesCase(
+        "my line inside their block",
+        "a\n",
+        (("a\nX1\nX2\n", "a\nX1\nmine\nX2\n"),),
+        "a\nX1\nmine\nX2\n",
+        "a\n",
+        "a\nmine\n",
+        entangled=("mine\n",),
+    ),
+    OwnLinesCase(
+        "my edit of their uncommitted line",
+        "a\nL\n",
+        (("a\nL2\n", "a\nL3\n"),),
+        "a\nL3\n",
+        "a\nL\n",
+        "a\nL\nL3\n",
+        entangled=("L3\n",),
+    ),
+    OwnLinesCase(
+        "my edit of a line dirty before my first write",
+        "a\nX\n",
+        (("a\nX\n", "a\nX2\n"),),
+        "a\nX2\n",
+        "a\n",
+        "a\nX2\n",
+        entangled=("X2\n",),
+    ),
+    OwnLinesCase("my edit of a committed line", "a\nL\n", (("a\nL\n", "a\nL2\n"),), "a\nL2\n", "a\nL\n", "a\nL2\n"),
+    OwnLinesCase(
+        "three sessions taking turns appending",
+        "a\n",
+        (("a\n", "a\nm1\n"), ("a\nm1\nt1\n", "a\nm1\nt1\nm2\n"), ("a\nm1\nt1\nm2\nt2\n", "a\nm1\nt1\nm2\nt2\nm3\n")),
+        "a\nm1\nt1\nm2\nt2\nm3\n",
+        "a\n",
+        "a\nm1\nm2\nm3\n",
+    ),
+)
+OWN_LINES_SPECIFICATION = importlib.util.spec_from_file_location("own_lines", OWN_LINES_MODULE)
+own_lines = importlib.util.module_from_spec(OWN_LINES_SPECIFICATION)
+sys.modules[OWN_LINES_SPECIFICATION.name] = own_lines
+OWN_LINES_SPECIFICATION.loader.exec_module(own_lines)
+
+
+def make_history(case: OwnLinesCase) -> own_lines.FileHistory:
+    last = len(case.writes) - 1
+    writes = tuple(
+        own_lines.OwnWrite(
+            before, after, Counter([case.others_in_last_window] if index == last and case.others_in_last_window else [])
+        )
+        for index, (before, after) in enumerate(case.writes)
+    )
+
+    return own_lines.FileHistory(case.first_before, writes, case.working_tree)
+
+
+class OwnLinesTest(unittest.TestCase):
+    def test_cases(self) -> None:
+        for case in OWN_LINES_CASES:
+            with self.subTest(case=case.name):
+                content = own_lines.build_own_content(case.base, make_history(case))
+                self.assertEqual(content.text, case.expected)
+                self.assertEqual(content.entangled, case.entangled)
+
+    def test_foreign_lines_of_a_whole_file(self) -> None:
+        case = OWN_LINES_CASES[0]
+        own = own_lines.build_own_content(case.base, make_history(case)).text
+        foreign = own_lines.list_foreign_lines(case.base, case.working_tree, own)
+
+        self.assertEqual([line.text for line in foreign if line.text], ["## theirs", "their text"])
+        self.assertEqual({line.kind for line in foreign}, {own_lines.ChangeKind.ADDED})
+        self.assertEqual(own_lines.list_foreign_lines(case.base, own, own), [])
+        self.assertEqual(own_lines.list_foreign_lines(case.base, case.base + MINE_1, own), [])
+
+
+class SessionWritesFixture:
+    def __init__(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(os.path.realpath(self.directory.name))
+        self.repository = self.root / "repository"
+        self.config_directory = self.root / "config"
+        self.private_index = self.root / "private-index"
+        self.git_config = self.root / "gitconfig"
+        self.tool_uses = 0
+
+    def create(self) -> None:
+        self.git_config.write_text("[user]\n\tname = Record Test\n\temail = record@example.com\n")
+        self.repository.mkdir()
+        self.run_git("init", "-q")
+        (self.repository / LOG_FILE).write_text(LOG_BASE)
+        self.run_git("add", LOG_FILE)
+        self.run_git("commit", "-q", "-m", "Chore: seed")
+
+    def environment(self, session: str | None, index: Path | None = None) -> dict[str, str]:
+        environment = {
+            name: value for name, value in os.environ.items() if name not in (SESSION_VARIABLE, PRIVATE_INDEX_VARIABLE)
+        }
+
+        environment.update(
+            {
+                CONFIG_DIRECTORY_VARIABLE: str(self.config_directory),
+                "GIT_CONFIG_GLOBAL": str(self.git_config),
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+        )
+        if session is not None:
+            environment[SESSION_VARIABLE] = session
+        if index is not None:
+            environment[PRIVATE_INDEX_VARIABLE] = str(index)
+        return environment
+
+    def run_git(self, *arguments: str, index: Path | None = None) -> str:
+        result = subprocess.run(
+            ["git", *arguments],
+            env=self.environment(None, index),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        return result.stdout.strip()
+
+    def run_record_hook(
+        self,
+        session: str,
+        event: str,
+        tool_use: str,
+        tool_input: dict,
+        response: dict | None = None,
+        broken_index: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        tool = EDIT_TOOL if "file_path" in tool_input else BASH_TOOL
+        payload = {
+            "session_id": session,
+            "hook_event_name": event,
+            "tool_use_id": tool_use,
+            "tool_name": tool,
+            "tool_input": tool_input,
+            "cwd": str(self.repository),
+        }
+
+        if response is not None:
+            payload["tool_response"] = response
+        return subprocess.run(
+            [sys.executable, str(RECORD_HOOK)],
+            input=json.dumps(payload),
+            env=self.environment(None, broken_index),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def write(self, session: str, path: str, text: str, mode: str = "a") -> None:
+        self.tool_uses += 1
+        tool_use = f"call-{self.tool_uses}"
+        command = {"command": f"python3 write.py {path}"}
+
+        self.run_record_hook(session, PRE_TOOL_USE, tool_use, command)
+        with (self.repository / path).open(mode, newline="") as file:
+            file.write(text)
+        self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
+
+    def run_wrapper(
+        self, *arguments: str, session: str | None = OWN_SESSION, index: Path | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(COMMIT_WRAPPER), *arguments],
+            env=self.environment(session, index),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def run_own_lines_commit(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        base = self.run_git("rev-parse", "HEAD")
+
+        self.run_git("read-tree", base, index=self.private_index)
+        return self.run_wrapper("--expect-head", base, *arguments, index=self.private_index)
+
+    def read_committed_bytes(self, path: str) -> bytes:
+        result = subprocess.run(
+            ["git", "cat-file", "blob", f"HEAD:{path}"],
+            env=self.environment(None),
+            cwd=self.repository,
+            capture_output=True,
+            check=True,
+        )
+
+        return result.stdout
+
+    def read_events(self, session: str) -> list[dict]:
+        record = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}.jsonl"
+
+        return [json.loads(line) for line in record.read_text().splitlines()]
+
+
+class SessionWritesTest(unittest.TestCase):
+    fixture: SessionWritesFixture
+
+    def setUp(self) -> None:
+        self.fixture = SessionWritesFixture()
+        self.fixture.create()
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def write_mixed_log(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, THEIRS)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_2)
+
+    def test_hook_records_commands_and_edits(self) -> None:
+        log = self.fixture.repository / LOG_FILE
+        edit_input = {"file_path": str(log)}
+
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        original = log.read_text()
+        pre = self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "edit-1", edit_input)
+        log.write_text(original.replace("my text", "my edited text"))
+        post = self.fixture.run_record_hook(
+            OWN_SESSION, POST_TOOL_USE, "edit-1", edit_input, {"originalFile": original}
+        )
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "fail-1", {"command": "false"})
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE_FAILURE, "fail-1", {"command": "false"})
+        self.assertEqual([event["tool"] for event in self.fixture.read_events(OWN_SESSION)], [BASH_TOOL, EDIT_TOOL])
+        self.assertEqual((pre.returncode, pre.stdout, post.returncode, post.stdout), (0, "", 0, ""))
+
+    def test_hook_never_blocks_on_bad_input(self) -> None:
+        result = subprocess.run(
+            [sys.executable, str(RECORD_HOOK)],
+            input="not json",
+            env=self.fixture.environment(None),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_whole_mixed_file_is_refused(self) -> None:
+        self.write_mixed_log()
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        refused = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(refused.returncode, FOREIGN_LINES_EXIT, refused.stderr)
+        self.assertIn("## theirs", refused.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_own_lines_commits_only_own_lines(self) -> None:
+        self.write_mixed_log()
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("show", f"HEAD:{LOG_FILE}") + "\n", LOG_BASE + MINE_1 + MINE_2)
+        self.assertIn(THEIRS, (self.fixture.repository / LOG_FILE).read_text())
+        self.assertIn("Only own lines staged", result.stdout)
+
+    def test_report_names_the_lines_left_out(self) -> None:
+        self.write_mixed_log()
+        report = subprocess.run(
+            [sys.executable, str(SESSION_WRITES_SCRIPT), "report", LOG_FILE],
+            env=self.fixture.environment(OWN_SESSION),
+            cwd=self.fixture.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertIn("## theirs", report.stdout)
+        self.assertNotIn("## mine", report.stdout)
+
+    def test_unrecorded_file_needs_include(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.write(OTHER_SESSION, OTHER_FILE, "theirs only\n", "w")
+        refused = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
+        included = self.fixture.run_own_lines_commit(
+            "--own-lines", "--include-unrecorded", OTHER_FILE, HEAD_COMMIT_MESSAGE, OTHER_FILE
+        )
+
+        self.assertEqual(refused.returncode, FOREIGN_LINES_EXIT, refused.stderr)
+        self.assertIn("no recorded writes", refused.stderr)
+        self.assertEqual(included.returncode, 0, included.stdout + included.stderr)
+
+    def test_check_is_skipped_without_a_record(self) -> None:
+        (self.fixture.repository / OTHER_FILE).write_text("typed by a person\n")
+        outside = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, OTHER_FILE)
+
+        self.assertEqual(outside.returncode, 0, outside.stdout + outside.stderr)
+        self.assertIn("not checked (no write record", outside.stdout)
+
+    def test_check_is_skipped_outside_a_session(self) -> None:
+        (self.fixture.repository / OTHER_FILE).write_text("typed by a person\n")
+        base = self.fixture.run_git("rev-parse", "HEAD")
+        self.fixture.run_git("read-tree", base, index=self.fixture.private_index)
+        outside = self.fixture.run_wrapper(
+            "--expect-head", base, HEAD_COMMIT_MESSAGE, OTHER_FILE, session=None, index=self.fixture.private_index
+        )
+
+        self.assertEqual(outside.returncode, 0, outside.stdout + outside.stderr)
+        self.assertIn("not checked (not a Claude session)", outside.stdout)
+
+    def test_binary_file_commits_whole_only_when_all_own(self) -> None:
+        self.fixture.write(OWN_SESSION, BINARY_FILE, BINARY_TEXT, "w")
+        own = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, BINARY_FILE)
+        self.fixture.write(OTHER_SESSION, BINARY_FILE, BINARY_TEXT)
+        mixed = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, BINARY_FILE)
+
+        self.assertEqual(own.returncode, 0, own.stdout + own.stderr)
+        self.assertEqual(mixed.returncode, FOREIGN_LINES_EXIT, mixed.stdout + mixed.stderr)
+
+    def test_entangled_lines_are_refused(self) -> None:
+        log = self.fixture.repository / LOG_FILE
+
+        self.fixture.write(OTHER_SESSION, LOG_FILE, "- their first\n- their second\n")
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "split-1", {"command": "python3 split.py"})
+        log.write_text(log.read_text().replace("- their first\n", "- their first\n- mine inside\n"))
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "split-1", {"command": "python3 split.py"}, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stderr)
+        self.assertIn("cannot be committed apart", result.stderr)
+
+    def test_merge_in_progress_is_not_checked(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        (self.fixture.repository / OTHER_FILE).write_text("from the merged branch\n")
+        self.fixture.run_git("add", OTHER_FILE)
+        tree = self.fixture.run_git("write-tree")
+        merged = self.fixture.run_git("commit-tree", tree, "-m", "Chore: other branch")
+        (self.fixture.repository / ".git" / "MERGE_HEAD").write_text(merged + "\n")
+        result = self.fixture.run_wrapper("--no-stage", MERGE_MESSAGE, OTHER_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("not checked (merge in progress)", result.stdout)
+
+    def test_failed_snapshot_records_nothing(self) -> None:
+        broken_index = self.fixture.root / "broken-index"
+        command = {"command": "python3 write.py log.md"}
+
+        broken_index.write_text(BROKEN_INDEX_TEXT)
+        self.fixture.write(OWN_SESSION, OTHER_FILE, "mine\n", "w")
+        self.fixture.write(OTHER_SESSION, LOG_FILE, THEIRS)
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "broken-1", command, broken_index=broken_index)
+        with (self.fixture.repository / LOG_FILE).open("a") as file:
+            file.write(MINE_1)
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "broken-1", command, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertNotIn(b"their text", self.fixture.read_committed_bytes(LOG_FILE))
+
+    def test_line_endings_are_kept(self) -> None:
+        (self.fixture.repository / CRLF_FILE).write_bytes(b"a\r\nb\r\n")
+        self.fixture.run_git("add", CRLF_FILE)
+        self.fixture.run_git("commit", "-q", "-m", "Chore: add a file with CRLF line endings")
+        self.fixture.write(OWN_SESSION, CRLF_FILE, "mine\r\n")
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, CRLF_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(CRLF_FILE), b"a\r\nb\r\nmine\r\n")
+
+    def test_new_file_in_new_folder_is_recorded(self) -> None:
+        path = self.fixture.repository / NEW_FOLDER_FILE
+        write_input = {"file_path": str(path)}
+
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "write-1", write_input)
+        path.parent.mkdir()
+        path.write_text("hello\n")
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "write-1", write_input, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, NEW_FOLDER_FILE)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_own_lines_without_a_record_explains_the_fallback(self) -> None:
+        (self.fixture.repository / OTHER_FILE).write_text("typed by a person\n")
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
+
+        self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
+        self.assertIn("commit without --own-lines", result.stderr)
+
+    def test_option_errors(self) -> None:
+        both = self.fixture.run_wrapper("--no-stage", "--own-lines", HEAD_COMMIT_MESSAGE)
+        unlisted = self.fixture.run_wrapper("--include-unrecorded", OTHER_FILE, HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(both.returncode, USAGE_EXIT, both.stderr)
+        self.assertEqual(unlisted.returncode, USAGE_EXIT, unlisted.stderr)
 
 
 def print_table() -> None:

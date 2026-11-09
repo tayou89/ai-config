@@ -61,15 +61,15 @@ The wrapper rejects messages violating any of: type prefix, subject ≤72, line 
 
 Check on your own, in this order, and fix what fails before running the wrapper:
 
-1. **Scope:** list each file you changed by name, from your own edits, never from `git status` output; leave out other sessions' changes and other topics. The shell guard refuses a file list known only at run time.
+1. **Scope:** list each file you changed by name, from your own edits, never from `git status` output; leave out other sessions' changes and other topics. The shell guard refuses a file list known only at run time. Inside a file Git cannot tell whose lines are whose, so in a shared checkout commit with `--own-lines` (6a), which stages only the lines your session's write record shows as yours; `python3 ~/.claude/scripts/session_writes.py report <file>...` lists the lines it would leave out.
 2. **Secrets:** no `.env`, keys, or tokens. The wrapper refuses credential files and live-looking tokens on added lines.
 3. **Checks:** type, lint, and test runs pass when code changed. The shared configuration repository also runs its pre-commit check.
 4. **Message:** the rules in section 4, including those the wrapper cannot check (why rather than what, no shorthand a reader cannot decode).
 5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run.
 
-Stop and ask the user only when a check fails and cannot be fixed within the task, when your change cannot be separated from another session's edits in the same file, or when the shell guard asks. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
+Stop and ask the user only when a check fails and cannot be fixed within the task, when your change cannot be separated from another session's edits in the same file (the wrapper's exit 8 marks those lines with `!`), or when the shell guard asks. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
 
-After pushing, report each commit in one line of your closing message: short hash, subject, and file count.
+After pushing, report each commit in one line of your closing message: short hash, subject, file count, and the other sessions' lines `--own-lines` left out (file and line count), if any.
 
 ## 6. Run the Wrapper
 
@@ -124,12 +124,13 @@ The wrapper:
 5. Prints `git diff --cached --stat`
 6. Verifies no extra files staged beyond argv (with `--no-stage`, only when files are given; FAIL exit 3)
 7. Refuses a staged `.env` or credential file, or an added line holding a live-looking token, judged by `scripts/secret_files.py` (FAIL exit 5)
-8. Refuses a change of 200 or more lines outside documents and lock files without `--reviewed` (FAIL exit 7)
-9. Prints verification table
-10. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker; the repository's own pre-commit hook still runs
-11. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
+8. In a Claude session that has a write record, refuses staged lines the record does not show as the session's own, and own lines that change or split another session's uncommitted lines (FAIL exit 8); `--own-lines` stages each listed file as the base plus only the session's lines, and `--include-unrecorded <file>` commits that file whole after the shell guard has asked the user
+9. Refuses a change of 200 or more lines outside documents and lock files without `--reviewed` (FAIL exit 7)
+10. Prints verification table
+11. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker; the repository's own pre-commit hook still runs
+12. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
 
-Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed).
+Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed), `8` staged lines outside the session's write record, or own lines tangled with another session's uncommitted lines (nothing committed).
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
@@ -143,11 +144,11 @@ git rev-parse HEAD
 
 ```bash
 idx="$(mktemp)" && GIT_INDEX_FILE="$idx" git read-tree <base> &&
-  GIT_INDEX_FILE="$idx" ~/.claude/scripts/claude-commit.py --expect-head <base> "<message>" <file1> <file2>
+  GIT_INDEX_FILE="$idx" ~/.claude/scripts/claude-commit.py --expect-head <base> --own-lines "<message>" <file1> <file2>
 rm -f "$idx"; git reset -q -- <file1> <file2>
 ```
 
-`<base>` is the full sha the first command printed; with `GIT_INDEX_FILE` set, the wrapper requires `--expect-head` and the file list. For a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, put it into the private index with `git hash-object -w` and `git update-index --cacheinfo` (same `GIT_INDEX_FILE`), then run the wrapper with `--expect-head <base> --no-stage`, still listing your files.
+`<base>` is the full sha the first command printed; with `GIT_INDEX_FILE` set, the wrapper requires `--expect-head` and the file list. Git cannot tell which session wrote a line, so a hook records every file this session writes (`scripts/session-writes-hook.py`), and `--own-lines` stages each file as `<base>` plus only the lines that record shows as yours. Without it, the wrapper refuses (exit 8) a staged file that holds lines the record does not show as yours, and lists them. It also refuses your lines that change or split another session's uncommitted lines; ask the user then, since they cannot be committed apart. Add `--include-unrecorded <file>` only for lines the user typed or a command wrote outside the record; the shell guard asks the user before such a call. Keep `--no-stage` for an index that a merge or cherry-pick prepared.
 
 On exit 6 nothing was committed: another commit landed after `<base>`, and the wrapper names it and the files it shares with yours. Take the new HEAD it names as `<base>`, rebuild the private index and any partial-file content from it, show the user the staged diff again if a shared file changed, and run the wrapper again.
 

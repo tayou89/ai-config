@@ -63,6 +63,16 @@
     ],
     "PreToolUse": [
       {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/session-writes-hook.py\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
         "matcher": "Bash|Monitor|mcp__terminal__run_in_terminal",
         "hooks": [
           {
@@ -96,6 +106,30 @@
           {
             "type": "command",
             "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); ext = os.path.splitext(f)[1].lower(); ui_exts = {\".html\", \".htm\", \".css\", \".scss\", \".sass\", \".less\", \".svg\", \".vue\", \".svelte\", \".astro\", \".jsx\", \".tsx\"}; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[DESIGN REMINDER] Editing \" + ext + \" file. If this changes visual design or UI copy: (1) read ux-design and frontend-design skills if not yet loaded. (2) Follow frontend-design: plan palette, type, layout, and principles; check the plan against generic defaults; build; critique captures. Decisions the user or the project already made win over its list of generic defaults. (3) For motion and interaction, read emil-design-eng (apple-design for gesture-driven UI). (4) Use design:design-critique, design:ux-copy, and design:accessibility-review for critique, copy, and accessibility. Skill roles and the conflict order are in ux-design.\"}})) if ext in ui_exts else None'"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/session-writes-hook.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/session-writes-hook.py\"",
+            "timeout": 30
           }
         ]
       }

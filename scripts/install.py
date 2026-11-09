@@ -77,6 +77,9 @@ RUNTIME_SCRIPTS = (
     "shell_command.py",
     "secret_files.py",
     "commit_arguments.py",
+    "own_lines.py",
+    "session_writes.py",
+    "session-writes-hook.py",
 )
 MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py")
 HOOKS_PATH_KEY = "core.hooksPath"
