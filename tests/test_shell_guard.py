@@ -74,6 +74,16 @@ HEAD_COMMIT_MESSAGE = "Feat: commit this session's change\n\n- one\n- two\n- thr
 STAGING_MISMATCH_EXIT = 3
 USAGE_EXIT = 4
 HEAD_MOVED_EXIT = 6
+VALIDATION_EXIT = 2
+INTERNAL_TERM_FAILURE = "FAIL: internal terms"
+SECTION_NUMBER_MESSAGES = (
+    "Chore: record the review in HANDOFF 0-16\n\n- one\n- two\n- three",
+    "Chore: record the review\n\n- HANDOFF.md 0-14에 기록\n- two\n- three",
+)
+RANGE_AND_STANDARD_MESSAGE = (
+    "Fix: keep 3-5 bullets per message\n\n"
+    "- Country codes follow ISO 3166-1\n- Dated 2026-11-09\n- Step-by-step"
+)
 SHIM_TEXT = """#!/bin/sh
 # Lands another commit after the wrapper's HEAD check and before git commit reads HEAD.
 if [ "$1" = commit ] && [ ! -e "{marker}" ]; then
@@ -347,6 +357,22 @@ class ShellGuardHookTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("No credential files", result.stdout)
+
+    def test_wrapper_refuses_document_section_number(self) -> None:
+        location = self.fixture.locations["plain"]
+
+        for message in SECTION_NUMBER_MESSAGES:
+            with self.subTest(message=message):
+                result = self.fixture.run_wrapper(location, "--no-stage", message)
+                self.assertEqual(result.returncode, VALIDATION_EXIT, result.stderr)
+                self.assertIn(INTERNAL_TERM_FAILURE, result.stderr)
+
+    def test_wrapper_allows_ranges_dates_and_standards(self) -> None:
+        location = self.fixture.locations["plain"]
+        result = self.fixture.run_wrapper(location, "--no-stage", RANGE_AND_STANDARD_MESSAGE)
+
+        self.assertNotEqual(result.returncode, VALIDATION_EXIT, result.stderr)
+        self.assertNotIn(INTERNAL_TERM_FAILURE, result.stderr)
 
 
 class WrapperHeadFixture:

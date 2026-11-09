@@ -51,7 +51,7 @@ This applies regardless of language or build system (any version manifest, any l
 
 **Subject**: English, start with verb (add, fix, update, remove), no period, specific, **≤72 chars** (50 recommended).
 
-**Body**: English `- ` bullets after blank line. First bullet carries purpose (*why* + *what*). **3-5 bullets, ≤8 non-blank body lines, ≤72 chars/line**. Focus on context not visible from diff — delete bullets that restate the diff. **No internal terms** (Step N, Phase N, Pattern N).
+**Body**: English `- ` bullets after blank line. First bullet carries purpose (*why* + *what*). **3-5 bullets, ≤8 non-blank body lines, ≤72 chars/line**. Focus on context not visible from diff — delete bullets that restate the diff. **No internal terms**: write subject and body for a reader who has not seen the project's own documents, saying why the change was made rather than summarizing the changed document, and leave out internal shorthand (Step N, Phase N, Pattern N, document section numbers such as `0-16`, option or draft letters, session or tool nicknames) and the work's date or author, which git already records; the wrapper catches only the Step/Phase/Pattern forms and an upper-case document name followed by a section number (`HANDOFF 0-16`).
 
 The wrapper rejects messages violating any of: type prefix, subject ≤72, line length ≤72, body lines 1-8, bullets 3-5, internal-term ban.
 

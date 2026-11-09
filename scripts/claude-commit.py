@@ -64,6 +64,7 @@ SHORT_SHA_LENGTH = 7
 OBJECT_NAME_RE = re.compile(r"[0-9a-f]{7,64}")
 VALID_PREFIXES = ("Feat", "Fix", "Refactor", "Chore", "Merge")
 INTERNAL_TERM_RE = re.compile(r"\b(step|phase|pattern)\s+[0-9]+\b", re.IGNORECASE)
+DOCUMENT_SECTION_RE = re.compile(r"(?<![A-Za-z0-9_])[A-Z][A-Z_]{2,}(?:\.md)?\s+[0-9]{1,2}(?:-[0-9]{1,3})+(?![0-9])")
 MAX_SUBJECT_LENGTH = 72
 MAX_BODY_LINE_LENGTH = 72
 MAX_BODY_NONBLANK_LINES = 8
@@ -85,6 +86,10 @@ def fail(message: str, code: int) -> NoReturn:
 
 def run_git(args: Sequence[str], capture_output: bool = False) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], check=False, text=True, capture_output=capture_output)
+
+
+def contains_internal_term(text: str) -> bool:
+    return bool(INTERNAL_TERM_RE.search(text) or DOCUMENT_SECTION_RE.search(text))
 
 
 def validate_message(message: str) -> tuple[int, int, int, int]:
@@ -137,14 +142,14 @@ def validate_message(message: str) -> tuple[int, int, int, int]:
         )
     if bullet_count > MAX_BULLETS:
         fail(f"FAIL: {bullet_count} bullets, max {MAX_BULLETS}", EXIT_VALIDATION)
-    if INTERNAL_TERM_RE.search(message):
+    if contains_internal_term(message):
         offenders = [
             f"{i + 1}: {line}"
             for i, line in enumerate(lines)
-            if INTERNAL_TERM_RE.search(line)
+            if contains_internal_term(line)
         ]
         fail(
-            "FAIL: internal terms (Step N / Phase N / Pattern N) detected\n"
+            "FAIL: internal terms (Step N / Phase N / Pattern N, or a document section number such as HANDOFF 0-16) detected\n"
             + "\n".join(offenders),
             EXIT_VALIDATION,
         )
