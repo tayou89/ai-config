@@ -25,6 +25,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from commit_arguments import CommitArgumentsError, parse_commit_arguments
 from secret_files import get_credential_reason, read_file_head
 from shell_command import (
     CommandCall,
@@ -74,7 +75,6 @@ DELETE_PUSH_WARNING = " Deletes a branch or tag on the remote."
 MIRROR_PUSH_WARNING = " Mirror push: makes the remote match every local ref."
 MAX_SHOWN_COMMAND_LENGTH = 160
 COMMIT_WRAPPER_NAME = "claude-commit.py"
-COMMIT_WRAPPER_OPTIONS = frozenset({"--amend", "--no-stage"})
 PYTHON_PATTERN = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$")
 DYNAMIC_MARKER = "$"
 COMMIT_SUBCOMMAND = "commit"
@@ -400,14 +400,18 @@ def find_commit_wrapper_credentials(call: CommandCall) -> list[str]:
 
 def find_commit_wrapper_files(argv: list[str]) -> list[str]:
     script_index = find_commit_wrapper_index(argv)
-    index = script_index + 1
 
     if script_index < 0:
         return []
     else:
-        while index < len(argv) and argv[index] in COMMIT_WRAPPER_OPTIONS:
-            index += 1
-        return argv[index + 1:]
+        return read_commit_wrapper_files(argv[script_index + 1 :])
+
+
+def read_commit_wrapper_files(arguments: list[str]) -> list[str]:
+    try:
+        return list(parse_commit_arguments(arguments).files)
+    except CommitArgumentsError:
+        return []
 
 
 def find_commit_wrapper_index(argv: list[str]) -> int:

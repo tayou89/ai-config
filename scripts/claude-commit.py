@@ -2,7 +2,7 @@
 """claude-commit.py — wrapper enforcing git-commit skill checklist.
 
 Usage:
-    claude-commit.py [--amend] [--no-stage] "<message>" [<file1> ...]
+    claude-commit.py [--amend] [--no-stage] [--expect-head <sha>] "<message>" [<file1> ...]
 
 Validates message format (subject prefix/length, body line length/count,
 bullet count, no internal terms), runs amend check, stages exact files,
@@ -15,7 +15,18 @@ checklist becomes the single enforced path.
 Use --no-stage when the index is already prepared by a prior git
 operation (e.g. merge --no-commit, cherry-pick) and re-staging via
 `git add` would fail (deleted/renamed paths) or override the prepared
-state. With --no-stage, file args are not required.
+state. With --no-stage, file args are not required; when given, the
+staged paths are still checked against them.
+
+An index records file contents, not the commit it was read from, so an
+index built before another session's commit carries that commit's files
+in their old state, and committing it reverts them. --expect-head names
+the commit the index was built from; the wrapper refuses when HEAD is
+another commit, like `git update-ref <ref> <new> <old>` and
+`git push --force-with-lease=<ref>:<expect>`. A private index
+(GIT_INDEX_FILE) requires it and the file list. After committing, the
+wrapper checks that git commit replaced the expected HEAD and undoes the
+commit with the same compare-and-swap when HEAD moved while it started.
 
 Exit codes:
     0  success (commit created)
@@ -24,6 +35,7 @@ Exit codes:
     3  staging mismatch
     4  usage error
     5  credential file staged
+    6  HEAD moved since the index was built (nothing committed)
 """
 
 from __future__ import annotations
@@ -33,11 +45,23 @@ import os
 import re
 import subprocess
 import sys
-from typing import Sequence
+from collections.abc import Sequence
+from typing import NoReturn
 
+from commit_arguments import (
+    EXPECT_HEAD_OPTION,
+    CommitArguments,
+    CommitArgumentsError,
+    parse_commit_arguments,
+)
 from secret_files import get_credential_reason
 
-
+PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
+HEAD_REVISION = "HEAD"
+PREVIOUS_HEAD_REVISION = "HEAD@{1}"
+UNDO_REFLOG_MESSAGE = "claude-commit: undo a commit built on a moved HEAD"
+SHORT_SHA_LENGTH = 7
+OBJECT_NAME_RE = re.compile(r"[0-9a-f]{7,64}")
 VALID_PREFIXES = ("Feat", "Fix", "Refactor", "Chore", "Merge")
 INTERNAL_TERM_RE = re.compile(r"\b(step|phase|pattern)\s+[0-9]+\b", re.IGNORECASE)
 MAX_SUBJECT_LENGTH = 72
@@ -51,15 +75,16 @@ EXIT_VALIDATION = 2
 EXIT_STAGING_MISMATCH = 3
 EXIT_USAGE = 4
 EXIT_CREDENTIAL_FILE = 5
+EXIT_HEAD_MOVED = 6
 
 
-def fail(message: str, code: int) -> None:
+def fail(message: str, code: int) -> NoReturn:
     print(message, file=sys.stderr)
     sys.exit(code)
 
 
-def run_git(args: Sequence[str], **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], check=False, text=True, **kwargs)
+def run_git(args: Sequence[str], capture_output: bool = False) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], check=False, text=True, capture_output=capture_output)
 
 
 def validate_message(message: str) -> tuple[int, int, int, int]:
@@ -159,6 +184,154 @@ def verify_staging(expected_files: Sequence[str]) -> None:
         sys.exit(EXIT_STAGING_MISMATCH)
 
 
+def read_revision(revision: str) -> str | None:
+    revision_proc = run_git(["rev-parse", "--verify", "--quiet", revision], capture_output=True)
+
+    if revision_proc.returncode == 0:
+        return revision_proc.stdout.strip()
+    else:
+        return None
+
+
+def read_new_head() -> str:
+    new_head = read_revision(HEAD_REVISION)
+
+    if new_head is not None:
+        return new_head
+    else:
+        fail("FAIL: git rev-parse HEAD failed after the commit", EXIT_GIT_ERROR)
+
+
+def resolve_expected_head(expected_head_argument: str | None) -> str | None:
+    if expected_head_argument is None:
+        return read_revision(HEAD_REVISION)
+    else:
+        check_object_name(expected_head_argument)
+        expected_head = read_revision(f"{expected_head_argument}^{{commit}}")
+
+        if expected_head is not None:
+            return expected_head
+        else:
+            fail(f"FAIL: {EXPECT_HEAD_OPTION} {expected_head_argument} is not a commit in this repository", EXIT_USAGE)
+
+
+def shorten(commit: str | None) -> str:
+    if commit is not None:
+        return commit[:SHORT_SHA_LENGTH]
+    else:
+        return "(no commit)"
+
+
+def make_commit_range(expected_head: str | None, moved_head: str) -> str:
+    if expected_head is not None:
+        return f"{expected_head}..{moved_head}"
+    else:
+        return moved_head
+
+
+def list_changed_files(commit_range: str, files: Sequence[str]) -> list[str]:
+    if files:
+        changed_proc = run_git(["log", "--format=", "--name-only", commit_range, "--", *files], capture_output=True)
+
+        return sorted({line for line in changed_proc.stdout.splitlines() if line})
+    else:
+        return []
+
+
+def make_moved_head_message(
+    summary_lines: list[str], expected_head: str | None, moved_head: str, files: Sequence[str]
+) -> str:
+    commit_range = make_commit_range(expected_head, moved_head)
+    commits = run_git(["log", "--oneline", commit_range], capture_output=True).stdout.splitlines()
+    overlapping_files = list_changed_files(commit_range, files)
+    message_lines = [
+        *summary_lines,
+        "Commits that landed after the index was built (committing it would revert them):",
+        *(f"  {commit}" for commit in commits),
+        f"Files they changed that you also commit: {', '.join(overlapping_files) or 'none'}",
+        f"Resolve: rebuild the index from {moved_head} (`git read-tree {moved_head}` for a private index), recreate partial-file blobs from `git show {moved_head}:<path>`, and rerun with {EXPECT_HEAD_OPTION} {moved_head}",
+    ]
+
+    return "\n".join(message_lines)
+
+
+def make_undo_message(
+    expected_head: str | None,
+    replaced_head: str | None,
+    new_head: str,
+    files: Sequence[str],
+    undone: bool,
+) -> str:
+    moved_summary = (
+        f"FAIL: HEAD moved from {shorten(expected_head)} to {shorten(replaced_head)} while git commit started"
+    )
+
+    if replaced_head is None:
+        return f"FAIL: could not read which commit {shorten(new_head)} replaced (HEAD has no reflog), so it is not known to be built on {shorten(expected_head)}. Check `git log` before pushing."
+    elif undone:
+        undone_lines = [
+            f"{moved_summary}.",
+            f"Its commit {shorten(new_head)} was undone; HEAD is back at {shorten(replaced_head)}.",
+        ]
+
+        return make_moved_head_message(undone_lines, expected_head, replaced_head, files)
+    else:
+        kept_lines = [
+            f"{moved_summary}, and another commit already sits on {shorten(new_head)}, so it was not undone.",
+            "Do not push; tell the user.",
+        ]
+
+        return make_moved_head_message(kept_lines, expected_head, replaced_head, files)
+
+
+def undo_commit(new_head: str, replaced_head: str) -> bool:
+    undo_args = ["update-ref", "-m", UNDO_REFLOG_MESSAGE, HEAD_REVISION, replaced_head, new_head]
+
+    return run_git(undo_args, capture_output=True).returncode == 0
+
+
+def check_object_name(expected_head_argument: str) -> None:
+    if not OBJECT_NAME_RE.fullmatch(expected_head_argument):
+        fail(
+            f"FAIL: {EXPECT_HEAD_OPTION} takes the sha `git rev-parse HEAD` printed when the index was built, not {expected_head_argument}",
+            EXIT_USAGE,
+        )
+
+
+def check_private_index_arguments(expected_head_argument: str | None, files: Sequence[str]) -> None:
+    usage_lines = [
+        f"FAIL: a private index ({PRIVATE_INDEX_VARIABLE}) needs {EXPECT_HEAD_OPTION} <sha> and the file list.",
+        "Record the base with `git rev-parse HEAD`, build the index with `git read-tree <base>`,",
+        f"and pass {EXPECT_HEAD_OPTION} <base> with your files, so a commit landing meanwhile is not reverted.",
+    ]
+
+    if PRIVATE_INDEX_VARIABLE in os.environ and (expected_head_argument is None or not files):
+        fail("\n".join(usage_lines), EXIT_USAGE)
+
+
+def check_head_unchanged(expected_head: str | None, files: Sequence[str]) -> None:
+    current_head = read_revision(HEAD_REVISION)
+
+    if current_head is not None and current_head != expected_head:
+        moved_summary = (
+            f"FAIL: HEAD moved from {shorten(expected_head)} to {shorten(current_head)} after the index was built"
+        )
+
+        fail(make_moved_head_message([moved_summary], expected_head, current_head, files), EXIT_HEAD_MOVED)
+    elif current_head is None and expected_head is not None:
+        fail(f"FAIL: HEAD no longer points to a commit (expected {shorten(expected_head)})", EXIT_HEAD_MOVED)
+
+
+def check_commit_base(new_head: str, expected_head: str | None, amend: bool, files: Sequence[str]) -> None:
+    replaced_revision = PREVIOUS_HEAD_REVISION if amend else f"{new_head}^1"
+    replaced_head = read_revision(replaced_revision)
+
+    if replaced_head != expected_head:
+        undone = replaced_head is not None and undo_commit(new_head, replaced_head)
+
+        fail(make_undo_message(expected_head, replaced_head, new_head, files, undone), EXIT_HEAD_MOVED)
+
+
 def read_staged_content(path: str) -> bytes | None:
     blob_proc = subprocess.run(
         ["git", "cat-file", "blob", f":{path}"],
@@ -195,6 +368,7 @@ def print_verification(
     body_max_length: int,
     body_nonblank_count: int,
     bullet_count: int,
+    expected_head: str | None,
 ) -> None:
     print("=== Verification ===")
     print(f"| {'Item':<30} | Status")
@@ -207,6 +381,7 @@ def print_verification(
     print(f"| {'No internal terms':<30} | OK")
     print(f"| {'Stage matches argv':<30} | OK")
     print(f"| {'No credential files':<30} | OK")
+    print(f"| {'HEAD is the index base':<30} | OK ({shorten(expected_head)})")
 
 
 def do_commit(message: str, amend: bool) -> None:
@@ -226,45 +401,38 @@ def do_commit(message: str, amend: bool) -> None:
         sys.exit(EXIT_GIT_ERROR)
 
 
+def read_commit_arguments(argv: list[str]) -> CommitArguments:
+    try:
+        return parse_commit_arguments(argv)
+    except CommitArgumentsError as error:
+        fail(str(error), EXIT_USAGE)
+
+
 def main(argv: list[str]) -> None:
-    amend = False
-    no_stage = False
-    while argv and argv[0].startswith("--"):
-        if argv[0] == "--amend":
-            amend = True
-            argv = argv[1:]
-        elif argv[0] == "--no-stage":
-            no_stage = True
-            argv = argv[1:]
-        else:
-            sys.stderr.write(f"Unknown option: {argv[0]}\n")
-            sys.exit(EXIT_USAGE)
-    min_args = 1 if no_stage else 2
-    if len(argv) < min_args:
-        sys.stderr.write(
-            "Usage: claude-commit.py [--amend] [--no-stage] "
-            "\"<message>\" [<file1> ...]\n"
-        )
-        sys.exit(EXIT_USAGE)
-    message = argv[0]
-    files = argv[1:]
+    arguments = read_commit_arguments(argv)
+    files = arguments.files
 
     print_header()
-    metrics = validate_message(message)
+    metrics = validate_message(arguments.message)
+    check_private_index_arguments(arguments.expected_head, files)
+    expected_head = resolve_expected_head(arguments.expected_head)
+    check_head_unchanged(expected_head, files)
     print("=== Recent commits ===")
     run_git(["log", "--oneline", "-3"])
-    if no_stage:
+    if arguments.no_stage:
         print("=== Staging skipped (--no-stage) ===")
         run_git(["diff", "--cached", "--stat"])
     else:
         stage_files(files)
         print("=== Staged changes ===")
         run_git(["diff", "--cached", "--stat"])
+    if files:
         verify_staging(files)
     check_credential_files()
-    print_verification(*metrics)
+    print_verification(*metrics, expected_head)
     print("=== Committing ===")
-    do_commit(message, amend)
+    do_commit(arguments.message, arguments.amend)
+    check_commit_base(read_new_head(), expected_head, arguments.amend, files)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1"])
 

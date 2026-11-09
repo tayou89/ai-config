@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -66,6 +67,23 @@ WRAPPER_COMMAND = (
     "Fix: don't git push or add .env (yet)\n\n- one\n- two\n- three\nEOF\n)\" a.txt"
 )
 DEEP_NESTING = "echo " + "$(" * 400 + "x" + ")" * 400
+PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
+SEED_FILES = ("a.txt", "b.txt", "shared.txt")
+OTHER_SESSION_SUBJECT = "Feat: land the other session's change"
+HEAD_COMMIT_MESSAGE = "Feat: commit this session's change\n\n- one\n- two\n- three"
+STAGING_MISMATCH_EXIT = 3
+USAGE_EXIT = 4
+HEAD_MOVED_EXIT = 6
+SHIM_TEXT = """#!/bin/sh
+# Lands another commit after the wrapper's HEAD check and before git commit reads HEAD.
+if [ "$1" = commit ] && [ ! -e "{marker}" ]; then
+  touch "{marker}"
+  tree=$(env -u GIT_INDEX_FILE "{real_git}" rev-parse "HEAD^{{tree}}")
+  other=$(env -u GIT_INDEX_FILE "{real_git}" commit-tree "$tree" -p HEAD -m "{subject}")
+  env -u GIT_INDEX_FILE "{real_git}" update-ref HEAD "$other"
+fi
+exec "{real_git}" "$@"
+"""
 
 
 @dataclass
@@ -115,6 +133,18 @@ CASES = [
     GuardCase("credential", "git add .npmrc", DENY, "secrets"),
     GuardCase("credential", "git ls-files -o | xargs git add", DENY, "secrets"),
     GuardCase("credential", "python3 ~/.claude/scripts/claude-commit.py 'Fix: x' .env", DENY, "secrets"),
+    GuardCase(
+        "credential",
+        "python3 ~/.claude/scripts/claude-commit.py --expect-head 0123abc 'Fix: x' .env",
+        DENY,
+        "secrets",
+    ),
+    GuardCase(
+        "commit",
+        "python3 ~/.claude/scripts/claude-commit.py --expect-head 0123abc key.pem a.txt",
+        PASS,
+        "secrets",
+    ),
     GuardCase("credential", "git add .", DENY, "secrets", TERMINAL_TOOL),
     GuardCase("credential", "find . -name '.env*' -exec git add {} +", DENY, "secrets"),
     GuardCase("credential", "git add -- .env", DENY, "secrets"),
@@ -317,6 +347,186 @@ class ShellGuardHookTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("No credential files", result.stdout)
+
+
+class WrapperHeadFixture:
+    def __init__(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+        self.root = Path(self.directory.name)
+        self.repository = self.root / "repository"
+        self.private_index = self.root / "private-index"
+        self.other_index = self.root / "other-index"
+        self.shim_directory = self.root / "bin"
+        self.git_config = self.root / "gitconfig"
+
+    def create(self) -> None:
+        self.git_config.write_text("[user]\n\tname = Wrapper Test\n\temail = wrapper@example.com\n")
+        self.repository.mkdir()
+        self.run_git("init", "-q")
+        for path in SEED_FILES:
+            (self.repository / path).write_text(f"{path}\n")
+        self.run_git("add", *SEED_FILES)
+        seed = self.run_git("commit-tree", self.run_git("write-tree"), "-m", "Chore: seed")
+        self.run_git("update-ref", "HEAD", seed)
+        self.create_shim()
+
+    def create_shim(self) -> None:
+        shim = self.shim_directory / "git"
+        shim_text = SHIM_TEXT.format(
+            marker=self.root / "shim-fired",
+            real_git=shutil.which("git"),
+            subject=OTHER_SESSION_SUBJECT,
+        )
+
+        self.shim_directory.mkdir()
+        shim.write_text(shim_text)
+        shim.chmod(0o755)
+
+    def environment(self, index: Path | None = None, shim: bool = False) -> dict[str, str]:
+        environment = dict(os.environ)
+
+        environment.pop(PRIVATE_INDEX_VARIABLE, None)
+        environment.update({"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1"})
+        if index is not None:
+            environment[PRIVATE_INDEX_VARIABLE] = str(index)
+        if shim:
+            environment["PATH"] = f"{self.shim_directory}{os.pathsep}{environment['PATH']}"
+        return environment
+
+    def run_git(self, *arguments: str, index: Path | None = None) -> str:
+        result = subprocess.run(
+            ["git", *arguments],
+            env=self.environment(index),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+
+        return result.stdout.strip()
+
+    def run_wrapper(self, *arguments: str, shim: bool = False) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(COMMIT_WRAPPER), *arguments],
+            env=self.environment(self.private_index, shim),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def read_head(self) -> str:
+        return self.run_git("rev-parse", "HEAD")
+
+    def read_subject(self, revision: str) -> str:
+        return self.run_git("log", "-1", "--format=%s", revision)
+
+    def edit(self, path: str, text: str) -> None:
+        with (self.repository / path).open("a") as file:
+            file.write(text)
+
+    def build_private_index(self, *paths: str) -> str:
+        base = self.read_head()
+
+        self.run_git("read-tree", base, index=self.private_index)
+        self.run_git("update-index", "--add", "--", *paths, index=self.private_index)
+        return base
+
+    def commit_other_session(self, path: str) -> str:
+        parent = self.read_head()
+
+        self.edit(path, "the other session's line\n")
+        self.run_git("read-tree", parent, index=self.other_index)
+        self.run_git("update-index", "--add", "--", path, index=self.other_index)
+        tree = self.run_git("write-tree", index=self.other_index)
+        commit = self.run_git("commit-tree", tree, "-p", parent, "-m", OTHER_SESSION_SUBJECT)
+        self.run_git("update-ref", "HEAD", commit, parent)
+        return commit
+
+
+class CommitWrapperHeadTest(unittest.TestCase):
+    fixture: WrapperHeadFixture
+
+    def setUp(self) -> None:
+        self.fixture = WrapperHeadFixture()
+        self.fixture.create()
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def test_private_index_requires_expected_head(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
+        self.assertIn("needs --expect-head", result.stderr)
+
+    def test_expected_head_takes_a_sha(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", "HEAD", "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
+
+    def test_stale_private_index_is_refused(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        other = self.fixture.commit_other_session("a.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_head(), other)
+        self.assertIn(OTHER_SESSION_SUBJECT, result.stderr)
+        self.assertIn("also commit: none", result.stderr)
+
+    def test_stale_private_index_names_shared_file(self) -> None:
+        self.fixture.edit("shared.txt", "mine\n")
+        base = self.fixture.build_private_index("shared.txt")
+        other = self.fixture.commit_other_session("shared.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "shared.txt")
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_head(), other)
+        self.assertIn("also commit: shared.txt", result.stderr)
+
+    def test_current_private_index_commits_listed_files(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+        self.assertEqual(self.fixture.run_git("diff", "--name-only", "HEAD^", "HEAD"), "b.txt")
+
+    def test_no_stage_still_checks_listed_files(self) -> None:
+        self.fixture.edit("a.txt", "mine\n")
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("a.txt", "b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, STAGING_MISMATCH_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_head(), base)
+
+    def test_head_moving_as_commit_starts_is_undone(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt", shim=True)
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+        self.assertIn("was undone", result.stderr)
+
+    def test_amend_as_head_moves_is_undone(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*amend_arguments, shim=True)
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
 
 
 def print_table() -> None:

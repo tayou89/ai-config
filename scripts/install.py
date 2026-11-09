@@ -68,7 +68,13 @@ BACKUP_PREFIX = "ai-config-install-"
 MOD_MARKETPLACE_FILE = Path(".claude-plugin") / "marketplace.json"
 MOD_PRESERVED_PATHS = ("claude-plans", ".claude-plugin/types")
 IGNORED_NAMES = ("__pycache__", ".DS_Store")
-RUNTIME_SCRIPTS = ("claude-commit.py", "shell-guard-hook.py", "shell_command.py", "secret_files.py")
+RUNTIME_SCRIPTS = (
+    "claude-commit.py",
+    "shell-guard-hook.py",
+    "shell_command.py",
+    "secret_files.py",
+    "commit_arguments.py",
+)
 MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py")
 MERGE_BY_NAME_KEYS = ("enabledPlugins", "extraKnownMarketplaces", "env")
 ENABLED_PLUGINS_KEY = "enabledPlugins"

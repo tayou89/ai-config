@@ -99,33 +99,43 @@ EOF
 )"
 ```
 
-`--no-stage` skips both `git add` and the stage-matches-argv check; the wrapper commits the existing index as-is. File args are optional with `--no-stage`.
+`--no-stage` skips `git add` and commits the existing index as-is. File args are optional with `--no-stage`; when given, the wrapper still checks that only those files are staged.
 
 The wrapper:
 1. Validates subject prefix + length, body line length, body line count, bullet count, internal-term ban
-2. Prints `git log --oneline -3` for amend awareness
-3. Stages exact files passed as argv (skipped with `--no-stage`)
-4. Prints `git diff --cached --stat`
-5. Verifies no extra files staged beyond argv (skipped with `--no-stage`; FAIL exit 3 otherwise)
-6. Refuses a staged `.env` or credential file, judged by `scripts/secret_files.py` (FAIL exit 5)
-7. Prints verification table
-8. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker
+2. Refuses if HEAD is not the `--expect-head` commit, which a private index requires (FAIL exit 6; see 6a)
+3. Prints `git log --oneline -3` for amend awareness
+4. Stages exact files passed as argv (skipped with `--no-stage`)
+5. Prints `git diff --cached --stat`
+6. Verifies no extra files staged beyond argv (with `--no-stage`, only when files are given; FAIL exit 3)
+7. Refuses a staged `.env` or credential file, judged by `scripts/secret_files.py` (FAIL exit 5)
+8. Prints verification table
+9. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker
+10. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
 
-Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file staged.
+Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file staged, `6` HEAD moved since the index was built (nothing committed).
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
 ## 6a. Shared Checkout (several sessions in one folder)
 
-Git's default index is shared by every session in the checkout: another session's commit can take what you staged, and if the index is left stale after your commit, its next commit silently reverts yours. Stage in a private index and sync the shared one in the same command:
+Git's default index is shared by every session in the checkout: another session's commit can take what you staged, and if the index is left stale after your commit, its next commit silently reverts yours. So stage in a private index. It records file contents, not the commit it was read from, so one built before another session's commit holds that commit's files in their old state, and committing it reverts them. Record the commit you build from and pass it to the wrapper, which refuses when HEAD has moved since, like `git update-ref <ref> <new> <old>` and `git push --force-with-lease=<ref>:<expect>`:
 
 ```bash
-idx="$(mktemp)" && GIT_INDEX_FILE="$idx" git read-tree HEAD &&
-  GIT_INDEX_FILE="$idx" ~/.claude/scripts/claude-commit.py "<message>" <file1> <file2>
+git rev-parse HEAD
+```
+
+```bash
+idx="$(mktemp)" && GIT_INDEX_FILE="$idx" git read-tree <base> &&
+  GIT_INDEX_FILE="$idx" ~/.claude/scripts/claude-commit.py --expect-head <base> "<message>" <file1> <file2>
 rm -f "$idx"; git reset -q -- <file1> <file2>
 ```
 
-For a file that also holds another session's uncommitted edits, put only your change into the private index with `git hash-object -w` and `git update-index --cacheinfo` (same `GIT_INDEX_FILE`), then run the wrapper with `--no-stage`. Afterwards confirm with `git show --stat HEAD` that the commit has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history.
+`<base>` is the full sha the first command printed; with `GIT_INDEX_FILE` set, the wrapper requires `--expect-head` and the file list. For a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, put it into the private index with `git hash-object -w` and `git update-index --cacheinfo` (same `GIT_INDEX_FILE`), then run the wrapper with `--expect-head <base> --no-stage`, still listing your files.
+
+On exit 6 nothing was committed: another commit landed after `<base>`, and the wrapper names it and the files it shares with yours. Take the new HEAD it names as `<base>`, rebuild the private index and any partial-file content from it, show the user the staged diff again if a shared file changed, and run the wrapper again.
+
+Then, as its own command before `git push` and never chained with it, run `git show --stat HEAD` and confirm the commit has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history.
 
 ## 7. Amend Check
 
