@@ -57,10 +57,15 @@ The wrapper rejects messages violating any of: type prefix, subject ≤72, line 
 
 ## 5. Show User Before Invoking Wrapper
 
-Before running the wrapper, show user:
-- Drafted message (with line-length self-check noted)
-- File list to stage
-- One-line code-review summary
+Every commit gets its own approval (user decision, 2026-11-09: kept per commit rather than approved with the plan). Ask in the same layout every time, in the user's language and plain words, so the scope reads at a glance:
+
+1. Title line: what the commit does, in one phrase.
+2. What and why, in one or two sentences.
+3. Files table: each file as a link, lines added and removed, and what changed.
+4. Left out: changed files not included and why (another session's work, another topic), or none.
+5. The exact message in a code block, with the line-length self-check noted.
+6. Checks: code-review result, secrets, other sessions' changes kept out, and type, lint, and test results when code changed.
+7. After the commit: the push prompt and any notification or record update that follows.
 
 Get explicit approval ("응 진행해줘" or equivalent). The wrapper then runs deterministically and commits.
 

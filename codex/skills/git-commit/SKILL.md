@@ -26,7 +26,7 @@ For release preparation, use `Chore: release vX.Y.Z` and bundle the files for th
 
 ## Authorization and Execution
 
-Show the file scope, proposed message, and review result before an unapproved commit. Existing explicit instructions to commit/publish the specific change authorize that action; do not ask again. Authorization to commit alone does not authorize pushing.
+Before an unapproved commit, ask in the same layout every time, in the user's language and plain words: a title line saying what the commit does; what and why in one or two sentences; a table of files (as links) with lines added and removed and what changed; changed files left out and why; the exact message in a code block; the checks (review result, secrets, other sessions' changes kept out, and type, lint, and test results when code changed); and what follows the commit (push, notifications, record updates). Each commit gets its own approval. Existing explicit instructions to commit/publish the specific change authorize that action; do not ask again. Authorization to commit alone does not authorize pushing.
 
 Write the exact message to a temporary file and run `git commit --file <message-file>` after verifying the staged scope.
 
