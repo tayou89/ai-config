@@ -58,6 +58,7 @@ Read the matching skill before the task. Paths below are relative to this global
 | Visual design: a new or reshaped screen, layout, typography, color, or motion, or a review of one | [frontend-design](skills/frontend-design/SKILL.md) |
 | Motion and interaction details, or reviewing animations | [emil-design-eng](skills/emil-design-eng/SKILL.md), [review-animations](skills/review-animations/SKILL.md), and for gesture-driven UI [apple-design](skills/apple-design/SKILL.md); recipes in [web-motion-techniques](skills/web-motion-techniques/SKILL.md) |
 | Reviewing web UI code before it is shown or released | [web-interface-guidelines](skills/web-interface-guidelines/SKILL.md) |
+| Turning an idea or plan with unrecorded key decisions into settled decisions, as product-planning describes | [grilling](skills/grilling/SKILL.md) |
 | Screen/UX design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
 | Decision requests, decision records, checkpoint reviews, coordinating other sessions, design comments, or global rule updates | [decisions-and-collaboration](skills/decisions-and-collaboration/SKILL.md) |
 | Product planning, external research and source selection, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |

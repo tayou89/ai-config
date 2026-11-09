@@ -10,6 +10,11 @@ user-invocable: false
 
 Apply to product planning, vendor and tool selection, and evidence research in every project. These generalize questions and feedback that recurred during project work. Follow project rules first.
 
+## Planning skills
+
+- Use the `grilling` skill to turn an idea or plan whose key decisions are not yet recorded into settled decisions: run it when the user asks for it, or propose it once and run it only if the user agrees (user decision, 2026-11-09). Read the project's decision records first and do not ask again what they settle, keep a session to one feature or decision area, and ask about five questions per round.
+- When the skill conflicts with a higher rule, follow this order: the user's decisions, then the project's rules, then these shared rules, then the skill, and say in the report which step was skipped and why. Find facts yourself rather than starting helper agents the user has not approved; ask a question with two or more real options in the decision-request format rather than as a line that "yes" accepts; send visual decisions (screens, copy, color, layout) to a comparison board instead of settling them by question; and record what was decided in the project's decision documents before the session ends.
+
 ## Research and evidence
 
 - Verify facts that change over time (pricing, free tiers, quotas, terms) in official documentation and note the date checked. Label blog and community answers as such, and state when a number could not be verified.
