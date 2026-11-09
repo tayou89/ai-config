@@ -34,6 +34,10 @@ Skipping this step produces avoidable plan revisions when implementation surface
 
 Before planning an implementation step, list the designs it depends on (module structure, data model, request/response and error contracts, authentication flow, non-functional targets such as response time), each with its status (approved, draft, missing) and the steps it gates, and show the list to the user whenever it changes. Plan the step only after those designs are approved, and propose a missing design as its own task first. Design the data model for the whole release scope before writing the first table, then build it incrementally: tables reference each other, and schema changes become the costliest to undo once real data exists. Work that depends on no pending design (tooling, scaffolding) may proceed in parallel when stated as such.
 
+## 3b. Agent Tooling Check
+
+When a plan adopts a new language, framework, or external service, or enters a stage that handles sign-in, payments, personal data, real money, or a first deploy, check that tool's official agent tooling (plugin, MCP server, skill, language server) and the official plugin directory, and propose project-scope installs with their cost and risk (user decision, 2026-11-09).
+
 ## 4. Pattern Alignment Check
 
 For structural decisions (new file layout, where a new type lives, module split, naming), grep 2-3 analogous cases in the same codebase. Match the dominant local pattern, or justify the deviation in the plan. Skill rules don't override local conventions. If no precedent exists, flag it.
