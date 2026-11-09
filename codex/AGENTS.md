@@ -22,6 +22,7 @@ Apply these reusable preferences across projects. Follow system/developer instru
 
 ## Planning, Verification, and Completion
 
+- Before creating or modifying files, discuss the affected files and concrete changes and obtain user approval. Do not automatically persist exploratory discussions or review conclusions to planning documents or other project files. A direct instruction to apply a specific, already described change counts as approval; do not ask again for routine edits and verification within that approved scope. Read-only investigation and proposals in chat may proceed without approval.
 - For substantial work, inspect dependencies and uncertainties and prepare a concrete plan. Honor user-requested design/review checkpoints. Existing approval for a concrete implementation covers routine choices and verification within that scope.
 - Validate proposed shared type/signature changes with minimal consumer/provider examples and the project's compiler before treating feasibility as established. Record what was actually checked; do not fabricate a pass or hide unresolved assumptions. If evidence needs an experiment, specify the experiment and possible outcomes.
 - Follow applicable skills even when a plan omits them. When three or more unanticipated type/signature/cast changes appear, pause the affected implementation and revisit the design instead of accumulating workarounds. Continue independent authorized work.

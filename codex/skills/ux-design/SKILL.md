@@ -29,6 +29,7 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - When listing several choices, do not stack borderless text or identical buttons. Put them as rows (title + ›) inside one bordered group.
 - Concentrate the accent color on the screen's main action. Demote secondary links near the primary button to body color, regular weight, and ›, without accent color or bold.
 - Do not run supplementary info on rows and cards (recently used, duration, source) at the same size and weight as the title. Show it in small, muted text to the right of the title (before ›) or below it.
+- Organize related content with clear hierarchy and spacing. Prefer a shared section with subheadings when separate top-level navigation adds no value for the reader.
 
 ## Alignment and layout
 
@@ -47,6 +48,7 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - Design empty, loading, error, and no-results states for every screen, and show one next action in every state.
 - When there are no records or ratings at all, do not display a large “0”. Collapse the number area, show one short line inviting the first contribution, and list ranked items below without rank numbers. Once at least one record exists, show numbers as they are, including 0. With small samples, hide average scores; counts can still be shown.
 - Check screens not only with ideal sample data but also with the most common real situation (e.g., almost no records, as in launch week).
+- Design previews should include clearly labeled, representative sample content when real content is unavailable, so typography, spacing, hierarchy, and content density can be evaluated. Keep samples distinct from the user's actual history, achievements, and published work.
 - Place gray placeholder text at the top left of empty input fields and remove it once the user types. Do not let blank lines push the placeholder to the middle of the field.
 - Do not put instructions meant for mockup reviewers (e.g., “Tap to see an example”) in product copy. Keep them in notes outside the screen or in frame names.
 
