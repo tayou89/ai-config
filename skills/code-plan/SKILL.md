@@ -25,6 +25,7 @@ Plans must apply the same skill rules as implementation code. Before drafting di
 - **code-style**: any code change
 - **typescript**: `.ts` file changes — includes type-system reasoning needed at planning time (e.g. structural-compat check before declaring an index signature dead)
 - **typescript-migration**: JS→TS conversion
+- **python**: `.py` file changes — includes the formatter-owned layout and tool order the plan's sample code must pass
 - **integration-testing**: live/simulator runtime test
 - **agent-usage**: plans that spawn agents
 
@@ -37,6 +38,10 @@ Before planning an implementation step, list the designs it depends on (module s
 ## 3b. Agent Tooling Check
 
 When a plan adopts a new language, framework, or external service, or enters a stage that handles sign-in, payments, personal data, real money, or a first deploy, check that tool's official agent tooling (plugin, MCP server, skill, language server) and the official plugin directory, and propose project-scope installs with their cost and risk (user decision, 2026-11-09).
+
+## 3c. Visible Live Switch
+
+When a plan gives an application a production, staging, or live mode, select that mode only on the command line that starts it: a mode or environment option (`--mode live`, `--env production`) or an environment variable set on the command itself (`APP_MODE=live <command>`), with the safe mode as the default. Never let a config-file or `.env` value alone turn it on, and do not use a separate confirmation flag as the switch. Command guards (CLAUDE.md rule 12 and the shell guard hook) see only the command line and recognize mode words such as `production`, `staging`, and `live` in mode and environment options and variables; tested 2026-11-09, the guard asked before `--mode live` and `<NAME>_MODE=live` but let `--confirm-live` and a config-file `mode = "live"` run without asking.
 
 ## 4. Pattern Alignment Check
 
@@ -116,6 +121,8 @@ Failure → revise the plan before requesting approval. Don't defer this to impl
 ## 6a. Style Compliance Check (mandatory before approval)
 
 Before requesting plan approval, audit every diff block line-by-line against `code-style` and language-specific skill rules. Verify common violations: early void return / guard throw, blank-line placement after const block, truthy vs nullish check default, consecutive try-catch in same scope, useless `await` on non-thenable, `.catch()` chaining, type assertions, named-export style, type/interface section blanks. Record result in plan body — `Style compliance: passed (rules audited: ...)` or `Style compliance: failed (reason → fixed)`. Failure → revise diff before approval; don't carry violations into implementation.
+
+**Formatter check**: When the project uses or the plan adopts an auto-formatter or a linter with automatic fixes, run them in the project's order (fixes, then formatting) over sample code that exercises every wrapping and layout rule the plan keeps: a wrapped condition, a long signature and call, multi-item collections and imports, and blank lines between definitions. Sample code without those cases passes trivially and hides conflicts. Formatter output overrides hand style; where they differ, follow the formatter and record which one wins in the language skill, not only in the plan. Record `Formatter check: passed (<tool> <version>, cases exercised)` or the differences found and how they were resolved.
 
 ## 7. Request Approval
 

@@ -49,6 +49,7 @@ Read the matching skill before the task. Paths below are relative to this global
 | Code writing/editing or code examples | [code-style](skills/code-style/SKILL.md) |
 | TypeScript or TSX writing and type design | [typescript](skills/typescript/SKILL.md) |
 | JavaScript-to-TypeScript conversion | [typescript-migration](skills/typescript-migration/SKILL.md) |
+| Python writing, tooling, and asyncio code | [python](skills/python/SKILL.md) |
 | Substantial implementation planning | [code-plan](skills/code-plan/SKILL.md) |
 | Application configuration or environment setup | [config-files](skills/config-files/SKILL.md) |
 | Integration/runtime tests with external dependencies | [integration-testing](skills/integration-testing/SKILL.md) |

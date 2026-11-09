@@ -4,7 +4,7 @@ Updated: 2026-10-28. Source: the repository's CLAUDE.md and ten skills at the ti
 
 ## Applied
 
-`AGENTS.md` contains reusable engineering, ownership, planning, verification, Git, communication, and security preferences, plus the complete shared writing principles. Ten skills retain task-specific rules: code-style, typescript, typescript-migration, code-plan, config-files, integration-testing, git-commit, resolve-conflict, pr-create, and agent-usage.
+`AGENTS.md` contains reusable engineering, ownership, planning, verification, Git, communication, and security preferences, plus the complete shared writing principles. Ten skills retain task-specific rules: code-style, typescript, typescript-migration, code-plan, config-files, integration-testing, git-commit, resolve-conflict, pr-create, and agent-usage. The python skill was added to both tools on 2026-11-09; its Codex copy adds the authorization preamble and, like the Codex code-style, keeps intentional background-task contracts.
 
 The detailed code style remains a personal preference: braces, positive conditions, explicit branching, private/protected naming, import/member order, async/error handling, provider ownership, and TypeScript type safety are retained where the language supports them. These rules are not represented as universal standards.
 

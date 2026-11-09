@@ -7,7 +7,7 @@ description: Apply personal coding conventions when writing or editing code, inc
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.
 
-Apply these conventions to implementation code and relevant code examples in plans or explanations. Syntax-specific rules (braces, strict equality, imports, class access, and TypeScript types) apply only to languages that support them; use the target language and project conventions elsewhere. Do not rewrite unrelated existing code solely to impose this style. During type-only migration, preserve runtime behavior and defer cosmetic refactoring.
+Apply these conventions to implementation code and relevant code examples in plans or explanations. Syntax-specific rules (braces, strict equality, imports, class access, and TypeScript types) apply only to languages that support them; use the target language and project conventions elsewhere. For `.py` files the python skill overrides these conventions where they conflict. Do not rewrite unrelated existing code solely to impose this style. During type-only migration, preserve runtime behavior and defer cosmetic refactoring.
 
 ## Control Flow Braces
 
@@ -296,4 +296,4 @@ Callback release, listener removal, schedule cancellation — place cleanup logi
 
 ## Post-Change Verification
 
-Run the repository's configured linter on changed files using already installed tools. Use ESLint for applicable JavaScript/TypeScript projects; do not install it or apply it to unrelated languages by default. Report errors and warnings, distinguish pre-existing failures, and do not increase their count or weaken checks merely to pass.
+Run the repository's configured linter on changed files using already installed tools. Use ESLint for applicable JavaScript/TypeScript projects; do not install it or apply it to unrelated languages by default. For Python, follow the python skill's "Tooling" order. Report errors and warnings, distinguish pre-existing failures, and do not increase their count or weaken checks merely to pass.

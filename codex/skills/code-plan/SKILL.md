@@ -27,6 +27,7 @@ Plans must apply the same skill rules as implementation code. Before drafting di
 - **code-style**: any code change
 - **typescript**: `.ts` file changes — includes type-system reasoning needed at planning time (e.g. structural-compat check before declaring an index signature dead)
 - **typescript-migration**: JS→TS conversion
+- **python**: `.py` file changes — includes the formatter-owned layout and tool order the plan's sample code must pass
 - **integration-testing**: live/simulator runtime test
 - **agent-usage**: plans that spawn agents
 
@@ -35,6 +36,10 @@ Skipping this step produces avoidable plan revisions when implementation surface
 ## 3a. Design Prerequisites Gate (mandatory)
 
 Before planning an implementation step, list the designs it depends on (module structure, data model, request/response and error contracts, authentication flow, non-functional targets such as response time), each with its status (approved, draft, missing) and the steps it gates, and show the list to the user whenever it changes. Plan the step only after those designs are approved, and propose a missing design as its own task first. Design the data model for the whole release scope before writing the first table, then build it incrementally: tables reference each other, and schema changes become the costliest to undo once real data exists. Work that depends on no pending design (tooling, scaffolding) may proceed in parallel when stated as such.
+
+## 3b. Visible Live Switch
+
+When a plan gives an application a production, staging, or live mode, select that mode only on the command line that starts it: a mode or environment option (`--mode live`, `--env production`) or an environment variable set on the command itself (`APP_MODE=live <command>`), with the safe mode as the default. Never let a config-file or `.env` value alone turn it on, and do not use a separate confirmation flag as the switch. Command guards and approval reviews see only the command line, so the mode must be readable there before the run; tested 2026-11-09, a command guard that recognizes mode words such as `production`, `staging`, and `live` asked before `--mode live` and `<NAME>_MODE=live` but let `--confirm-live` and a config-file `mode = "live"` run without asking.
 
 ## 4. Pattern Alignment Check
 
@@ -112,6 +117,8 @@ Failure → revise the plan before requesting approval. Don't defer this to impl
 ## 6a. Style Compliance Check (mandatory before approval)
 
 Before requesting plan approval, audit every diff block line-by-line against `code-style` and language-specific skill rules. Verify common violations: early void return / guard throw, blank-line placement after const block, truthy vs nullish check default, consecutive try-catch in same scope, useless `await` on non-thenable, `.catch()` chaining, type assertions, named-export style, type/interface section blanks. Record result in plan body — `Style compliance: passed (rules audited: ...)` or `Style compliance: failed (reason → fixed)`. Failure → revise diff before approval; don't carry violations into implementation.
+
+**Formatter check**: When the project uses or the plan adopts an auto-formatter or a linter with automatic fixes, run them in the project's order (fixes, then formatting) over sample code that exercises every wrapping and layout rule the plan keeps: a wrapped condition, a long signature and call, multi-item collections and imports, and blank lines between definitions. Sample code without those cases passes trivially and hides conflicts. Formatter output overrides hand style; where they differ, follow the formatter and record which one wins in the language skill, not only in the plan. Record `Formatter check: passed (<tool> <version>, cases exercised)` or the differences found and how they were resolved.
 
 ## 7. Request Approval
 
