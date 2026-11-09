@@ -28,7 +28,7 @@ Apply in every project when asking the user for decisions, recording decision st
 - Do not treat mockup defaults, placeholder values, or agent recommendations as settled principles. Before proposing to remove or change something, check the records for whether its basis is a user decision or a default, and what intent the user stated before.
 - In documents, distinguish user-confirmed decisions, agent recommendations, agent defaults (not confirmed by the user), and pending decisions, with dates.
 - Before proposing, check the proposal against existing rules. If it conflicts, say so or revise it to fit the rules before proposing.
-- Before filing an item as a pending decision, check what it actually blocks (a screen, development, a launch step). If nothing is blocked now, file it as a later task with its deadline instead of asking now, and do not invent a quantity or choice the plan does not need.
+- Before filing an item as a pending decision, check what it actually blocks (a screen, development, a launch step). If nothing is blocked now, file it as a later task with its deadline instead of asking now, and do not invent a quantity or choice the plan does not need. Move such an item without asking and say in one line where it went (user decision, 2026-11-09).
 - Before proposing a new feature or idea, search the planning documents for it. If it already exists, mention that record first and start from it; do not present an existing idea as new.
 
 ## Independent review
@@ -64,9 +64,10 @@ Choose each run's model and reasoning effort by its work type from this table (u
 - Outside a main session, open a new session only after the user agrees to the proposal. State in the proposal what it takes on, which files it changes, and what it leaves when done.
 - Give a new session a short title of a few words naming its topic, in the user's language. Leave scope or mode notes such as “(read-only)” out of the title and put them in the brief.
 - Write a new session's brief and every later message to it in the user's language, as its title already is: a session started from a brief in another language drifts into that language in what it shows the user (user decision, 2026-11-09).
-- If closing a session the user agreed to close is refused because a remote-control connection to it is on, turn the connection off and close it without asking again, since the agreement covers it, and say so in one line of the report (user decision, 2026-11-06). If it is refused because the session is open on screen or pinned, give that reason and tell the user to close it from the session list, since they are using it.
+- When a session you started needs the user's decision, ask the decision itself in its own terms with that session's recommendation and pass the answer on without a second question; never ask whether to relay an answer, and offer answering in that session as the other button (user decision, 2026-11-09).
+- If closing a finished session is refused because a remote-control connection to it is on, turn the connection off and close it without asking, and say so in one line of the report (user decisions, 2026-11-06 and 2026-11-09). If it is refused because the session is open on screen or pinned, give that reason and tell the user to close it from the session list, since they are using it.
 - Determine what a design-tool comment refers to by matching its timestamp with the change history at that time, not only its position. If the comment was already handled, say when and by what. Comments starting with an agent's name are change markers, not user feedback; leave them out when collecting the user's comments.
-- Resolve comments only after confirming the fix is reflected on the actual screen. Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
+- Resolve comments without asking once you confirm the fix is reflected on the actual screen, and list them in the report (user decision, 2026-11-09). Leave comments on pending decisions open. Replies cannot be resolved separately, so resolve the first comment of the thread.
 - Check the shared to-do list for tasks other sessions handed to this session, finish those tasks, and then update the list.
 
 ## Growing the rules

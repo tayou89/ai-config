@@ -10,7 +10,7 @@ Apply these rules before spawning any agent (sub-agent or team agent) and when c
 
 ## 1. Always Get Explicit Permission
 
-Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`, or the fallback reviewer in `/outside-review`) counts as that approval for the agents it describes; anything beyond them still needs approval. Starting another session follows the session rules in `collaboration-core` and `decisions-and-collaboration` "Working alongside other sessions", not this section.
+Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`, or the fallback reviewer in `/outside-review`) counts as that approval for the agents it describes; anything beyond them still needs approval. A reviewer a rule requires needs no separate approval: the checklist reviewer of a large commit (`git-commit`) and a checkpoint reviewer on a Claude model (section 7); say in one line that it ran (user decision, 2026-11-09). Ask before any other agent, any Codex run, and max effort. Starting another session follows the session rules in `collaboration-core` and `decisions-and-collaboration` "Working alongside other sessions", not this section.
 
 ## 2. Propose Splitting When Scope Grows
 
