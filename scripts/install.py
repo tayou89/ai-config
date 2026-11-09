@@ -77,6 +77,7 @@ RUNTIME_SCRIPTS = (
     "shell_command.py",
     "secret_files.py",
     "commit_arguments.py",
+    "reply-language-hook.py",
     "own_lines.py",
     "session_writes.py",
     "session-writes-hook.py",
