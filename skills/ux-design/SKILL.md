@@ -74,6 +74,7 @@ Apply to screen design, design review, and UI copy in every project. These gener
 ## Copy
 
 - Write participation prompts as one short, warm sentence that leads with the benefit to the user or community. Do not stack conditions, caveats, or reassurances, and do not list analysis methods. Add only brief required/optional status and visibility.
+- Write copy in the screen's own language from the start, beginning from the user's own words, never as a translation of sentences thought out in another language; when the available tools cannot judge that language's naturalness, say so and add a native-language review (user correction, 2026-11-09: Korean drafts read like translated English).
 - Before proposing copy, check the project's existing copy rules and screens and start from them. If the user has written a draft, do not replace it; offer one small revision for the single issue that concerns you.
 - Do not put multiple bold instruction sentences on one screen. Place one line of guidance directly above the input that needs it.
 - Keep labels in lists and summaries short. Do not add parenthetical explanations such as “Get notifications (when there is news)”; explain once, on the input screen.
