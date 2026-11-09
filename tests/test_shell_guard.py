@@ -736,6 +736,11 @@ LOG_BASE = "# log\n\n## base\ntext\n"
 MINE_1 = "\n## mine 1\nmy text\n"
 THEIRS = "\n## theirs\ntheir text\n"
 MINE_2 = "\n## mine 2\nmore\n"
+MY_TEXT = "my text\n"
+MY_EDITED_TEXT = "my edited text\n"
+BASE_TEXT = "\ntext\n"
+DRAFT_TEXT = "\ndraft text\n"
+EDITED_TEXT = "\nedited text\n"
 OWN_LINES_CASES = (
     OwnLinesCase(
         "another session's section between two of mine",
@@ -871,6 +876,38 @@ OWN_LINES_CASES = (
         "a\n",
         "a\nm1\nm2\nm3\n",
     ),
+    OwnLinesCase(
+        "my committed line edited again",
+        "a\nb\n",
+        (("a\nb\n", "a\nR\nb\n"), ("a\nR\nb\n", "a\nR2\nb\n")),
+        "a\nR2\nb\n",
+        "a\nR\nb\n",
+        "a\nR2\nb\n",
+    ),
+    OwnLinesCase(
+        "my committed line deleted again",
+        "a\nb\n",
+        (("a\nb\n", "a\nR\nb\n"), ("a\nR\nb\n", "a\nb\n")),
+        "a\nb\n",
+        "a\nR\nb\n",
+        "a\nb\n",
+    ),
+    OwnLinesCase(
+        "my edit after restoring the committed file",
+        "a\nN\nb\n",
+        (("a\nN\nb\n", "a\nO\nb\n"), ("a\nO\nb\n", "a\nN2\nb\n")),
+        "a\nN2\nb\n",
+        "a\nO\nb\n",
+        "a\nN2\nb\n",
+    ),
+    OwnLinesCase(
+        "their deletion of my committed line restored",
+        "a\nb\n",
+        (("a\nb\n", "a\nR\nb\n"),),
+        "a\nb\n",
+        "a\nR\nb\n",
+        "a\nR\nb\n",
+    ),
 )
 OWN_LINES_SPECIFICATION = importlib.util.spec_from_file_location("own_lines", OWN_LINES_MODULE)
 own_lines = importlib.util.module_from_spec(OWN_LINES_SPECIFICATION)
@@ -997,6 +1034,18 @@ class SessionWritesFixture:
             file.write(text)
         self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
 
+    def edit(self, session: str, path: str, old: str, new: str) -> None:
+        """Replace text as the Edit tool does, which reports the file it started from."""
+        self.tool_uses += 1
+        tool_use = f"call-{self.tool_uses}"
+        file = self.repository / path
+        edit_input = {"file_path": str(file)}
+        original = file.read_text()
+
+        self.run_record_hook(session, PRE_TOOL_USE, tool_use, edit_input)
+        file.write_text(original.replace(old, new, 1))
+        self.run_record_hook(session, POST_TOOL_USE, tool_use, edit_input, {"originalFile": original})
+
     def run_wrapper(
         self, *arguments: str, session: str | None = OWN_SESSION, index: Path | None = None
     ) -> subprocess.CompletedProcess[str]:
@@ -1102,6 +1151,40 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(self.fixture.run_git("show", f"HEAD:{LOG_FILE}") + "\n", LOG_BASE + MINE_1 + MINE_2)
         self.assertIn(THEIRS, (self.fixture.repository / LOG_FILE).read_text())
         self.assertIn("Only own lines staged", result.stdout)
+
+    def restore_then_edit(self) -> None:
+        """Restore a drafted file to its commit with a recorded command, then edit the restored line."""
+        log = self.fixture.repository / LOG_FILE
+        restore = {"command": f"git checkout -- {LOG_FILE}"}
+
+        log.write_text(LOG_BASE.replace(BASE_TEXT, DRAFT_TEXT))
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "restore-1", restore)
+        self.fixture.run_git("checkout", "--", LOG_FILE)
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "restore-1", restore, {})
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+
+    def test_own_lines_replaces_my_committed_line(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, MY_TEXT, MY_EDITED_TEXT)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_own_lines_after_restoring_the_file(self) -> None:
+        self.restore_then_edit()
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE.replace(BASE_TEXT, EDITED_TEXT))
+
+    def test_whole_file_after_restoring_the_file_passes(self) -> None:
+        self.restore_then_edit()
+        result = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_report_names_the_lines_left_out(self) -> None:
         self.write_mixed_log()

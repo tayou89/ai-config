@@ -192,16 +192,18 @@ def _add_region(lines: list[str], entangled: list[str], region: list[_LineRecord
 
 
 def _render_region(region: list[_LineRecord], base_gap: list[str]) -> tuple[list[str], list[str]]:
-    """Own live lines of one stretch, plus the base lines there that only others removed.
+    """Own live lines of one stretch, plus the base lines there that this session did not remove.
 
-    Lines of others that are still live in a stretch are uncommitted (committed
-    ones are the base lines that bound it), which is how entangled own lines
-    are found.
+    A base line matched to a removed line counts as this session's removal
+    whoever wrote that line, because a line this session wrote and committed,
+    or put back by restoring the file, is in the base too. Lines of others
+    that are still live in a stretch are uncommitted (committed ones are the
+    base lines that bound it), which is how entangled own lines are found.
     """
     own_live = [record for record in region if record.origin == LineOrigin.OWN and record.deleted_by is None]
     committed_own = {i for i, _ in _match_texts(base_gap, [record.text for record in own_live])}
     remaining = [index for index in range(len(base_gap)) if index not in committed_own]
-    tombstones = [record for record in region if record.origin != LineOrigin.OWN and record.deleted_by is not None]
+    tombstones = [record for record in region if record.deleted_by is not None]
     pairs = _match_texts([base_gap[index] for index in remaining], [record.text for record in tombstones])
     matched = {remaining[i] for i, _ in pairs}
     restored = {
