@@ -2,11 +2,13 @@
 
 Asks Codex's own `codex app-server` for `account/rateLimits/read`, the same read
 the usage panel uses; no credentials are read. Prints one JSON line such as
-{"plan": "plus", "five_hour": 0, "seven_day": 100, "seven_day_resets": "..."}
-or {"error": "..."} and exits 0 either way, so a caller can decide what to do.
+{"plan": "plus", "five_hour": 0, "seven_day": 100, "seven_day_resets": "...", "running_reviews": 1}
+or {"error": "...", "running_reviews": 1} and exits 0 either way, so a caller can decide what to do.
+`running_reviews` counts the `codex exec` processes running on this machine.
 """
 import datetime
 import json
+import os
 import select
 import shutil
 import subprocess
@@ -75,13 +77,25 @@ def summarize(answer):
         return summary
 
 
+def is_review_process(arguments):
+    return len(arguments) > 1 and os.path.basename(arguments[0]) == 'codex' and arguments[1] == 'exec'
+
+
+def count_running_reviews():
+    listing = subprocess.run(['ps', '-axo', 'args='], capture_output=True, text=True).stdout
+
+    return sum(1 for line in listing.splitlines() if is_review_process(line.split()))
+
+
 def main():
     codex = shutil.which('codex')
 
     if codex:
-        print(json.dumps(summarize(read_limits(codex))))
+        summary = summarize(read_limits(codex))
     else:
-        print(json.dumps({'error': 'codex not found'}))
+        summary = {'error': 'codex not found'}
+    summary['running_reviews'] = count_running_reviews()
+    print(json.dumps(summary))
     return 0
 
 
