@@ -53,6 +53,14 @@ const CODEX_HOME = '/Users/t/.codex/'
 // The Claude reading the sessions share, as its file holds it: none is no file.
 const claudeShared: { text?: string } = {}
 const CLAUDE_SHARED = '/Users/t/Library/Caches/usage-panel/claude-limits.json'
+// The readings the sessions share, by file: what each file holds as text, and
+// how the reader behaves this time: busy (another session reads) or held until
+// released (a read still going).
+const SHARED = '/Users/t/Library/Caches/usage-panel/'
+const sharedFiles: Record<string, string> = {}
+const sharedReader = { isBusy: false, hold: undefined as Promise<void> | undefined, calls: 0 }
+const LOCAL_KEYS = ['snapshot', 'last', 'working', 'running']
+const SERVER_KEYS = ['limits', 'configured', 'error']
 // What the mod did at start: the 7-day counts it ran and the panes it closed.
 const started = { recounts: 0, closed: [] as string[] }
 // The other sessions as the app keeps them: its session list, its state files'
@@ -70,6 +78,9 @@ const app = {
   transcript: {} as CacheOutput,
   hostId: undefined as string | undefined,
   listCalls: [] as Record<string, unknown>[],
+  // How often the agents were listed, and a list held until released.
+  agentLists: 0,
+  agentsHold: undefined as Promise<void> | undefined,
 }
 
 const claudeReading = (fiveHour: number): SessionMeasureInput => ({
@@ -84,6 +95,54 @@ const claudeReading = (fiveHour: number): SessionMeasureInput => ({
 const sharedReading = (at: string, fiveHour: number) =>
   JSON.stringify({ at: Date.parse(at), limits: claudeReading(fiveHour).rateLimits })
 
+const pick = (output: object, keys: readonly string[]) =>
+  Object.fromEntries(Object.entries(output).filter(([name]) => keys.includes(name)))
+
+// What the shared reader does: under its lock, the reading kept for the key
+// when made since `since`, else a new one written to the file.
+const readShared = async (
+  path: string,
+  key: string,
+  since: number,
+  mode: string | undefined,
+  codexOutput: object,
+  now: number,
+) => {
+  const file = JSON.parse(sharedFiles[path] ?? '{}') as { entries?: Record<string, { at: number }> }
+  const kept = file.entries?.[key]
+
+  if (mode) {
+    sharedReader.calls += 1
+  }
+  await sharedReader.hold
+  if (!Number.isInteger(since)) {
+    return { exitCode: 1, stdout: '', stderr: 'ValueError: since is not whole milliseconds' }
+  } else if (sharedReader.isBusy) {
+    return { exitCode: 75, stdout: '', stderr: '' }
+  } else if (kept && kept.at > since) {
+    return { exitCode: 0, stdout: JSON.stringify(kept), stderr: '' }
+  } else {
+    const shared = { at: Math.floor(now), output: sharedOutput(mode, codexOutput, now) }
+
+    sharedFiles[path] = JSON.stringify({ entries: { ...file.entries, [key]: shared } })
+    return { exitCode: 0, stdout: JSON.stringify(shared), stderr: '' }
+  }
+}
+
+// What the reader writes for each mode, counting the reads it makes.
+const sharedOutput = (mode: string | undefined, codexOutput: object, now: number) => {
+  if (mode === 'local') {
+    codexReads.push(mode)
+    return { working: [], running: 0, ...pick(codexOutput, LOCAL_KEYS) }
+  } else if (mode === 'server') {
+    codexReads.push(mode)
+    return pick(codexOutput, SERVER_KEYS)
+  } else {
+    started.recounts += 1
+    return { ...HISTORY, generatedAt: new Date(now).toISOString() }
+  }
+}
+
 const engine = (
   on: Parameters<Parameters<typeof test>[1]>[1],
   opened: string[] = [],
@@ -93,9 +152,16 @@ const engine = (
   agents: unknown[] = [],
   codexOutput: object = { running: 0 },
 ) => {
-  const clock = mock.clock(on, { now: Date.parse('2026-11-04T07:00:00Z') })
+  // The engine's clock reads fractions of a millisecond.
+  const clock = mock.clock(on, { now: Date.parse('2026-11-04T07:00:00Z') + 0.25 })
   mock.store(on)
   claudeShared.text = undefined
+  for (const path of Object.keys(sharedFiles)) {
+    delete sharedFiles[path]
+  }
+  sharedReader.isBusy = false
+  sharedReader.hold = undefined
+  sharedReader.calls = 0
   started.recounts = 0
   started.closed = []
   app.listed = []
@@ -106,6 +172,8 @@ const engine = (
   app.transcript = {}
   app.hostId = undefined
   app.listCalls = []
+  app.agentLists = 0
+  app.agentsHold = undefined
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
   on('mcp.call', (_, e) => {
     app.listCalls.push(e.args)
@@ -117,10 +185,10 @@ const engine = (
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.close', (_, e) => (started.closed.push(e.id), { value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
-  on('process.run', (_, e) => {
-    if (e.argv[4] === 'server' || e.argv[4] === 'local') {
-      codexReads.push(e.argv[4])
-      return { value: { exitCode: 0, stdout: JSON.stringify(codexOutput), stderr: '' } }
+  on('process.run', async (_, e) => {
+    const [path = '', key = '', since = '0', , mode] = e.argv.slice(4)
+    if (path.startsWith(SHARED)) {
+      return { value: await readShared(path, key, Number(since), mode, codexOutput, clock.now()) }
     }
     if (e.argv[4] === 'sessions') {
       app.requests.push(JSON.parse(e.argv[5] ?? '') as SessionsRequest)
@@ -137,9 +205,7 @@ const engine = (
           stderr: '',
         },
       }
-    if (e.argv[0] === 'git') return { value: { exitCode: 128, stdout: '', stderr: 'no stash' } }
-    started.recounts += 1
-    return { value: { exitCode: 0, stdout: JSON.stringify(HISTORY), stderr: '' } }
+    return { value: { exitCode: 128, stdout: '', stderr: 'no stash' } }
   })
   on('env.get', (_, e) => ({ value: e.name === 'CLAUDE_CODE_HOST_SESSION_ID' ? app.hostId : '/Users/t' }))
   on('session.cwd', () => ({ value: cwd }))
@@ -148,9 +214,11 @@ const engine = (
       ? codexDisk.recordAt > 0
       : e.path === CLAUDE_SHARED
         ? claudeShared.text !== undefined
-        : e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0,
+        : e.path in sharedFiles || (e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0),
   }))
-  on('fs.read', () => ({ value: claudeShared.text ?? '' }))
+  on('fs.read', (_, e) => ({
+    value: e.path === CLAUDE_SHARED ? (claudeShared.text ?? '') : (sharedFiles[e.path] ?? ''),
+  }))
   on('fs.write', (_, e) => {
     if (e.path === CLAUDE_SHARED) {
       claudeShared.text = e.text
@@ -158,7 +226,11 @@ const engine = (
     return { value: undefined }
   })
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: codexDisk.configAt, isLink: false } }))
-  on('agent.list', () => ({ value: agents }))
+  on('agent.list', async () => {
+    app.agentLists += 1
+    await app.agentsHold
+    return { value: agents }
+  })
   on('fs.list', (_, e) => {
     if (e.path === APP_STORE) return { value: [{ name: '000003.log', kind: 'file', size: 1, mtimeMs: app.storeAt, isLink: false }] }
     if (e.path === `${APP_SESSIONS}/account/organization`)
@@ -547,11 +619,13 @@ test('a Codex run started here is read at once, and every ten seconds while it r
   on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
   await $.tool.call({ tool: 'Bash', command: 'codex exec -s read-only "review"', run_in_background: true })
   await $.tool.call({ tool: 'Bash', command: 'ls' })
   await clock.advance(10_000)
+  await clock.advance(10_000)
 
-  expect(codexReads).toEqual(['server', 'local', 'local'])
+  expect(codexReads).toEqual(['local', 'server', 'local', 'local'])
 })
 
 test('the Codex line names the model and effort the next run takes, just before its details', async ($, on) => {
@@ -650,18 +724,19 @@ test('an old Codex setting turns grey and says when it was read', async ($, on) 
 test('a record written by any run, or a saved config, is read within ten seconds', async ($, on) => {
   codexReads.length = 0
   codexDisk.recordAt = 0
-  codexDisk.configAt = 100
   const clock = engine(on, [], undefined, [], true, [], { running: 0 })
+  codexDisk.configAt = clock.now() - 60_000
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(10_000)
-  codexDisk.recordAt = 5_000
+  codexDisk.recordAt = clock.now()
   await clock.advance(10_000)
-  codexDisk.configAt = 200
+  codexDisk.configAt = clock.now()
   await clock.advance(10_000)
+  codexDisk.recordAt = 0
   codexDisk.configAt = 0
 
-  expect(codexReads).toEqual(['server', 'local', 'server'])
+  expect(codexReads).toEqual(['local', 'server', 'local', 'server'])
 })
 
 test('an idle session takes the newer Claude reading another session shared, within 15 seconds', async ($, on) => {
@@ -682,7 +757,7 @@ test('a reply here shares its Claude reading, and an older shared one leaves it 
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.session.measure(claudeReading(30))
-  expect(claudeShared.text).toBe(sharedReading('2026-11-04T07:00:00Z', 30))
+  expect(claudeShared.text).toBe(JSON.stringify({ at: clock.now(), limits: claudeReading(30).rateLimits }))
   claudeShared.text = sharedReading('2026-11-04T06:59:00Z', 99)
   await clock.advance(15_000)
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
@@ -721,8 +796,127 @@ test('a reload neither recounts nor asks the Codex server again, and keeps the d
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
   expect(started.recounts).toBe(1)
-  expect(codexReads).toEqual(['server'])
+  expect(codexReads).toEqual(['local', 'server'])
   expect(started.closed).toEqual(['usage'])
+})
+
+const FOLDER = '/Users/t/Desktop/project/또갈래'
+const seedShared = (name: string, key: string, at: number, output: object) => {
+  sharedFiles[`${SHARED}${name}.json`] = JSON.stringify({ entries: { [key]: { at, output } } })
+}
+
+test('a Codex reading another session made since is taken without reading again', async ($, on) => {
+  codexReads.length = 0
+  const clock = engine(on)
+  seedShared('codex-local', '', clock.now() - 1_000, { ...pick(CODEX, LOCAL_KEYS), working: [] })
+  seedShared('codex-server', FOLDER, clock.now() - 60_000, pick(CODEX, SERVER_KEYS))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(codexReads).toEqual([])
+  expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
+  expect((await ui.find({ key: 'codex-last' }))?.text).toBe('Last In 620K·Out 9.4K')
+  expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
+  await ui.unmount()
+})
+
+test('a server reading made for another folder is not taken', async ($, on) => {
+  codexReads.length = 0
+  const clock = engine(on, [], undefined, [], true, [], CODEX)
+  seedShared('codex-server', '/Users/t/other', clock.now() - 1_000, { configured: { model: 'other-model' } })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(codexReads).toEqual(['local', 'server'])
+  expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
+  await ui.unmount()
+})
+
+test('while another session reads Codex, this one keeps its line and takes that reading later', async ($, on) => {
+  codexReads.length = 0
+  const clock = engine(on, [], undefined, [], true, [], { running: 1 })
+  sharedReader.isBusy = true
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  seedShared('codex-local', '', clock.now(), { ...pick(CODEX, LOCAL_KEYS), working: [], running: 1 })
+  seedShared('codex-server', FOLDER, clock.now(), pick(CODEX, SERVER_KEYS))
+  sharedReader.isBusy = false
+  await clock.advance(10_000)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(codexReads).toEqual([])
+  expect(await ui.find({ type: 'Text', text: /읽지 못했어요/ })).toBeUndefined()
+  expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
+  expect((await ui.find({ key: 'codex-last' }))?.text).toBe('Last In 620K·Out 9.4K')
+  await ui.unmount()
+})
+
+test('a tick that comes while the last Codex read still goes starts no second read', async ($, on) => {
+  const clock = engine(on, [], undefined, [], true, [], { running: 1 })
+  let release = () => {}
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(sharedReader.calls).toBe(2)
+  sharedReader.hold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+  expect(sharedReader.calls).toBe(3)
+  release()
+  sharedReader.hold = undefined
+  await clock.advance(10_000)
+
+  expect(sharedReader.calls).toBe(4)
+})
+
+test('a refresh an event asks for while the same list still runs lists once more after it', async ($, on) => {
+  const clock = engine(on)
+  const usage = { model: 'claude-sonnet-5-5', input_tokens: 1, output_tokens: 1 }
+  let release = () => {}
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  app.agentsHold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await clock.advance(3_000)
+  const listed = app.agentLists
+  const done = { agentId: 'helper', answer: '', durationMs: 1, isAborted: false, reason: 'answer', usage } as const
+
+  await $.turn.complete({ ...done, turnId: 'a1' })
+  await $.turn.complete({ ...done, turnId: 'a2' })
+  app.agentsHold = undefined
+  release()
+  await clock.advance(1)
+
+  expect(app.agentLists).toBe(listed + 1)
+})
+
+test('a 7-day count another session made within ten minutes is taken, and Recount counts again', async ($, on) => {
+  const clock = engine(on)
+  seedShared('history', '', clock.now() - 5 * 60_000, { ...HISTORY, total: 2000 })
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  expect(started.recounts).toBe(0)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await pane.press({ key: 'tab-week' })
+  await pane.press({ key: 'recount' })
+  await clock.advance(1)
+  await pane.unmount()
+
+  expect(started.recounts).toBe(1)
+  await clock.advance(11 * 60_000)
+  expect(started.recounts).toBe(2)
 })
 
 const row = (sessionId: string, isRunning: boolean, lastActivityAt = '2026-11-04T06:59:00Z'): SessionRow => ({

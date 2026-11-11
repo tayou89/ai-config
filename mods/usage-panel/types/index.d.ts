@@ -116,20 +116,30 @@ export type CodexWork = CodexTotals & { startedAt: number; steps: number }
 // No `effort` when Codex leaves it to the model's own default.
 export type CodexSetting = { model: string; effort?: string }
 
-// What the reader script prints: `limits` and `configured` only when it asked
-// the server.
-export type CodexOutput = {
-  limits?: CodexReading
+// What the reader script reads from the run records alone.
+export type CodexLocalOutput = {
   snapshot?: CodexReading
   last?: CodexRun
   // The runs at work that keep a record, the most recently written first.
-  working?: CodexWork[]
-  // The setting a new `codex exec` in this session's folder starts with.
-  configured?: CodexSetting
+  working: CodexWork[]
   // Every `codex exec` at work, with or without a record.
   running: number
+}
+
+// What the reader script asks Codex's server, for one folder.
+export type CodexServerOutput = {
+  limits?: CodexReading
+  // The setting a new `codex exec` in this folder starts with.
+  configured?: CodexSetting
   error?: string
 }
+
+// One reading the sessions share, when it was made and what it said.
+export type Shared<T> = { at: number; output: T }
+
+// A file of shared readings, one per key: the folder a server reading was made
+// for, or none (the empty key) for a reading that is the same in every folder.
+export type SharedFile<T> = { entries?: Record<string, Shared<T>> }
 
 export type Codex = {
   limits: Limit[]

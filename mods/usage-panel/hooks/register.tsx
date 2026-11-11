@@ -6,8 +6,9 @@ import type {
   CacheOutput,
   CacheTtl,
   Codex,
-  CodexOutput,
+  CodexLocalOutput,
   CodexReading,
+  CodexServerOutput,
   CodexSetting,
   CodexTotals,
   Helper,
@@ -24,6 +25,8 @@ import type {
   SessionRead,
   SessionsOutput,
   SessionsRequest,
+  Shared,
+  SharedFile,
   Tab,
   Turn,
   Where,
@@ -36,6 +39,17 @@ type SavedFile = { file: string; savedAt: number }
 type SessionSeen = SessionRead & { savedAt: number; askedAt?: string }
 type SessionState = keyof SessionCounts | 'idle'
 type CacheView = { kind: 'warm'; until: string } | { kind: 'soon'; minutes: number } | { kind: 'cold'; after: string }
+// What each shared reading holds, by its file's name.
+type SharedOutputs = {
+  [SHARED_NAME.codexLocal]: CodexLocalOutput
+  [SHARED_NAME.codexServer]: CodexServerOutput
+  [SHARED_NAME.history]: History
+}
+type SharedName = keyof SharedOutputs
+// One shared reading asked for: one made since `since` for the key's folder.
+type SharedRequest<N extends SharedName> = { name: N; key: string; since: number; arguments: readonly string[] }
+// One piece of work a session repeats: a timer's tick, or a refresh an event asks for.
+type OneAtATime = { tick: () => Promise<void>; refresh: () => Promise<void> }
 
 const PANE = 'usage'
 const TITLE = '사용량'
@@ -97,8 +111,20 @@ const CODEX_NAME = 'Codex'
 // own replies, so an idle one would keep the reading of its last reply. The
 // sessions pass the newest reading through one file outside the mod's folder,
 // where a write never reloads the mod.
-const CLAUDE_SHARED = 'Library/Caches/usage-panel/claude-limits.json'
+const SHARED_FOLDER = 'Library/Caches/usage-panel'
+const CLAUDE_SHARED = `${SHARED_FOLDER}/claude-limits.json`
 const CLAUDE_SHARE_EVERY_MS = 15 * 1000
+// The Codex readings and the 7-day count pass through the same folder: one
+// session reads, under a lock on the file, and the others take its reading.
+const SHARED_NAME = { codexLocal: 'codex-local', codexServer: 'codex-server', history: 'history' } as const
+const SHARED_BUSY = 75
+// A shared reader stops itself this long before its call times out.
+const SHARED_MARGIN_MS = 5 * 1000
+const SHARED_ANY_FOLDER = ''
+// How often a session looks whether the 7-day count is due; a count less than
+// RECOUNT_EVERY_MS old, made here or in another session, stands.
+const RECOUNT_CHECK_MS = 60 * 1000
+const RECOUNT_READ_MS = 120 * 1000
 // Set once the session has started, so a reload of the mod finds it set.
 const loaded = atom({ plugin: 'usage-panel', key: 'loaded' } as const, false, { shape: 'loaded-1' })
 const PYTHON = '/usr/bin/python3'
@@ -145,99 +171,334 @@ const RISE_HIGH = 4
 const MAX_PATH = 40
 const ANCHORS = ['.git', '.hg', '.svn', '.tool-versions', '.node-version', '.python-version', '.mise.toml']
 
+// The runner every shared reader starts with: it prints a reading another
+// session made since the time asked for, or makes one under a lock on the
+// file, or exits with SHARED_BUSY while another session holds that lock. Its
+// alarm stops a read that outlasts its limit, which lets the lock go. A
+// reader joined to it imports what it needs after it, as one `python -c` text.
+const SHARED_READER = String.raw`
+from __future__ import annotations
+
+import fcntl
+import json
+import os
+import signal
+import sys
+import time
+from collections.abc import Callable, Iterator
+from types import FrameType
+from typing import Any, TextIO
+
+Json = dict[str, Any]
+Read = Callable[[list[str], Json], tuple[Json, Json]]
+
+BUSY = 75
+DAY_MS = 24 * 60 * 60 * 1000
+HEAD_BYTES = 256
+
+
+def _stop(signal_number: int, frame: FrameType | None) -> None:
+    raise SystemExit("the read took longer than its limit")
+
+
+def _load(path: str) -> Json:
+    try:
+        with open(path, encoding="utf-8") as file:
+            loaded = json.load(file)
+        return loaded if isinstance(loaded, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save(path: str, value: Json) -> None:
+    temporary = f"{path}.{os.getpid()}.tmp"
+
+    try:
+        with open(temporary, "w", encoding="utf-8") as file:
+            json.dump(value, file, ensure_ascii=False)
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def _try_lock(lock: TextIO) -> bool:
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def _scan_path(path: str) -> str:
+    return f"{os.path.splitext(path)[0]}.scan.json"
+
+
+def _read_shared(path: str, key: str, since: int, arguments: list[str], read: Read) -> Json:
+    entries: Json = _load(path).get("entries") or {}
+    kept = entries.get(key)
+
+    if kept and kept["at"] > since:
+        return dict(kept)
+    else:
+        at = int(time.time() * 1000)
+        output, scans = read(arguments, _load(_scan_path(path)))
+        shared = {"at": at, "output": output}
+        recent = {name: entry for name, entry in entries.items() if at - entry["at"] < DAY_MS}
+
+        _save(_scan_path(path), scans)
+        _save(path, {"entries": {**recent, key: shared}})
+        return shared
+
+
+def run_shared(read: Read) -> None:
+    """Prints the reading under the key: one another session made since the given time, or a new one.
+
+    Exits with BUSY, reading nothing, while another session holds the lock on the same file.
+    """
+    path, key, since, limit, *arguments = sys.argv[1:]
+
+    signal.signal(signal.SIGALRM, _stop)
+    signal.alarm(int(limit))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(f"{path}.lock", "w") as lock:
+        if _try_lock(lock):
+            print(json.dumps(_read_shared(path, key, int(since), arguments, read), ensure_ascii=False))
+        else:
+            sys.exit(BUSY)
+
+
+def _head(path: str) -> str:
+    with open(path, "rb") as file:
+        return file.read(HEAD_BYTES).hex()
+
+
+def _is_same_start(path: str, head: str, kept: Json) -> bool:
+    common = min(len(head), len(kept["head"]))
+
+    return bool(kept["offset"] <= os.path.getsize(path) and head[:common] == kept["head"][:common])
+
+
+def start_place(path: str, kept: Json | None, empty: Json) -> Json:
+    """What a file's reading kept, to go on past it; the empty reading when the file was replaced or cut."""
+    head = _head(path)
+
+    if kept is not None and _is_same_start(path, head, kept):
+        return {**kept, "head": head}
+    else:
+        return {**empty, "offset": 0, "head": head}
+
+
+def new_lines(path: str, place: Json) -> Iterator[bytes]:
+    """Each whole line written past the place, moving the place past it; a line still being written waits."""
+    with open(path, "rb") as file:
+        file.seek(place["offset"])
+        for raw in file:
+            if raw.endswith(b"\n"):
+                place["offset"] += len(raw)
+                yield raw
+            else:
+                break
+`
+
 // Sums every Claude Code reply logged on this computer over the last 7 days.
 // Lines of one reply repeat its usage, so each (message id, request id) counts
 // once. `weight` estimates how hard a reply leans on the plan from the API's
-// price ratios: cache reads are cheap, output is dear.
-const AGGREGATE = String.raw`
-import json, os, glob, datetime, collections
-root = os.path.expanduser('~/.claude/projects')
-now = datetime.datetime.now().astimezone()
-today = now.date()
-start = today - datetime.timedelta(days=6)
-seen = set()
-blank = lambda: {'read': 0, 'write': 0, 'weight': 0}
-days = collections.defaultdict(lambda: {**blank(), 'replies': 0, 'sessions': set()})
-projects = collections.defaultdict(blank)
-models = collections.defaultdict(blank)
-sessions = {}
-titles = {}
-def add(t, read, write, weight):
-    t['read'] += read; t['write'] += write; t['weight'] += weight
-for path in glob.glob(os.path.join(root, '**', '*.jsonl'), recursive=True):
+// price ratios: cache reads are cheap, output is dear. Each transcript is read
+// on from where the last count stopped.
+const HISTORY_READER = String.raw`
+import collections
+import datetime
+import glob
+
+ROOT = os.path.expanduser("~/.claude/projects")
+DAYS = 7
+OTHER_PROJECT = "기타"
+EMPTY_FILE: Json = {"entries": [], "titles": {}}
+
+
+def _blank() -> Json:
+    return {"read": 0, "write": 0, "weight": 0}
+
+
+def _add(total: Json, read: int, write: int, weight: float) -> None:
+    total["read"] += read
+    total["write"] += write
+    total["weight"] += weight
+
+
+def _entry(line: str) -> list[Any] | None:
+    """A reply's key and what it counts, as the transcript line has them; none for a line that is no reply."""
     try:
-        if datetime.date.fromtimestamp(os.path.getmtime(path)) < start:
-            continue
-        f = open(path, encoding='utf-8', errors='replace')
-    except OSError:
-        continue
-    with f:
-        for line in f:
-            if '"custom-title"' in line:
-                try:
-                    d = json.loads(line)
-                    if d.get('type') == 'custom-title' and d.get('customTitle'):
-                        titles[d.get('sessionId')] = d['customTitle']
-                except ValueError:
-                    pass
-                continue
-            if '"usage"' not in line or '"assistant"' not in line:
-                continue
-            try:
-                d = json.loads(line)
-            except ValueError:
-                continue
-            if d.get('type') != 'assistant':
-                continue
-            m = d.get('message') or {}
-            u = m.get('usage') or {}
-            key = (m.get('id'), d.get('requestId'))
-            if key in seen or not u:
-                continue
-            seen.add(key)
-            try:
-                t = datetime.datetime.fromisoformat(d['timestamp'].replace('Z', '+00:00')).astimezone()
-            except (KeyError, ValueError):
-                continue
-            if t.date() < start:
-                continue
-            fresh = u.get('input_tokens') or 0
-            cw = u.get('cache_creation_input_tokens') or 0
-            cr = u.get('cache_read_input_tokens') or 0
-            read = fresh + cw + cr
-            write = u.get('output_tokens') or 0
-            weight = fresh + cw * 1.25 + cr * 0.1 + write * 5
-            sid = d.get('sessionId') or path
-            day = days[t.date().isoformat()]
-            add(day, read, write, weight); day['replies'] += 1; day['sessions'].add(sid)
-            proj = os.path.basename(d.get('cwd') or '') or '기타'
-            add(projects[proj], read, write, weight)
-            model = m.get('model') or '?'
-            if not model.startswith('<'):
-                add(models[model], read, write, weight)
-            s = sessions.setdefault(sid, {'id': sid, 'project': proj, **blank(), 'last': ''})
-            add(s, read, write, weight); s['last'] = max(s['last'], t.isoformat())
-out_days = []
-for i in range(7):
-    k = (today - datetime.timedelta(days=i)).isoformat()
-    v = days.get(k) or {**blank(), 'replies': 0, 'sessions': set()}
-    out_days.append({'date': k, 'read': v['read'], 'write': v['write'], 'weight': round(v['weight']), 'replies': v['replies'], 'sessions': len(v['sessions'])})
-rank = lambda d: sorted(({'name': k, **v, 'weight': round(v['weight'])} for k, v in d.items()), key=lambda r: -r['weight'])
-top = sorted(sessions.values(), key=lambda s: -s['weight'])[:5]
-for s in top:
-    s['title'] = titles.get(s['id']) or ''
-    s['weight'] = round(s['weight'])
-total = round(sum(v['weight'] for v in days.values()))
-print(json.dumps({'generatedAt': now.isoformat(), 'total': total, 'days': out_days, 'projects': rank(projects)[:5], 'models': rank(models)[:4], 'sessions': top}, ensure_ascii=False))
+        record = json.loads(line)
+    except ValueError:
+        return None
+    message = record.get("message") or {}
+    usage = message.get("usage") or {}
+
+    if record.get("type") != "assistant" or not usage:
+        return None
+    else:
+        fresh = usage.get("input_tokens") or 0
+        written = usage.get("cache_creation_input_tokens") or 0
+        cached = usage.get("cache_read_input_tokens") or 0
+        output = usage.get("output_tokens") or 0
+        weight = fresh + written * 1.25 + cached * 0.1 + output * 5
+
+        return [
+            message.get("id"),
+            record.get("requestId"),
+            record.get("timestamp"),
+            fresh + written + cached,
+            output,
+            weight,
+            record.get("sessionId"),
+            os.path.basename(record.get("cwd") or "") or OTHER_PROJECT,
+            message.get("model") or "?",
+        ]
+
+
+def _title(line: str, titles: Json) -> None:
+    try:
+        record = json.loads(line)
+
+        if record.get("type") == "custom-title" and record.get("customTitle"):
+            titles[record.get("sessionId")] = record["customTitle"]
+    except ValueError:
+        pass
+
+
+def _is_recent(entry: list[Any], start: datetime.date) -> bool:
+    at = _local_time(entry[2])
+
+    return at is not None and at.date() >= start
+
+
+def _scan_file(path: str, kept: Json | None, start: datetime.date) -> Json:
+    """The replies since the start day and the titles a transcript holds, read on from where the last read stopped.
+
+    A reply older than the start day is not kept: the count leaves it out, and the start day only moves on.
+    """
+    place = start_place(path, kept, EMPTY_FILE)
+    entries = [entry for entry in place["entries"] if _is_recent(entry, start)]
+    titles = dict(place["titles"])
+
+    for raw in new_lines(path, place):
+        line = raw.decode("utf-8", "replace")
+
+        if '"custom-title"' in line:
+            _title(line, titles)
+        elif '"usage"' in line and '"assistant"' in line:
+            entry = _entry(line)
+
+            if entry is not None and _is_recent(entry, start):
+                entries.append(entry)
+    return {**place, "entries": entries, "titles": titles}
+
+
+def _local_time(stamp: str | None) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.fromisoformat((stamp or "").replace("Z", "+00:00")).astimezone()
+    except ValueError:
+        return None
+
+
+def _rank(totals: Json) -> list[Json]:
+    rows = ({"name": name, **total, "weight": round(total["weight"])} for name, total in totals.items())
+
+    return sorted(rows, key=lambda row: -row["weight"])
+
+
+def _count(scans: Json, now: datetime.datetime) -> Json:
+    today = now.date()
+    start = today - datetime.timedelta(days=DAYS - 1)
+    seen: set[tuple[Any, Any]] = set()
+    days: Json = collections.defaultdict(lambda: {**_blank(), "replies": 0, "sessions": set()})
+    projects: Json = collections.defaultdict(_blank)
+    models: Json = collections.defaultdict(_blank)
+    sessions: Json = {}
+    titles: Json = {}
+
+    for path, scan in scans.items():
+        titles.update(scan["titles"])
+        for message_id, request_id, stamp, read, write, weight, session_id, project, model in scan["entries"]:
+            key = (message_id, request_id)
+
+            if key not in seen:
+                seen.add(key)
+                at = _local_time(stamp)
+
+                if at is not None and at.date() >= start:
+                    session = session_id or path
+                    day = days[at.date().isoformat()]
+                    row = sessions.setdefault(session, {"id": session, "project": project, **_blank(), "last": ""})
+
+                    _add(day, read, write, weight)
+                    day["replies"] += 1
+                    day["sessions"].add(session)
+                    _add(projects[project], read, write, weight)
+                    if not model.startswith("<"):
+                        _add(models[model], read, write, weight)
+                    _add(row, read, write, weight)
+                    row["last"] = max(row["last"], at.isoformat())
+    counted_days = []
+
+    for back in range(DAYS):
+        date = (today - datetime.timedelta(days=back)).isoformat()
+        day = days.get(date) or {**_blank(), "replies": 0, "sessions": set()}
+        counted = {
+            "date": date,
+            "read": day["read"],
+            "write": day["write"],
+            "weight": round(day["weight"]),
+            "replies": day["replies"],
+            "sessions": len(day["sessions"]),
+        }
+
+        counted_days.append(counted)
+    top = sorted(sessions.values(), key=lambda row: -row["weight"])[:5]
+
+    for row in top:
+        row["title"] = titles.get(row["id"]) or ""
+        row["weight"] = round(row["weight"])
+    return {
+        "generatedAt": now.isoformat(),
+        "total": round(sum(day["weight"] for day in days.values())),
+        "days": counted_days,
+        "projects": _rank(projects)[:5],
+        "models": _rank(models)[:4],
+        "sessions": top,
+    }
+
+
+def read_history(arguments: list[str], kept: Json) -> tuple[Json, Json]:
+    now = datetime.datetime.now().astimezone()
+    start = now.date() - datetime.timedelta(days=DAYS - 1)
+    scans: Json = {}
+
+    for path in glob.glob(os.path.join(ROOT, "**", "*.jsonl"), recursive=True):
+        try:
+            if datetime.date.fromtimestamp(os.path.getmtime(path)) >= start:
+                scans[path] = _scan_file(path, kept.get(path), start)
+        except OSError:
+            pass
+    return _count(scans, now), scans
+
+
+run_shared(read_history)
 `
 
-// Reads Codex without its credentials: `codex app-server` asks Codex's own
-// server for the limits (argument `server`), and the newest run records under
-// ~/.codex/sessions give the limits as of their last step, the last finished
-// `codex exec` run and how many runs work now. Big records are read from their
-// end only. It prints a CodexOutput, keys without a value left out.
+// Reads Codex without its credentials, joined to SHARED_READER. In `server`
+// mode `codex app-server` asks Codex's own server for the limits and the
+// setting a run in the given folder takes (a CodexServerOutput). In `local`
+// mode the newest run records under ~/.codex/sessions give the limits as of
+// their last step, the last finished `codex exec` run and how many runs work
+// now (a CodexLocalOutput). Big records are read from their end for the limits;
+// a run's record is read whole once and then on from where the last read
+// stopped, and only for the last finished run and the runs at work. Keys
+// without a value are left out.
 const CODEX_READER = String.raw`
-import json, os, glob, sys, subprocess, select, time, shutil, datetime, functools
+import glob, subprocess, select, shutil, datetime, functools
 HOME = os.path.expanduser('~')
 ROOT = os.path.join(HOME, '.codex', 'sessions')
 KIND = {300: 'five_hour', 10080: 'seven_day'}
@@ -357,53 +618,79 @@ def is_exec(path):
     head = first(path)
     return head.get('originator') == 'codex_exec' and head.get('source', 'exec') == 'exec'
 
-# One pass over a run's record, kept for the rest of the read: the setting its
-# last turn started with, its totals, the limits at each step, how many steps
-# reported their totals, when it finished.
-@functools.lru_cache(maxsize=None)
-def scan(path):
-    model = effort = finished = total = None
-    rates = []
-    steps = 0
-    with open(path, 'rb') as f:
-        for raw in f:
-            if b'"turn_context"' in raw[:120]:
-                p = json.loads(raw)['payload']
-                model, effort = p.get('model') or model, p.get('effort') or effort
-            elif b'"token_count"' in raw:
-                p = json.loads(raw)['payload']
-                if p.get('info'):
-                    total = p['info'].get('total_token_usage') or total
-                    steps += 1
-                if p.get('rate_limits'):
-                    rates.append(windows(p['rate_limits']))
-            elif b'"task_complete"' in raw:
-                finished = ms(json.loads(raw)['timestamp'])
-    return model, effort, finished, total, rates, steps
+EMPTY_RECORD = {
+    'model': None,
+    'effort': None,
+    'finished': None,
+    'total': None,
+    'first_rate': None,
+    'last_rate': None,
+    'rate_count': 0,
+    'steps': 0,
+}
+
+
+# What a run's record says so far, read on from where the last read stopped:
+# the setting its last turn started with, its totals, the limits at its first
+# and newest step and how many steps reported them, how many steps reported
+# their totals, when it finished.
+def scan_record(path, kept):
+    record = start_place(path, kept, EMPTY_RECORD)
+
+    for raw in new_lines(path, record):
+        if b'"turn_context"' in raw[:120]:
+            payload = json.loads(raw)['payload']
+
+            record['model'] = payload.get('model') or record['model']
+            record['effort'] = payload.get('effort') or record['effort']
+        elif b'"token_count"' in raw:
+            payload = json.loads(raw)['payload']
+
+            if payload.get('info'):
+                record['total'] = payload['info'].get('total_token_usage') or record['total']
+                record['steps'] += 1
+            if payload.get('rate_limits'):
+                found = windows(payload['rate_limits'])
+
+                record['first_rate'] = found if record['rate_count'] == 0 else record['first_rate']
+                record['last_rate'] = found
+                record['rate_count'] += 1
+        elif b'"task_complete"' in raw:
+            record['finished'] = ms(json.loads(raw)['timestamp'])
+    return record
+
 
 # A run's totals so far; all zero before its first step reports them.
-def totals(path):
-    model, effort, _, total, rates, _ = scan(path)
-    total = total or {}
-    found = {'read': total.get('input_tokens', 0), 'cached': total.get('cached_input_tokens', 0), 'write': total.get('output_tokens', 0), 'folder': first(path).get('cwd', '')}
-    if model:
-        found['model'] = model
-    if effort:
-        found['effort'] = effort
-    if len(rates) >= 2 and rates[-1]:
-        kind = 'five_hour' if any(w['kind'] == 'five_hour' for w in rates[-1]) else 'seven_day'
-        start = next((w['percentUsed'] for w in rates[0] if w['kind'] == kind), None)
-        end = next((w['percentUsed'] for w in rates[-1] if w['kind'] == kind), None)
+def totals(path, record):
+    total = record['total'] or {}
+    found = {
+        'read': total.get('input_tokens', 0),
+        'cached': total.get('cached_input_tokens', 0),
+        'write': total.get('output_tokens', 0),
+        'folder': first(path).get('cwd', ''),
+    }
+
+    if record['model']:
+        found['model'] = record['model']
+    if record['effort']:
+        found['effort'] = record['effort']
+    if record['rate_count'] >= 2 and record['last_rate']:
+        kind = 'five_hour' if any(w['kind'] == 'five_hour' for w in record['last_rate']) else 'seven_day'
+        start = next((w['percentUsed'] for w in record['first_rate'] if w['kind'] == kind), None)
+        end = next((w['percentUsed'] for w in record['last_rate'] if w['kind'] == kind), None)
+
         if start is not None and end is not None:
             found['rise'] = end - start
     return found
 
-def last_run(files):
+
+def last_run(files, read_record):
     for path in files:
         if is_exec(path):
-            _, _, finished, total, _, _ = scan(path)
-            if finished and total:
-                return {'finishedAt': finished, **totals(path)}
+            record = read_record(path)
+
+            if record['finished'] and record['total']:
+                return {'finishedAt': record['finished'], **totals(path, record)}
     return None
 
 # When each codex exec at work started, from the process list.
@@ -417,30 +704,63 @@ def exec_starts():
 
 # A run at work is the one whose record began when a codex exec process
 # started; a record left unfinished by a run that was stopped has no process.
-def working(files, starts):
+# Only such a record is read, the others are passed by their first line.
+def working(files, starts, read_record):
     found = []
+
     for path in files:
         if is_exec(path):
             began = ms(first(path)['timestamp'])
-            _, _, finished, _, _, steps = scan(path)
-            if not finished and any(abs(began - s) <= START_SLACK_MS for s in starts):
-                found.append({'startedAt': began, 'steps': steps, **totals(path)})
+
+            if any(abs(began - s) <= START_SLACK_MS for s in starts):
+                record = read_record(path)
+
+                if not record['finished']:
+                    found.append({'startedAt': began, 'steps': record['steps'], **totals(path, record)})
     return found
 
-files = recent()
-starts = exec_starts()
-limits, configured, error = ask_server(sys.argv[2]) if sys.argv[1:2] == ['server'] else (None, None, None)
-out = {
-    'limits': limits,
-    'configured': configured,
-    'snapshot': snapshot(files),
-    'last': last_run(files),
-    'working': working(files, starts),
-    'running': len(starts),
-    'error': error,
-}
-print(json.dumps({k: v for k, v in out.items() if v is not None}, ensure_ascii=False))
+
+def present(values):
+    return {key: value for key, value in values.items() if value is not None}
+
+
+# Arguments: 'local', or 'server' and the folder the setting is read for.
+def read_codex(arguments, kept):
+    mode = arguments[0]
+
+    if mode == 'server':
+        limits, configured, error = ask_server(arguments[1])
+
+        return present({'limits': limits, 'configured': configured, 'error': error}), {}
+    else:
+        records = {}
+
+        def read_record(path):
+            if path not in records:
+                records[path] = scan_record(path, kept.get(path))
+            return records[path]
+
+        files = recent()
+        starts = exec_starts()
+        found = {
+            'snapshot': snapshot(files),
+            'last': last_run(files, read_record),
+            'working': working(files, starts, read_record),
+            'running': len(starts),
+        }
+
+        return present(found), records
+
+run_shared(read_codex)
 `
+
+// Each shared reading by its file's name: the script that makes it and how
+// long it may take.
+const SHARED_READERS = {
+  [SHARED_NAME.codexLocal]: { script: CODEX_READER, timeoutMs: CODEX_READ_MS },
+  [SHARED_NAME.codexServer]: { script: CODEX_READER, timeoutMs: CODEX_READ_MS },
+  [SHARED_NAME.history]: { script: HISTORY_READER, timeoutMs: RECOUNT_READ_MS },
+} as const
 
 // Reads what the app keeps of its sessions, without changing any of it, in
 // one of two modes. `sessions` (argument: a SessionsRequest) prints a
@@ -802,26 +1122,35 @@ function codexRunLevel(run: CodexTotals): Level {
 }
 
 // The newest reading wins: while a run works, its record is newer than the
-// last server read. A failed server read keeps the error until the next one.
-// Every read says which runs work now; the configured setting comes with a
-// server read only, and keeps the time it was read.
-function mergeCodex(before: Codex, output: CodexOutput, now: number, isServerRead: boolean): Codex {
+// last server read.
+function newestCodexLimits(before: Codex, reading: CodexReading | undefined): Codex {
   const kept: CodexReading | undefined =
     before.limitsAt === undefined ? undefined : { at: before.limitsAt, plan: before.plan, limits: before.limits }
-  const readings = [output.limits, output.snapshot, kept].filter((r): r is CodexReading => r !== undefined)
+  const readings = [reading, kept].filter((r): r is CodexReading => r !== undefined)
   const newest = readings.sort((a, b) => b.at - a.at)[0]
 
+  return { ...before, limits: newest?.limits ?? [], limitsAt: newest?.at, plan: newest?.plan }
+}
+
+// A read of the run records says which runs work now.
+function mergeCodexLocal(before: Codex, output: CodexLocalOutput): Codex {
   return {
-    limits: newest?.limits ?? [],
-    limitsAt: newest?.at,
-    plan: newest?.plan,
-    serverAt: isServerRead ? now : before.serverAt,
+    ...newestCodexLimits(before, output.snapshot),
     last: output.last ?? before.last,
-    working: output.working ?? [],
-    configured: output.configured ?? before.configured,
-    configuredAt: output.configured ? now : before.configuredAt,
+    working: output.working,
     running: output.running,
-    error: isServerRead ? output.error : before.error,
+  }
+}
+
+// A failed server read keeps the error until the next one. The configured
+// setting comes with a server read only, and keeps the time it was read.
+function mergeCodexServer(before: Codex, shared: Shared<CodexServerOutput>): Codex {
+  return {
+    ...newestCodexLimits(before, shared.output.limits),
+    serverAt: shared.at,
+    configured: shared.output.configured ?? before.configured,
+    configuredAt: shared.output.configured ? shared.at : before.configuredAt,
+    error: shared.output.error,
   }
 }
 
@@ -945,6 +1274,105 @@ async function writeSharedClaude($: EngineInterface, reading: Reading): Promise<
     await $.fs.write(await sharedClaudePath($), JSON.stringify(reading))
   } catch {
     // The next reply here writes it again.
+  }
+}
+
+// The reading a session shared for the key, none while there is none yet.
+async function readSharedEntry<T>($: EngineInterface, path: string, key: string): Promise<Shared<T> | undefined> {
+  try {
+    if (await $.fs.exists(path)) {
+      const file = JSON.parse(await $.fs.read(path)) as SharedFile<T>
+
+      return file.entries?.[key]
+    }
+  } catch {
+    // A file that cannot be read now is read again on a later tick.
+  }
+}
+
+// The reading a session made since `request.since`, from the shared file; else
+// a new one this session makes. None while another session makes it: a later
+// tick takes that one from the file.
+async function readShared<N extends SharedName>(
+  $: EngineInterface,
+  request: SharedRequest<N>,
+): Promise<Shared<SharedOutputs[N]> | undefined> {
+  const reader = SHARED_READERS[request.name]
+  const path = `${(await $.env.get('HOME')) ?? ''}/${SHARED_FOLDER}/${request.name}.json`
+  const kept = await readSharedEntry<SharedOutputs[N]>($, path, request.key)
+
+  if (kept && kept.at > request.since) {
+    return kept
+  } else {
+    // The clock reads fractions of a millisecond; the reader takes whole ones.
+    const since = String(Math.floor(request.since))
+    const limitSeconds = String(Math.floor((reader.timeoutMs - SHARED_MARGIN_MS) / 1000))
+    const script = `${SHARED_READER}\n\n${reader.script}`
+    const argv = [PYTHON, '-I', '-c', script, path, request.key, since, limitSeconds, ...request.arguments]
+    const ran = await $.process.run(argv, { timeoutMs: reader.timeoutMs })
+
+    if (ran.exitCode === 0) {
+      return JSON.parse(ran.stdout) as Shared<SharedOutputs[N]>
+    } else if (ran.exitCode !== SHARED_BUSY) {
+      throw new Error(ran.stderr.trim().split('\n').pop() || `exit ${ran.exitCode}`)
+    }
+  }
+}
+
+// The work never runs twice at once. A timer's tick that comes while it runs
+// is let pass, so a slow read never piles up behind its own timer. A refresh
+// an event asks for meanwhile runs it once more after, so it is not lost.
+function runOneAtATime(run: () => Promise<void>): OneAtATime {
+  let isRunning = false
+  let isRefreshAsked = false
+
+  const runNow = async (): Promise<void> => {
+    isRunning = true
+    try {
+      do {
+        isRefreshAsked = false
+        await run()
+      } while (isRefreshAsked)
+    } finally {
+      isRunning = false
+    }
+  }
+
+  return {
+    tick: async (): Promise<void> => {
+      if (!isRunning) {
+        await runNow()
+      }
+    },
+    refresh: async (): Promise<void> => {
+      if (isRunning) {
+        isRefreshAsked = true
+      } else {
+        await runNow()
+      }
+    },
+  }
+}
+
+// A failed read of the run records shows on the Codex line until a read
+// succeeds. Noting it is a help: one that fails leaves the line as it was.
+async function recordCodexReadFailure($: EngineInterface): Promise<void> {
+  try {
+    await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED }))
+  } catch {
+    // The next read notes it again.
+  }
+}
+
+// A failed server read shows as one that failed, and the server is asked
+// again once its next reading is due.
+async function recordCodexServerFailure($: EngineInterface): Promise<void> {
+  try {
+    const now = await $.clock.now()
+
+    await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED, serverAt: now }))
+  } catch {
+    // The next read notes it again.
   }
 }
 
@@ -1433,80 +1861,150 @@ export const register: Register = on => {
     const usage = await $.session.usage().catch(() => undefined)
     if (usage) await update($, live, () => toLive(usage))
 
-    const kept = (await $.store.get('history')) as History | undefined
-    if (kept && Array.isArray(kept.days)) await update($, history, () => kept)
+    // Each session kept its own count in the store before the sessions shared
+    // one; the shared file holds it now.
+    await $.store.delete('history')
 
-    const recountNow = async () => {
-      const status = await read($, recount)
-      if (status.isRunning) return
-      await update($, recount, () => ({ isRunning: true }))
+    // A count made since `since`, by any session, stands.
+    const takeSharedCount = async (since: number): Promise<void> => {
+      const request = { name: SHARED_NAME.history, key: SHARED_ANY_FOLDER, since, arguments: [] } as const
+      const shared = await readShared($, request)
+
+      if (shared) {
+        await update($, history, () => shared.output)
+      }
+    }
+    const recountSince = async (since: number): Promise<void> => {
       try {
-        const ran = await $.process.run([PYTHON, '-I', '-c', AGGREGATE], { timeoutMs: 120_000 })
-        if (ran.exitCode !== 0) throw new Error(ran.stderr.trim().split('\n').pop() || `exit ${ran.exitCode}`)
-        const fresh = JSON.parse(ran.stdout) as History
-        await update($, history, () => fresh)
-        await $.store.set('history', fresh)
-        await update($, recount, () => ({ isRunning: false }))
+        const status = await read($, recount)
+
+        if (!status.isRunning) {
+          await update($, recount, () => ({ isRunning: true }))
+          await takeSharedCount(since)
+          await update($, recount, () => ({ isRunning: false }))
+        }
       } catch (err) {
-        await update($, recount, () => ({ isRunning: false, error: String((err as Error)?.message ?? err).slice(0, 200) }))
+        const error = String((err as Error)?.message ?? err).slice(0, 200)
+
+        await update($, recount, () => ({ isRunning: false, error }))
+      }
+    }
+    const recountIfDue = async (): Promise<void> => {
+      try {
+        const now = await $.clock.now()
+
+        if (isCountDue(await read($, history), now)) {
+          await recountSince(now - RECOUNT_EVERY_MS)
+        }
+      } catch {
+        // The next minute looks again.
+      }
+    }
+    const recountNow = async (): Promise<void> => {
+      try {
+        await recountSince(await $.clock.now())
+      } catch {
+        // The button counts again.
       }
     }
     recounter = recountNow
-    if (isCountDue(await read($, history), await $.clock.now())) {
-      void recountNow()
-    }
-    $.clock.every(RECOUNT_EVERY_MS, () => void recountNow())
+    void recountIfDue()
+    $.clock.every(RECOUNT_CHECK_MS, () => void recountIfDue())
 
-    const relocate = async () => {
+    const relocation = runOneAtATime(async (): Promise<void> => {
       const found = await locate($).catch(() => null)
+
       await update($, where, () => found)
-    }
-    relocater = relocate
-    await relocate()
-    $.clock.every(WHERE_EVERY_MS, () => void relocate())
+    })
+    relocater = relocation.refresh
+    await relocation.tick()
+    $.clock.every(WHERE_EVERY_MS, () => void relocation.tick())
 
     // Each agent keeps the time it was first seen at work, for its age.
-    const listHelpers = async () => {
-      const all = await $.agent.list().catch(() => [])
-      const now = await $.clock.now()
-      await update($, helpers, known =>
-        all
-          .filter(a => BUSY.includes(a.status))
-          .map(a => ({
-            id: a.id,
-            type: a.type,
-            description: a.description,
-            status: a.status,
-            seenAt: known.find(k => k.id === a.id)?.seenAt ?? now,
-          })),
-      )
-    }
-    rehelp = listHelpers
-    await listHelpers()
-    $.clock.every(HELPERS_EVERY_MS, () => void listHelpers())
-
-    const readCodex = async (isServerRead: boolean): Promise<void> => {
+    const listHelpers = async (): Promise<void> => {
       try {
-        const mode = isServerRead ? CODEX_MODE.server : CODEX_MODE.local
-        const argv = [PYTHON, '-I', '-c', CODEX_READER, mode, await $.session.cwd()]
-        const ran = await $.process.run(argv, { timeoutMs: CODEX_READ_MS })
+        const all = await $.agent.list().catch(() => [])
         const now = await $.clock.now()
 
-        if (ran.exitCode === 0) {
-          const merged = mergeCodex(await read($, codex), JSON.parse(ran.stdout) as CodexOutput, now, isServerRead)
+        await update($, helpers, known =>
+          all
+            .filter(a => BUSY.includes(a.status))
+            .map(a => ({
+              id: a.id,
+              type: a.type,
+              description: a.description,
+              status: a.status,
+              seenAt: known.find(k => k.id === a.id)?.seenAt ?? now,
+            })),
+        )
+      } catch {
+        // The next tick lists them again.
+      }
+    }
+    const helperList = runOneAtATime(listHelpers)
+    rehelp = helperList.refresh
+    await helperList.tick()
+    $.clock.every(HELPERS_EVERY_MS, () => void helperList.tick())
+
+    // Every session takes the newest shared reading of the run records, and
+    // the newest server reading made for its own folder. Each returns when the
+    // reading it took was made, none when it took none. Until this copy of the
+    // mod took a reading of the records, every tick asks for one.
+    let hasLocalReading = false
+    const readCodexLocal = async (since: number): Promise<number | undefined> => {
+      try {
+        const request = { name: SHARED_NAME.codexLocal, key: SHARED_ANY_FOLDER, since, arguments: [CODEX_MODE.local] }
+        const shared = await readShared($, request)
+
+        if (shared) {
+          const merged = mergeCodexLocal(await read($, codex), shared.output)
+
+          hasLocalReading = true
+          await update($, codex, () => merged)
+          await alertLimits($, merged.limits, CODEX_NAME)
+        }
+        return shared?.at
+      } catch {
+        await recordCodexReadFailure($)
+      }
+    }
+    // The folder is read at each call: a session's folder can change.
+    const readCodexServer = async (since: number): Promise<void> => {
+      try {
+        const cwd = await $.session.cwd()
+        const request = { name: SHARED_NAME.codexServer, key: cwd, since, arguments: [CODEX_MODE.server, cwd] }
+        const shared = await readShared($, request)
+
+        if (shared) {
+          const merged = mergeCodexServer(await read($, codex), shared)
 
           await update($, codex, () => merged)
           await alertLimits($, merged.limits, CODEX_NAME)
-        } else {
-          await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED, serverAt: now }))
         }
       } catch {
-        await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED }))
+        await recordCodexServerFailure($)
+      }
+    }
+    // A Codex run started here: read since now, and ask the server too once
+    // a run in the foreground has ended.
+    const readCodex = async (isServerRead: boolean): Promise<void> => {
+      try {
+        const now = await $.clock.now()
+
+        await readCodexLocal(now)
+        if (isServerRead) {
+          await readCodexServer(now)
+        }
+      } catch {
+        await recordCodexReadFailure($)
       }
     }
     // The records are read every tick while a run works, and when one was
     // written since the last tick, by a run started anywhere. The server is
     // asked when a run ends, when the config is saved, or every few minutes.
+    // Each reading is asked for since the moment every session sees alike (the
+    // record's write, the reading that showed the end, the config's save), so
+    // one session reads and the others take its reading.
     const home = (await $.env.get('HOME')) ?? ''
     let seenRecordAt = await codexRecordAt($, home, await $.clock.now(), await read($, tzOffset))
     let seenConfigAt = await codexConfigAt($, home)
@@ -1518,27 +2016,40 @@ export const register: Register = on => {
         const configAt = await codexConfigAt($, home)
         const isRecordWritten = recordAt > seenRecordAt
         const isConfigSaved = configAt !== seenConfigAt
+        const isLocalDue = before.running > 0 || isRecordWritten || !hasLocalReading
 
         seenRecordAt = recordAt
         seenConfigAt = configAt
-        if (before.running > 0 || isRecordWritten) {
-          await readCodex(false)
-        }
+        const localAt = isLocalDue ? await readCodexLocal(Math.max(now - CODEX_TICK_MS, recordAt)) : undefined
         const after = await read($, codex)
-        const hasRunEnded = after.running < before.running
+        const endedAt = after.running < before.running ? localAt : undefined
+        const savedAt = isConfigSaved ? configAt : undefined
 
-        if (hasRunEnded || isCodexServerDue(after, now) || isConfigSaved) {
-          await readCodex(true)
+        if (endedAt !== undefined || savedAt !== undefined || isCodexServerDue(after, now)) {
+          await readCodexServer(Math.max(now - CODEX_SERVER_EVERY_MS, endedAt ?? 0, savedAt ?? 0))
         }
       } catch {
-        await update($, codex, state => ({ ...state, error: CODEX_READ_FAILED }))
+        await recordCodexReadFailure($)
+      }
+    }
+    const codexTicks = runOneAtATime(tickCodex)
+    // A session that starts takes any reading made within the timers' own
+    // spans, as a tick would.
+    const readCodexOnStart = async (): Promise<void> => {
+      try {
+        const now = await $.clock.now()
+
+        await readCodexLocal(now - CODEX_TICK_MS)
+        await readCodexServer(now - CODEX_SERVER_EVERY_MS)
+      } catch {
+        await recordCodexReadFailure($)
       }
     }
     codexReader = readCodex
     if (isCodexServerDue(await read($, codex), await $.clock.now())) {
-      void readCodex(true)
+      void readCodexOnStart()
     }
-    $.clock.every(CODEX_TICK_MS, () => void tickCodex())
+    $.clock.every(CODEX_TICK_MS, () => void codexTicks.tick())
 
     // Another session's reading wins once it heard a reply since this one last
     // did. It is weighed inside the write, so a reply here meanwhile stands.
@@ -1555,12 +2066,13 @@ export const register: Register = on => {
         // The next tick reads it again.
       }
     }
-    await shareClaude()
-    $.clock.every(CLAUDE_SHARE_EVERY_MS, () => void shareClaude())
+    const claudeShare = runOneAtATime(shareClaude)
+    await claudeShare.tick()
+    $.clock.every(CLAUDE_SHARE_EVERY_MS, () => void claudeShare.tick())
 
-    const countSessionsNow = sessionCounter($, home)
-    void countSessionsNow()
-    $.clock.every(SESSIONS_EVERY_MS, () => void countSessionsNow())
+    const sessionCount = runOneAtATime(sessionCounter($, home))
+    void sessionCount.tick()
+    $.clock.every(SESSIONS_EVERY_MS, () => void sessionCount.tick())
 
     // The transcript says how long the cache lives, and for a session that
     // starts again, when its last request was: what it held is gone.
@@ -1588,8 +2100,9 @@ export const register: Register = on => {
         // The next minute draws it.
       }
     }
-    cacheReader = readCacheNow
-    void readCacheNow()
+    const cacheRead = runOneAtATime(readCacheNow)
+    cacheReader = cacheRead.refresh
+    void cacheRead.refresh()
     $.clock.every(CACHE_TICK_MS, () => void tickCache())
 
     $.clock.every(1_000, async () => {
