@@ -22,6 +22,7 @@ Apply to product planning, vendor and tool selection, and evidence research in e
 - For a product aimed at one country or language, include that market's own platforms in its language (its leading portal's blogs and forums, app reviews, public data), and say which of them could not be reached.
 - Search wide and read narrow, as a person would: skim each result list for relevance, source credibility, popularity (views, votes, review counts), and date, pick two or three items of each kind, and read only those in the cheapest form that answers the question (abstract, transcript, release notes); read a full text only when a conclusion rests on it (user decision, 2026-11-06). Label each source's kind and date, say when a video's visuals were not checked, summarize rather than reproduce, and leave out reviewers' and commenters' names.
 - Before reporting a value in your own measurements (logs, tests, data) as a threshold or limit, say whether it is a bin edge you chose, recount in finer steps on both sides of it, and check whether another condition present at the same time explains it; report it as a limit only if it still holds (user correction, 2026-11-11).
+- Save each plan and research report that later work builds on as a project file when you write it, never only in chat; add its row to the notes folder's `INDEX.md`, and make the chat reply a summary that links to the file (user decision, 2026-11-11).
 
 ## Choosing vendors and tools
 
