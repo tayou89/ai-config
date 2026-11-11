@@ -124,6 +124,16 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__ccd_session__start_session",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/start-session-hook.py\"",
+            "timeout": 10
+          }
+        ]
       }
     ],
     "PostToolUse": [

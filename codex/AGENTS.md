@@ -118,11 +118,13 @@ Apply in every project and task. The rest of the decision and collaboration prin
 - Before a batch over thousands of files or any parallel job, run a sample and measure peak memory per process, confirm it stays flat as the sample grows, and set the number of parallel processes so their combined peak fits in free memory; lowering CPU priority does not limit memory.
 - Track and stop background jobs by the process IDs you started, not by a name pattern.
 - After a freeze, crash, or forced restart, find and fix the cause from logs and crash reports before resuming sessions or rerunning jobs, and say in any resume message what the cause was or that it is still unknown, so no session reruns the job that caused it (user decision, 2026-11-09).
+- Start another session only while the computer has capacity: while the 1-minute load average is above 1.5 times the CPU count (the threshold the `batch` command uses), tell the user and let them choose to start it now or wait; a hook asks before such a start (user decision, 2026-11-11).
 
 ### Time estimates and progress
 
 - At the start of a task with several steps, tell the user a rough time estimate and what it depends on (approvals, reviews, builds, other sessions), and give a new estimate when the plan changes a lot; skip this for tasks of a few minutes (user decision, 2026-11-09).
 - On a long task, give a one-line progress note at each milestone, not on a timer; a session started by another session also sends that line to the session that started it.
+- When work answers a question, send the first conclusion as soon as one forms, in two or three lines marking what is verified, what is estimated, and what is still being checked, to the user and, in a session another session started, to that session too; keep working, and say in the final report if that conclusion changed (user decision, 2026-11-11).
 
 ## Shared Writing Principles
 
