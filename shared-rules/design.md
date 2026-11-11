@@ -12,6 +12,7 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - Read only the skills of the stage at hand (user decision, 2026-11-09): direction `frontend-design`; building a web page `design-taste-frontend`; motion `emil-design-eng` (`apple-design` for gesture-driven UI), then the one recipe needed from `web-motion-techniques`; copy and accessibility `ux-copy` and `accessibility-review` after the project's own standard; before showing or releasing, scripts first, then `web-interface-guidelines` for code, `review-animations` for motion, and one critique skill. Code-only skills apply to code, not to design-tool frames.
 - When two skills disagree, the skill whose role covers the point wins (motion: `emil-design-eng` and `review-animations`; direction: `frontend-design`); a skill's English-only copy or typography rules apply only where the page's language fits.
 - Use one critique skill per review, and give a reviewer only `ux-design` and the skills of the stage it reviews.
+- In every design or copy review, your own check and an independent reviewer's alike, look for anything that reads as AI-made or unnatural, in the design (layout, type, colour, motion) and in the copy of every language the page uses (user decision, 2026-11-11): judge the design against `frontend-design`'s list of traits generated design clusters around, English copy with Taste's `scripts/copy-lint.mjs` and `references/copy-tells.md`, Korean copy with `humanizer-ko`, and any other language by a native-language review as in "Copy". Report each spot with what it points at and the fix, or why it stays (for example, a trait the user chose), and name what was left unchecked.
 
 ## Hierarchy
 
@@ -23,6 +24,7 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - Concentrate the accent color on the screen's main action. Demote secondary links near the primary button to body color, regular weight, and ›, without accent color or bold.
 - Do not run supplementary info on rows and cards (recently used, duration, source) at the same size and weight as the title. Show it in small, muted text to the right of the title (before ›) or below it.
 - Organize related content with clear hierarchy and spacing. Prefer a shared section with subheadings when separate top-level navigation adds no value for the reader.
+- Give each screen one main message that a first-time viewer gets at a glance, and check it on a capture at real size before showing: what stands out first should be that message. Raise it by quieting what competes with it (smaller, lighter, muted, fewer) rather than enlarging it or adding elements, and keep required information, changing its weight instead of deleting it (user decision, 2026-11-11).
 
 ## Alignment and layout
 
