@@ -77,7 +77,7 @@ from commit_arguments import (
     CommitArgumentsError,
     parse_commit_arguments,
 )
-from own_lines import FileHistory, OwnContent, build_own_content, list_foreign_lines
+from own_lines import ContestedLine, FileHistory, OwnCommitContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
 from session_writes import (
     SessionWritesError,
@@ -495,7 +495,7 @@ def read_base_blob(expected_head: str | None, path: str) -> str | None:
     return read_revision(f"{expected_head}:{path}") if expected_head else None
 
 
-def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnContent | None:
+def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnCommitContent | None:
     history = read_file_history(session_id, root, path)
 
     if history is not None:
@@ -561,6 +561,8 @@ def stage_own_content(session_id: str, root: str, path: str, base: str) -> None:
         fail(make_unrecorded_message(path), EXIT_FOREIGN_LINES)
     elif own.entangled:
         fail(make_entangled_message(path, own.entangled), EXIT_FOREIGN_LINES)
+    elif own.contested:
+        fail(make_contested_message(path, own.contested), EXIT_FOREIGN_LINES)
     elif own.text == "" and not os.path.exists(os.path.join(root, path)):
         run_git(["update-index", "--force-remove", "--", path])
         print(f"  - {path} (removed)")
@@ -618,8 +620,14 @@ def describe_foreign_lines(session_id: str, root: str, path: str, expected_head:
         more = [f"  ... and {len(foreign) - MAX_SHOWN_FOREIGN_LINES} more"] if len(foreign) > MAX_SHOWN_FOREIGN_LINES else []
         header = f"FAIL: {path} has {len(foreign)} staged lines this session's write record does not show as its own (another session's, a person's, or a command the record did not see):"
         foreign_message = "\n".join([header, *shown, *more]) if foreign else None
+        contested = own.contested if own is not None else ()
 
-        return make_entangled_message(path, entangled) if entangled else foreign_message
+        if entangled:
+            return make_entangled_message(path, entangled)
+        elif foreign_message and contested:
+            return f"{foreign_message}\n{make_contested_message(path, contested)}"
+        else:
+            return foreign_message
 
 
 def describe_whole_file(session_id: str, root: str, path: str, expected_head: str | None) -> str | None:
@@ -636,9 +644,20 @@ def make_unrecorded_message(path: str) -> str:
 def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
     shown = [f"  ! {line.rstrip()}" for line in entangled[:MAX_SHOWN_FOREIGN_LINES]]
     lines = [
-        f"FAIL: in {path}, {len(entangled)} of your lines change or split lines another session has not committed, so they cannot be committed apart:",
+        f"FAIL: in {path}, {len(entangled)} of your changes are tangled with lines another session has not committed (your line changes or splits theirs, or they changed your replacement), so they cannot be committed apart:",
         *shown,
         f"Resolve: ask the user; the other session can commit first, or, if the user agrees, commit both with {INCLUDE_UNRECORDED_OPTION} {path}.",
+    ]
+
+    return "\n".join(lines)
+
+
+def make_contested_message(path: str, contested: Sequence[ContestedLine]) -> str:
+    shown = [f"  ? {line.kind.value} {line.text.rstrip()}" for line in contested[:MAX_SHOWN_FOREIGN_LINES]]
+    lines = [
+        f"FAIL: in {path}, {len(contested)} changes were written while another session also wrote this file, so the record cannot tell whether they are yours:",
+        *shown,
+        f"Resolve: ask the user; if they are yours, add {INCLUDE_UNRECORDED_OPTION} {path} after the user confirms.",
     ]
 
     return "\n".join(lines)

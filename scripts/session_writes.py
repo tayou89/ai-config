@@ -8,6 +8,15 @@ names. Snapshots per command follow Jujutsu, which snapshots the working copy
 at every command. The commit wrapper reads a file's history back with
 load_file_history().
 
+Sessions share one folder, and a snapshot cannot tell who wrote a change made
+while a call ran. So a write counts as the session's only on positive
+evidence: an Edit or Write whose own reported change turns its before snapshot
+into its after snapshot exactly, or any other write that no other session's
+write, or call still running, overlaps in time. Every other write is
+contested, and the commit wrapper asks about its changes instead of guessing.
+Evidence that cannot be read back stops the commit rather than being skipped,
+since a missing record of another session would hand its change to this one.
+
 A snapshot that cannot be taken raises SessionWritesError instead of
 returning an empty one: an empty snapshot would read as "nothing was dirty"
 and hand another session's uncommitted lines to this session. File contents
@@ -20,19 +29,20 @@ Usage (list what --own-lines would leave out):
 
 from __future__ import annotations
 
+import functools
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import time
-from collections import Counter
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
 
-from own_lines import FileHistory, OwnWrite, build_own_content, list_foreign_lines
+from own_lines import FileHistory, RecordedWrite, build_own_content, list_foreign_lines
 
 _SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -57,6 +67,13 @@ _INCOMPLETE_RECORD_WARNING = (
     "not its own here; the commit wrapper skips its own-lines check for this session."
 )
 _RECORD_LIFETIME_SECONDS = 14 * 24 * 60 * 60
+_PENDING_LIFETIME_SECONDS = 60 * 60
+_OVERLAP_MARGIN_SECONDS = 2.0
+RECORD_FORMAT = 2
+_EARLIEST_RECORD_FORMAT = 1
+_PENDING_TOOL = "pending"
+_RECORD_LINE_END = "\n"
+_ROOT_FIELD = "root"
 _MAX_TRACKED_BYTES = 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 10
 _RENAME_OR_COPY_STATUSES = "RC"
@@ -74,6 +91,15 @@ class SessionWritesError(RuntimeError):
 
 @dataclass(frozen=True)
 class WriteEvent:
+    """One file one tool call changed.
+
+    `exact` is True when the call was an Edit or Write whose own reported
+    change turns `before` into `after` exactly, False when such a call's
+    snapshots hold anything else, and None for other tools. From
+    `record_format` 2 on, `start` and `end` enclose both snapshots; earlier
+    records have neither, and their times sit just inside their snapshots.
+    """
+
     root: str
     path: str
     before: str | None
@@ -81,6 +107,8 @@ class WriteEvent:
     start: float
     end: float
     tool: str
+    exact: bool | None = None
+    record_format: int = _EARLIEST_RECORD_FORMAT
 
 
 @dataclass(frozen=True)
@@ -89,6 +117,9 @@ class RepositorySnapshot:
     head: str | None
     blobs: dict[str, str | None]
     covers_repository: bool
+
+
+_EVENT_FIELDS = frozenset(event_field.name for event_field in fields(WriteEvent))
 
 
 def read_session_id() -> str | None:
@@ -131,7 +162,7 @@ def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[s
     candidates = [*([cwd] if cwd else []), *named]
     roots = {root for root in map(find_repository_root, candidates) if root}
 
-    return sorted(roots | {event.root for event in _read_events(session_id)})
+    return sorted(roots | _read_recorded_roots(session_id))
 
 
 def take_file_snapshot(root: str, path: str) -> RepositorySnapshot:
@@ -156,6 +187,14 @@ def store_text(root: str, text: str) -> str:
     return decode_content(_run_git(root, "hash-object", "-w", "--stdin", input_bytes=encode_content(text))).strip()
 
 
+def read_blob_text(root: str, blob: str | None) -> str | None:
+    """A stored content as text, or None for a file that did not exist."""
+    if blob:
+        return _read_blob(root, blob)
+    else:
+        return None
+
+
 def list_changes(before: RepositorySnapshot, after: RepositorySnapshot) -> list[tuple[str, str | None, str | None]]:
     """Files whose content differs between two snapshots; a file missing from one was clean there."""
     paths = sorted(set(before.blobs) | set(after.blobs))
@@ -174,10 +213,17 @@ def append_events(session_id: str, events: Iterable[WriteEvent]) -> None:
             file.write("".join(lines))
 
 
-def save_pending(session_id: str, tool_use_id: str, snapshots: Sequence[RepositorySnapshot]) -> None:
+def save_pending(
+    session_id: str,
+    tool_use_id: str,
+    snapshots: Sequence[RepositorySnapshot],
+    start: float | None = None,
+) -> None:
+    """Keep a call's before snapshots until it ends; `start` is taken before the first snapshot."""
     directory = get_record_directory() / session_id
     pending = directory / f"{tool_use_id}{_PENDING_SUFFIX}"
-    payload = {"start": time.time(), "snapshots": [asdict(snapshot) for snapshot in snapshots]}
+    started = time.time() if start is None else start
+    payload = {"start": started, "snapshots": [asdict(snapshot) for snapshot in snapshots]}
 
     if not directory.is_dir():
         directory.mkdir(parents=True, exist_ok=True)
@@ -185,15 +231,22 @@ def save_pending(session_id: str, tool_use_id: str, snapshots: Sequence[Reposito
     pending.write_text(json.dumps(payload, ensure_ascii=False), encoding=_TEXT_ENCODING)
 
 
-def take_pending(session_id: str, tool_use_id: str) -> tuple[float, list[RepositorySnapshot]] | None:
+def read_pending(session_id: str, tool_use_id: str) -> tuple[float, list[RepositorySnapshot]] | None:
+    """A call's start and before snapshots; the file stays until remove_pending(), after its events are kept."""
     pending = get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}"
 
     if pending.exists():
         payload = json.loads(pending.read_text(encoding=_TEXT_ENCODING))
-        pending.unlink()
         return payload["start"], [RepositorySnapshot(**snapshot) for snapshot in payload["snapshots"]]
     else:
         return None
+
+
+def remove_pending(session_id: str, tool_use_id: str) -> None:
+    """Drop a call's pending file once its events are in the record, so it is never in neither."""
+    pending = get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}"
+
+    pending.unlink(missing_ok=True)
 
 
 def remove_expired_records() -> None:
@@ -210,29 +263,38 @@ def remove_expired_records() -> None:
 def load_file_history(session_id: str, root: str, path: str) -> FileHistory | None:
     """The chain of this session's writes to one file, or None when it recorded none.
 
-    Raises SessionWritesError when the record names contents git no longer has.
+    Raises SessionWritesError when a record, or contents it names, cannot be read back.
     """
-    own = [event for event in _read_events(session_id) if event.root == root and event.path == path]
+    events = _read_file_events(root, path)
+    own = [event for session, event in events if session == session_id]
     working_tree = Path(root, path)
     working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
 
     if own:
-        others = _read_other_events(session_id, root, path)
-        own_writes = tuple(_make_own_write(event, others) for event in sorted(own, key=_get_event_end))
+        foreign = _list_foreign_writes(session_id, root, path, events)
+        own_writes = tuple(_make_recorded_write(event, foreign) for event in sorted(own, key=_get_event_end))
         return FileHistory(_read_blob(root, own[0].before), own_writes, working_text)
     else:
         return None
 
 
 def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | None) -> bool:
-    """Whether every change from base to the working tree came from this session's recorded writes."""
-    events = (event for event in _read_events(session_id) if event.root == root and event.path == path)
-    own = sorted(events, key=_get_event_end)
-    chain = [base_blob, *(blob for event in own for blob in (event.before, event.after))]
-    working_tree = _store_files(root, [path])[path]
-    is_unbroken = all(chain[index] == chain[index + 1] for index in range(0, len(chain) - 1, 2))
+    """Whether every change from base to the working tree came from this session's uncontested writes.
 
-    return bool(own) and is_unbroken and chain[-1] == working_tree
+    Records that cannot be read back count as not all its own.
+    """
+    try:
+        events = _read_file_events(root, path)
+        own = sorted((event for session, event in events if session == session_id), key=_get_event_end)
+        foreign = _list_foreign_writes(session_id, root, path, events)
+        chain = [base_blob, *(blob for event in own for blob in (event.before, event.after))]
+        working_tree = _store_files(root, [path])[path]
+        is_unbroken = all(chain[index] == chain[index + 1] for index in range(0, len(chain) - 1, 2))
+        is_uncontested = not any(_is_contested(event, foreign) for event in own)
+
+        return bool(own) and is_unbroken and chain[-1] == working_tree and is_uncontested
+    except SessionWritesError:
+        return False
 
 
 def is_line_tracked(root: str, path: str) -> bool:
@@ -285,10 +347,16 @@ def _describe_file(session_id: str, absolute_path: str) -> str:
         foreign = list_foreign_lines(base, history.working_tree, own.text)
         shown = "".join(f"\n  {line.kind.value} {line.line_number}: {line.text}" for line in foreign)
         tangled = "".join(f"\n  ! {line.rstrip()}" for line in own.entangled)
+        unsure = "".join(f"\n  ? {line.kind.value} {line.text.rstrip()}" for line in own.contested)
         summary = f"{path}: {len(foreign)} changed lines are not this session's and would be left out{shown}"
         entangled = f"\n{len(own.entangled)} own lines cannot be separated from them:{tangled}" if own.entangled else ""
+        contested = (
+            f"\n{len(own.contested)} of them changed while another session also wrote this file, so they may be this session's:{unsure}"
+            if own.contested
+            else ""
+        )
 
-        return summary + entangled
+        return summary + entangled + contested
 
 
 def _get_config_directory() -> Path:
@@ -369,32 +437,164 @@ def _parse_float(text: str) -> float | None:
 
 
 def _read_events(session_id: str) -> list[WriteEvent]:
+    """The session's events, skipping fields a newer hook added.
+
+    Raises SessionWritesError on a line that does not parse, such as one
+    another hook is still appending.
+    """
     record = get_record_directory() / f"{session_id}{_RECORD_SUFFIX}"
-    lines = record.read_text(encoding=_TEXT_ENCODING).splitlines() if record.exists() else []
+    lines = _read_record_text(record).split(_RECORD_LINE_END)
 
-    return [WriteEvent(**json.loads(line)) for line in lines if line.strip()]
-
-
-def _make_own_write(event: WriteEvent, others: list[WriteEvent]) -> OwnWrite:
-    overlapping = [other for other in others if other.start < event.end and event.start < other.end]
-    inserted = sum((_count_inserted(event.root, other) for other in overlapping), Counter())
-
-    return OwnWrite(_read_blob(event.root, event.before), _read_blob(event.root, event.after), inserted)
+    return [_parse_event(record, number, line) for number, line in enumerate(lines, start=1) if line.strip()]
 
 
-def _count_inserted(root: str, event: WriteEvent) -> Counter[str]:
-    before = Counter(_read_blob(root, event.before).splitlines(keepends=True))
-    after = Counter(_read_blob(root, event.after).splitlines(keepends=True))
+def _read_record_text(record: Path) -> str:
+    """A record's text, empty when it does not exist (none yet, or expired); raises SessionWritesError otherwise."""
+    try:
+        content = record.read_bytes()
+    except FileNotFoundError:
+        return ""
+    except OSError as error:
+        raise SessionWritesError(f"{record.name} cannot be read ({error})") from error
+    else:
+        return content.decode(_TEXT_ENCODING, errors="replace")
 
-    return after - before
+
+def _parse_event(record: Path, number: int, line: str) -> WriteEvent:
+    try:
+        entry = json.loads(line)
+        event = WriteEvent(**{key: value for key, value in entry.items() if key in _EVENT_FIELDS})
+    except (ValueError, TypeError, AttributeError) as error:
+        raise SessionWritesError(f"{record.name} line {number} cannot be read ({error})") from error
+    else:
+        return event
 
 
-def _read_other_events(session_id: str, root: str, path: str) -> list[WriteEvent]:
-    records = [record for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}") if record.stem != session_id]
+def _read_recorded_roots(session_id: str) -> set[str]:
+    """Repositories the session's record names; a line or record that cannot be read loses only its own roots."""
+    record = get_record_directory() / f"{session_id}{_RECORD_SUFFIX}"
+
+    try:
+        lines = _read_record_text(record).split(_RECORD_LINE_END)
+    except SessionWritesError:
+        return set()
+    else:
+        return {root for root in map(_parse_root, lines) if root}
+
+
+def _parse_root(line: str) -> str | None:
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        return None
+    else:
+        root = entry.get(_ROOT_FIELD) if isinstance(entry, dict) else None
+
+        return root if isinstance(root, str) else None
+
+
+def _read_file_events(root: str, path: str) -> list[tuple[str, WriteEvent]]:
+    """Every session's events for one file, each with the session that recorded it."""
+    sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
 
     return [
-        event for record in records for event in _read_events(record.stem) if event.root == root and event.path == path
+        (session, event)
+        for session in sessions
+        for event in _read_events(session)
+        if event.root == root and event.path == path
     ]
+
+
+def _list_foreign_writes(
+    session_id: str,
+    root: str,
+    path: str,
+    events: Sequence[tuple[str, WriteEvent]],
+) -> list[WriteEvent]:
+    """Other sessions' recorded writes to the file and their calls still running over it."""
+    recorded = [event for session, event in events if session != session_id]
+
+    return [*recorded, *_read_running_calls(session_id, root, path)]
+
+
+def _read_running_calls(session_id: str, root: str, path: str) -> list[WriteEvent]:
+    """Other sessions' calls still running whose snapshots cover the file, as writes that have not ended.
+
+    A pending file that does not parse counts as covering it from when it was
+    written. Calls pending longer than the pending lifetime are taken as left
+    by a session that ended.
+    """
+    limit = time.time() - _PENDING_LIFETIME_SECONDS
+    pendings = [
+        pending
+        for pending in get_record_directory().glob(f"*/*{_PENDING_SUFFIX}")
+        if pending.parent.name != session_id and (_read_modified_time(pending) or 0.0) >= limit
+    ]
+    starts = [_read_pending_start(pending, root, path) for pending in pendings]
+
+    return [WriteEvent(root, path, None, None, start, math.inf, _PENDING_TOOL) for start in starts if start is not None]
+
+
+def _read_pending_start(pending: Path, root: str, path: str) -> float | None:
+    """When a running call began, if its snapshots cover the file, or None when they do not.
+
+    A pending file removed meanwhile belongs to a call whose events are
+    already in its record, so it is skipped.
+    """
+    try:
+        payload = json.loads(pending.read_text(encoding=_TEXT_ENCODING))
+        snapshots = [RepositorySnapshot(**snapshot) for snapshot in payload["snapshots"]]
+        start = float(payload["start"])
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError, TypeError, KeyError):
+        return _read_modified_time(pending)
+    else:
+        is_covering = any(
+            snapshot.root == root and (snapshot.covers_repository or path in snapshot.blobs) for snapshot in snapshots
+        )
+
+        return start if is_covering else None
+
+
+def _read_modified_time(path: Path) -> float | None:
+    """A file's modification time, or None when it was removed meanwhile, as hooks remove pending files."""
+    try:
+        modified = path.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    else:
+        return modified
+
+
+def _make_recorded_write(event: WriteEvent, foreign: Sequence[WriteEvent]) -> RecordedWrite:
+    before = _read_blob(event.root, event.before)
+    after = _read_blob(event.root, event.after)
+
+    return RecordedWrite(before, after, _is_contested(event, foreign))
+
+
+def _is_contested(event: WriteEvent, foreign: Sequence[WriteEvent]) -> bool:
+    """Whether another session may have written part of this write's change.
+
+    An Edit or Write that its own reported change explains exactly is the
+    session's whatever ran meanwhile, and one with anything else in its
+    snapshots is not. Any other write is contested when another session's
+    write or running call overlaps its time.
+    """
+    if event.exact is not None:
+        return not event.exact
+    else:
+        return any(_is_overlapping(event, other) for other in foreign)
+
+
+def _is_overlapping(event: WriteEvent, other: WriteEvent) -> bool:
+    """Whether two writes' times overlap, widened by a margin when either is a record whose times do not enclose
+    its snapshots (an earlier record format, or a running call's pending file)."""
+    is_enclosed = min(event.record_format, other.record_format) >= RECORD_FORMAT
+    margin = 0.0 if is_enclosed else _OVERLAP_MARGIN_SECONDS
+
+    return other.start < event.end + margin and event.start < other.end + margin
 
 
 def _get_event_end(event: WriteEvent) -> float:
@@ -452,6 +652,7 @@ def _read_committed_blob(root: str, head: str | None, path: str) -> str | None:
     return decode_content(output).strip() or None if output is not None else None
 
 
+@functools.cache
 def _read_blob(root: str, blob: str | None) -> str:
     if blob:
         return decode_content(_run_git(root, "cat-file", "blob", blob))

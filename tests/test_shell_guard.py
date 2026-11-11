@@ -11,16 +11,17 @@ its actual decision as a Markdown table instead of running unittest.
 
 from __future__ import annotations
 
+import difflib
 import importlib.util
 import json
 import os
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
 import unittest
-from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -105,6 +106,7 @@ exec "{real_git}" "$@"
 """
 
 EDIT_TOOL = "Edit"
+WRITE_TOOL = "Write"
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
 POST_TOOL_USE_FAILURE = "PostToolUseFailure"
@@ -114,6 +116,7 @@ CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 RECORD_DIRECTORY_NAME = "session-writes"
 RECORD_HOOK = SCRIPTS_DIRECTORY / "session-writes-hook.py"
 SESSION_WRITES_SCRIPT = SCRIPTS_DIRECTORY / "session_writes.py"
+RECORD_FORMAT = 2
 OWN_LINES_MODULE = SCRIPTS_DIRECTORY / "own_lines.py"
 OWN_SESSION = "session-own"
 OTHER_SESSION = "session-other"
@@ -128,6 +131,21 @@ BROKEN_INDEX_TEXT = "not an index"
 TRANSCRIPT_PROJECT = "project"
 READ_TOOL = "Read"
 HOUR_SECONDS = 60 * 60
+PATCH_CONTEXT_LINES = 3
+PERSON_TEXT = "typed by a person\n"
+CREATE_TYPE = "create"
+NO_NEWLINE_MARKER = "\\ No newline at end of file"
+RANDOM_SEED = 20261110
+RANDOM_TRIALS = 1500
+RANDOM_BASE_LINES = 6
+RANDOM_BASE_TEXTS = ("a\n", "b\n", "c\n", "d\n", "e\n")
+RANDOM_OTHER_CHANCE = 0.6
+RANDOM_CONTESTED_CHANCE = 0.3
+RANDOM_OPERATIONS = ("insert", "delete", "replace")
+RANDOM_REPEATED_TEXTS = ("\n", "a\n", "b\n")
+TITLE_TEXT = "# log\n"
+EDITED_TITLE_TEXT = "# edited log\n"
+NEW_PAGE_TEXT = "new page\n"
 
 
 @dataclass
@@ -729,7 +747,8 @@ class OwnLinesCase:
     base: str
     expected: str
     entangled: tuple[str, ...] = ()
-    others_in_last_window: str = ""
+    contested_writes: tuple[int, ...] = ()
+    expected_contested: tuple[tuple[str, str], ...] = ()
 
 
 LOG_BASE = "# log\n\n## base\ntext\n"
@@ -832,13 +851,14 @@ OWN_LINES_CASES = (
     ),
     OwnLinesCase("new file", "", (("", "x\ny\n"),), "x\ny\n", "", "x\ny\n"),
     OwnLinesCase(
-        "their line written during my command",
+        "lines written while another session also wrote are asked about",
         "a\n",
         (("a\n", "a\nmine\ntheirs\n"),),
         "a\nmine\ntheirs\n",
         "a\n",
-        "a\nmine\n",
-        others_in_last_window="theirs\n",
+        "a\n",
+        contested_writes=(0,),
+        expected_contested=(("+", "mine\n"), ("+", "theirs\n")),
     ),
     OwnLinesCase(
         "my line inside their block",
@@ -908,6 +928,146 @@ OWN_LINES_CASES = (
         "a\nR\nb\n",
         "a\nR\nb\n",
     ),
+    OwnLinesCase(
+        "my committed edit of a base line, then more",
+        "a\nL\nb\n",
+        (("a\nL\nb\n", "a\nL2\nb\n"), ("a\nL2\nb\n", "a\nL2\nb\nM\n")),
+        "a\nL2\nb\nM\n",
+        "a\nL2\nb\n",
+        "a\nL2\nb\nM\n",
+    ),
+    OwnLinesCase(
+        "a contested replacement is asked about, not halved",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", "a\nB\nc\n"),),
+        "a\nB\nc\n",
+        "a\nb\nc\n",
+        "a\nb\nc\n",
+        contested_writes=(0,),
+        expected_contested=(("-", "b\n"), ("+", "B\n")),
+    ),
+    OwnLinesCase(
+        "a contested line I deleted later",
+        "a\n",
+        (("a\n", "a\nX\n"), ("a\nX\n", "a\n")),
+        "a\n",
+        "a\n",
+        "a\n",
+        contested_writes=(0,),
+    ),
+    OwnLinesCase(
+        "my edit of a contested line",
+        "a\n",
+        (("a\n", "a\nX\n"), ("a\nX\n", "a\nY\n")),
+        "a\nY\n",
+        "a\n",
+        "a\nY\n",
+        entangled=("Y\n",),
+        contested_writes=(0,),
+    ),
+    OwnLinesCase(
+        "my replacement replaced again by them",
+        "a\nb\n",
+        (("a\nb\n", "a2\nb\n"),),
+        "a3\nb\n",
+        "a\nb\n",
+        "b\n",
+        entangled=("a\n",),
+    ),
+    OwnLinesCase(
+        "my replacement replaced again by me",
+        "a\nb\n",
+        (("a\nb\n", "a2\nb\n"), ("a2\nb\n", "a3\nb\n")),
+        "a3\nb\n",
+        "a\nb\n",
+        "a3\nb\n",
+    ),
+    OwnLinesCase(
+        "my removal hidden by their re-added line is asked about",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", ""),),
+        "a\n",
+        "a\nb\nc\n",
+        "",
+        expected_contested=(("-", "a\n"),),
+    ),
+    OwnLinesCase(
+        "my removal written again by them between my writes is asked about",
+        "a\nb\n",
+        (("a\nb\n", "a\n"), ("a\nb\n", "a\nb\nc\n")),
+        "a\nb\nc\n",
+        "a\nb\n",
+        "a\nc\n",
+        expected_contested=(("+", "b\n"), ("-", "b\n")),
+    ),
+    OwnLinesCase(
+        "a base that two versions of different lines have is asked about",
+        "\nb\n",
+        (("\nb\n", "b\n"), ("", "b\n")),
+        "b\n",
+        "b\n",
+        "b\nb\n",
+        expected_contested=(("-", "b\n"),),
+    ),
+    OwnLinesCase(
+        "my removal of their committed line out of order is asked about",
+        "n1\nn2\nn3\n",
+        (("n1\nn2\nn3\n", "n1\nn2\nn3\nn4\n"), ("n6\nn2\nn5\nn7\n", "n2\nn5\nn7\n")),
+        "n2\nn5\nn7\n",
+        "n6\nn1\nn2\nn5\nn7\n",
+        "n6\nn1\nn2\nn5\nn7\n",
+        expected_contested=(("-", "n6\n"),),
+    ),
+    OwnLinesCase(
+        "my committed line in a base that is no version is not added twice",
+        "a\n",
+        (("a\n", "a\nX\n"),),
+        "a\nX\n",
+        "a\nX\nQ\n",
+        "a\nX\nQ\n",
+    ),
+    OwnLinesCase(
+        "my removal of my committed line in a base that is no version",
+        "a\n",
+        (("a\n", "a\nX\n"), ("a\nX\n", "a\n")),
+        "a\n",
+        "a\nX\nQ\n",
+        "a\nQ\n",
+    ),
+    OwnLinesCase(
+        "my replacement of the first of two same lines",
+        "b\nb\n",
+        (("b\nb\n", "X\nb\n"),),
+        "X\nb\n",
+        "b\nb\n",
+        "X\nb\n",
+    ),
+    OwnLinesCase(
+        "my removal of one blank line among blank lines, while they add below",
+        "a\n\nb\n\nc\n",
+        (("a\n\nb\n\nc\n", "a\n\nb\nc\n"),),
+        "a\n\nb\nc\n\nd\n",
+        "a\n\nb\n\nc\n",
+        "a\n\nb\nc\n",
+    ),
+    OwnLinesCase(
+        "contested removals hidden by a contested re-added line are asked about",
+        "a\nb\nc\n",
+        (("a\nb\nc\n", ""), ("", "a\n")),
+        "a\n",
+        "a\nb\nc\n",
+        "a\nb\nc\n",
+        contested_writes=(0, 1),
+        expected_contested=(("-", "b\n"), ("-", "c\n")),
+    ),
+    OwnLinesCase(
+        "a line in a CRLF file",
+        "a\r\nb\r\n",
+        (("a\r\nb\r\n", "a\r\nB\r\nmine\r\n"),),
+        "a\r\nB\r\nmine\r\n",
+        "a\r\nb\r\n",
+        "a\r\nB\r\nmine\r\n",
+    ),
 )
 OWN_LINES_SPECIFICATION = importlib.util.spec_from_file_location("own_lines", OWN_LINES_MODULE)
 own_lines = importlib.util.module_from_spec(OWN_LINES_SPECIFICATION)
@@ -915,12 +1075,117 @@ sys.modules[OWN_LINES_SPECIFICATION.name] = own_lines
 OWN_LINES_SPECIFICATION.loader.exec_module(own_lines)
 
 
-def make_history(case: OwnLinesCase) -> own_lines.FileHistory:
-    last = len(case.writes) - 1
-    writes = tuple(
-        own_lines.OwnWrite(
-            before, after, Counter([case.others_in_last_window] if index == last and case.others_in_last_window else [])
+def make_random_history(generator: random.Random) -> tuple[own_lines.FileHistory, str, str, bool]:
+    """A history of own writes, some contested, between other sessions' writes that keep base lines.
+
+    Returns it with the base, the right commit when nothing is contested, and
+    whether any contested change is still left in the working tree.
+    """
+    texts = [generator.choice(RANDOM_BASE_TEXTS) for _ in range(RANDOM_BASE_LINES)]
+    base_ids = list(range(RANDOM_BASE_LINES))
+    ids = list(base_ids)
+    writes: list[own_lines.RecordedWrite] = []
+    own_ids: dict[bool, set[int]] = {True: set(), False: set()}
+    unsure_ids: set[int] = set()
+
+    for _ in range(generator.randint(1, 3)):
+        if generator.random() < RANDOM_OTHER_CHANCE:
+            ids, _ = change_random_lines(ids, texts, generator, set(base_ids))
+        before = "".join(texts[index] for index in ids)
+        contested = generator.random() < RANDOM_CONTESTED_CHANCE
+        ids, changes = change_random_lines(ids, texts, generator, set())
+
+        for is_added, index in changes:
+            (unsure_ids if contested else own_ids[is_added]).add(index)
+        writes.append(own_lines.RecordedWrite(before, "".join(texts[index] for index in ids), contested))
+    if generator.random() < RANDOM_OTHER_CHANCE:
+        ids, _ = change_random_lines(ids, texts, generator, set(base_ids))
+    removed = own_ids[False]
+    expected = "".join(
+        texts[index] for index in ids if (index in base_ids and index not in removed) or index in own_ids[True]
+    )
+    unsure = any(index in ids or index in base_ids for index in unsure_ids - removed)
+    history = own_lines.FileHistory(writes[0].before, tuple(writes), "".join(texts[index] for index in ids))
+
+    return history, "".join(texts[index] for index in base_ids), expected, unsure
+
+
+def change_random_lines(
+    ids: list[int],
+    texts: list[str],
+    generator: random.Random,
+    kept: set[int],
+) -> tuple[list[int], list[tuple[bool, int]]]:
+    """Insert, delete or replace one or two lines (each new line has its own text), never removing kept lines."""
+    ids = list(ids)
+    changes: list[tuple[bool, int]] = []
+
+    for _ in range(generator.randint(1, 2)):
+        removable = [position for position, index in enumerate(ids) if index not in kept]
+        operation = generator.choice(RANDOM_OPERATIONS) if removable else RANDOM_OPERATIONS[0]
+        position = generator.choice(removable) if operation != RANDOM_OPERATIONS[0] else generator.randint(0, len(ids))
+
+        if operation != RANDOM_OPERATIONS[0]:
+            changes.append((False, ids.pop(position)))
+        if operation != RANDOM_OPERATIONS[1]:
+            texts.append(f"new {len(texts)}\n")
+            ids.insert(position, len(texts) - 1)
+            changes.append((True, len(texts) - 1))
+    return ids, changes
+
+
+def make_random_own_history(generator: random.Random) -> tuple[own_lines.FileHistory, str]:
+    """Own writes only, of lines whose text repeats, with a base from before them or after one (an own commit)."""
+    lines = [generator.choice(RANDOM_REPEATED_TEXTS) for _ in range(RANDOM_BASE_LINES)]
+    versions = ["".join(lines)]
+
+    for _ in range(generator.randint(1, 3)):
+        lines = change_repeated_lines(lines, generator)
+
+        versions.append("".join(lines))
+    writes = tuple(own_lines.RecordedWrite(before, after, False) for before, after in zip(versions, versions[1:]))
+
+    return own_lines.FileHistory(versions[0], writes, versions[-1]), generator.choice(versions)
+
+
+def make_random_shared_history(generator: random.Random) -> own_lines.FileHistory:
+    """Own writes with another writer's changes between and after them, all of lines whose text repeats."""
+    lines = [generator.choice(RANDOM_REPEATED_TEXTS) for _ in range(RANDOM_BASE_LINES)]
+    first_before = "".join(lines)
+    writes: list[own_lines.RecordedWrite] = []
+
+    for _ in range(generator.randint(1, 3)):
+        if generator.random() < RANDOM_OTHER_CHANCE:
+            lines = change_repeated_lines(lines, generator)
+        before = "".join(lines)
+        lines = change_repeated_lines(lines, generator)
+
+        writes.append(own_lines.RecordedWrite(before, "".join(lines), False))
+    if generator.random() < RANDOM_OTHER_CHANCE:
+        lines = change_repeated_lines(lines, generator)
+    return own_lines.FileHistory(first_before, tuple(writes), "".join(lines))
+
+
+def change_repeated_lines(lines: list[str], generator: random.Random) -> list[str]:
+    """Insert, delete or replace one or two lines, each new line repeating a text the file may already have."""
+    lines = list(lines)
+
+    for _ in range(generator.randint(1, 2)):
+        operation = generator.choice(RANDOM_OPERATIONS) if lines else RANDOM_OPERATIONS[0]
+        position = (
+            generator.randint(0, len(lines)) if operation == RANDOM_OPERATIONS[0] else generator.randrange(len(lines))
         )
+
+        if operation != RANDOM_OPERATIONS[0]:
+            del lines[position]
+        if operation != RANDOM_OPERATIONS[1]:
+            lines.insert(position, generator.choice(RANDOM_REPEATED_TEXTS))
+    return lines
+
+
+def make_history(case: OwnLinesCase) -> own_lines.FileHistory:
+    writes = tuple(
+        own_lines.RecordedWrite(before, after, index in case.contested_writes)
         for index, (before, after) in enumerate(case.writes)
     )
 
@@ -932,8 +1197,54 @@ class OwnLinesTest(unittest.TestCase):
         for case in OWN_LINES_CASES:
             with self.subTest(case=case.name):
                 content = own_lines.build_own_content(case.base, make_history(case))
+                contested = tuple((line.kind.value, line.text) for line in content.contested)
                 self.assertEqual(content.text, case.expected)
                 self.assertEqual(content.entangled, case.entangled)
+                self.assertEqual(contested, case.expected_contested)
+
+    def test_random_histories_never_commit_wrong_content(self) -> None:
+        """Random interleavings with known authorship: a commit that goes through holds exactly the own changes.
+
+        Other sessions keep base lines here, so the right commit is the working
+        tree's own and base lines in order; contested writes may be anything.
+        """
+        generator = random.Random(RANDOM_SEED)
+
+        for trial in range(RANDOM_TRIALS):
+            with self.subTest(trial=trial):
+                history, base, expected, unsure = make_random_history(generator)
+                content = own_lines.build_own_content(base, history)
+                is_asked = bool(content.entangled or content.contested)
+
+                self.assertTrue(is_asked or (content.text == expected and not unsure))
+
+    def test_random_histories_of_one_session_commit_whole(self) -> None:
+        """With no other writer, the commit is the working tree exactly, however often line texts repeat."""
+        generator = random.Random(RANDOM_SEED)
+
+        for trial in range(RANDOM_TRIALS):
+            with self.subTest(trial=trial):
+                history, base = make_random_own_history(generator)
+                content = own_lines.build_own_content(base, history)
+
+                self.assertEqual((content.text, content.entangled, content.contested), (history.working_tree, (), ()))
+
+    def test_random_histories_already_committed_stay_as_they_are(self) -> None:
+        """When base is the working tree, nothing is left to commit: the commit is base, or it asks."""
+        generator = random.Random(RANDOM_SEED)
+
+        for trial in range(RANDOM_TRIALS):
+            with self.subTest(trial=trial):
+                history = make_random_shared_history(generator)
+                content = own_lines.build_own_content(history.working_tree, history)
+                is_asked = bool(content.entangled or content.contested)
+
+                self.assertTrue(is_asked or content.text == history.working_tree)
+
+    def test_earlier_record_types_are_gone(self) -> None:
+        """A process that loads an older sibling module must fail on import, not read the new records."""
+        self.assertFalse(hasattr(own_lines, "OwnWrite"))
+        self.assertFalse(hasattr(own_lines, "OwnContent"))
 
     def test_foreign_lines_of_a_whole_file(self) -> None:
         case = OWN_LINES_CASES[0]
@@ -944,6 +1255,106 @@ class OwnLinesTest(unittest.TestCase):
         self.assertEqual({line.kind for line in foreign}, {own_lines.ChangeKind.ADDED})
         self.assertEqual(own_lines.list_foreign_lines(case.base, own, own), [])
         self.assertEqual(own_lines.list_foreign_lines(case.base, case.base + MINE_1, own), [])
+
+
+sys.path.insert(0, str(SCRIPTS_DIRECTORY))
+RECORD_HOOK_SPECIFICATION = importlib.util.spec_from_file_location("session_writes_hook", RECORD_HOOK)
+record_hook = importlib.util.module_from_spec(RECORD_HOOK_SPECIFICATION)
+RECORD_HOOK_SPECIFICATION.loader.exec_module(record_hook)
+CRLF_PATCH = [
+    {"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 4, "lines": [" one", "-two", "+TWO", "+added", " three"]}
+]
+QUOTE_PATCH = [
+    {"oldStart": 1, "oldLines": 2, "newStart": 1, "newLines": 2, "lines": ["-say “hi”", "+say “bye”", " end"]}
+]
+NO_NEWLINE_PATCH = [
+    {
+        "oldStart": 1,
+        "oldLines": 1,
+        "newStart": 1,
+        "newLines": 2,
+        "lines": ["-last", NO_NEWLINE_MARKER, "+last", "+second", NO_NEWLINE_MARKER],
+    },
+]
+
+
+class RecordHookExactnessTest(unittest.TestCase):
+    """Payload shapes captured from Claude Code's Edit and Write responses on 2026-11-10."""
+
+    def test_edit_results(self) -> None:
+        cases = (
+            ("CRLF file keeps its endings", CRLF_PATCH, "one\r\ntwo\r\nthree\r\n", "one\r\nTWO\r\nadded\r\nthree\r\n"),
+            ("curly quotes as written", QUOTE_PATCH, "say “hi”\nend\n", "say “bye”\nend\n"),
+            ("no newline at the end", NO_NEWLINE_PATCH, "last", "last\nsecond"),
+            ("another writer swapped lines in reach", CRLF_PATCH, "two\none\nthree\n", None),
+            ("a file that mixes endings", CRLF_PATCH, "one\r\ntwo\nthree\r\n", None),
+            ("no structured patch", None, "one\n", None),
+        )
+
+        for name, hunks, before, expected in cases:
+            with self.subTest(case=name):
+                response = {} if hunks is None else {"structuredPatch": hunks}
+                self.assertEqual(record_hook._expect_edit(response, before), expected)
+
+    def test_write_results(self) -> None:
+        requested = {"tool_input": {"content": "new\n"}}
+
+        self.assertEqual(record_hook._expect_write(requested, {"type": CREATE_TYPE}), "new\n")
+        self.assertEqual(record_hook._expect_write({}, {"content": "reported\n"}), "reported\n")
+        self.assertIsNone(record_hook._expect_write({}, {"type": CREATE_TYPE}))
+
+    def test_failures_and_other_tools(self) -> None:
+        failed = {"tool_name": EDIT_TOOL, "hook_event_name": POST_TOOL_USE_FAILURE, "tool_response": {}}
+        unknown = {"tool_name": WRITE_TOOL, "hook_event_name": POST_TOOL_USE, "tool_response": "done"}
+        command = {"tool_name": BASH_TOOL, "hook_event_name": POST_TOOL_USE, "tool_response": {}}
+
+        self.assertIs(record_hook._judge_exactness(failed, "/", None, None), False)
+        self.assertIs(record_hook._judge_exactness(unknown, "/", None, None), False)
+        self.assertIsNone(record_hook._judge_exactness(command, "/", None, None))
+
+
+def make_edit_response(original: str, edited: str) -> dict:
+    """The Edit tool's response: the file it read and a jsdiff structured patch, both with line endings in LF."""
+    old_lines = split_keeping_ends(original.replace("\r\n", "\n"))
+    new_lines = split_keeping_ends(edited.replace("\r\n", "\n"))
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
+    hunks = [make_hunk(group, old_lines, new_lines) for group in matcher.get_grouped_opcodes(PATCH_CONTEXT_LINES)]
+
+    return {"originalFile": "".join(old_lines), "structuredPatch": hunks}
+
+
+def split_keeping_ends(text: str) -> list[str]:
+    pieces = text.split("\n")
+
+    return [f"{piece}\n" for piece in pieces[:-1]] + ([pieces[-1]] if pieces[-1] else [])
+
+
+def make_hunk(group: list[tuple[str, int, int, int, int]], old_lines: list[str], new_lines: list[str]) -> dict:
+    """One jsdiff hunk: lines without their LF, and a marker after a line that has none."""
+    signed = [
+        (sign, line)
+        for tag, i1, i2, j1, j2 in group
+        for sign, line in (
+            [(" ", line) for line in old_lines[i1:i2]]
+            if tag == "equal"
+            else [*(("-", line) for line in old_lines[i1:i2]), *(("+", line) for line in new_lines[j1:j2])]
+        )
+    ]
+    lines = [
+        entry
+        for sign, line in signed
+        for entry in ([f"{sign}{line[:-1]}"] if line.endswith("\n") else [f"{sign}{line}", NO_NEWLINE_MARKER])
+    ]
+    first, last = group[0], group[-1]
+    old_count = last[2] - first[1]
+
+    return {
+        "oldStart": first[1] + 1 if old_count else first[1],
+        "oldLines": old_count,
+        "newStart": first[3] + 1,
+        "newLines": last[4] - first[3],
+        "lines": lines,
+    }
 
 
 class SessionWritesFixture:
@@ -1002,8 +1413,9 @@ class SessionWritesFixture:
         tool_input: dict,
         response: dict | None = None,
         broken_index: Path | None = None,
+        tool: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        tool = EDIT_TOOL if "file_path" in tool_input else BASH_TOOL
+        tool = tool or (EDIT_TOOL if "file_path" in tool_input else BASH_TOOL)
         payload = {
             "session_id": session,
             "hook_event_name": event,
@@ -1034,17 +1446,68 @@ class SessionWritesFixture:
             file.write(text)
         self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
 
-    def edit(self, session: str, path: str, old: str, new: str) -> None:
-        """Replace text as the Edit tool does, which reports the file it started from."""
+    def edit(self, session: str, path: str, old: str, new: str, reported: bool = True, during: str = "") -> None:
+        """Replace text as the Edit tool does, which reports the file it started from and its patch with LF endings.
+
+        reported=False sends only the file it started from, as records made before patches were kept.
+        during is text someone else appends to the file before the hook looks at it again.
+        """
         self.tool_uses += 1
         tool_use = f"call-{self.tool_uses}"
         file = self.repository / path
         edit_input = {"file_path": str(file)}
-        original = file.read_text()
 
         self.run_record_hook(session, PRE_TOOL_USE, tool_use, edit_input)
-        file.write_text(original.replace(old, new, 1))
-        self.run_record_hook(session, POST_TOOL_USE, tool_use, edit_input, {"originalFile": original})
+        original = file.read_bytes().decode()
+        edited = original.replace(old, new, 1)
+
+        file.write_bytes(edited.encode())
+        self.append(path, during)
+        response = make_edit_response(original, edited) if reported else {"originalFile": original}
+
+        self.run_record_hook(session, POST_TOOL_USE, tool_use, edit_input, response)
+
+    def create_file(self, session: str, path: str, text: str) -> None:
+        """Create a file as the Write tool does, which reports the whole content as added."""
+        self.tool_uses += 1
+        tool_use = f"call-{self.tool_uses}"
+        write_input = {"file_path": str(self.repository / path)}
+        response = {"type": CREATE_TYPE, "content": text, "structuredPatch": [], "originalFile": None}
+
+        self.run_record_hook(session, PRE_TOOL_USE, tool_use, write_input, tool=WRITE_TOOL)
+        (self.repository / path).write_text(text)
+        self.run_record_hook(session, POST_TOOL_USE, tool_use, write_input, response, tool=WRITE_TOOL)
+
+    def start_command(self, session: str) -> tuple[str, str, dict]:
+        """Begin a command that is still running, or waiting for approval, while other calls happen."""
+        self.tool_uses += 1
+        tool_use = f"call-{self.tool_uses}"
+        command = {"command": "python3 long-running.py"}
+
+        self.run_record_hook(session, PRE_TOOL_USE, tool_use, command)
+        return session, tool_use, command
+
+    def finish_command(self, started: tuple[str, str, dict]) -> None:
+        session, tool_use, command = started
+
+        self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
+
+    def append(self, path: str, text: str) -> None:
+        """Write to a file without any hook, as a running command or a person does."""
+        with (self.repository / path).open("a", newline="") as file:
+            file.write(text)
+
+    def report(self, session: str, path: str) -> str:
+        result = subprocess.run(
+            [sys.executable, str(SESSION_WRITES_SCRIPT), "report", path],
+            env=self.environment(session),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        return result.stdout + result.stderr
 
     def run_wrapper(
         self, *arguments: str, session: str | None = OWN_SESSION, index: Path | None = None
@@ -1058,11 +1521,11 @@ class SessionWritesFixture:
             check=False,
         )
 
-    def run_own_lines_commit(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+    def run_own_lines_commit(self, *arguments: str, session: str = OWN_SESSION) -> subprocess.CompletedProcess[str]:
         base = self.run_git("rev-parse", "HEAD")
 
         self.run_git("read-tree", base, index=self.private_index)
-        return self.run_wrapper("--expect-head", base, *arguments, index=self.private_index)
+        return self.run_wrapper("--expect-head", base, *arguments, session=session, index=self.private_index)
 
     def read_committed_bytes(self, path: str) -> bytes:
         result = subprocess.run(
@@ -1288,14 +1751,229 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.fixture.read_committed_bytes(CRLF_FILE), b"a\r\nb\r\nmine\r\n")
 
+    def test_edit_keeps_crlf_line_endings(self) -> None:
+        (self.fixture.repository / CRLF_FILE).write_bytes(b"a\r\nb\r\n")
+        self.fixture.run_git("add", CRLF_FILE)
+        self.fixture.run_git("commit", "-q", "-m", "Chore: add a file with CRLF line endings")
+        self.fixture.edit(OWN_SESSION, CRLF_FILE, "b\r\n", "B\r\nmine\r\n")
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, CRLF_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(CRLF_FILE), b"a\r\nB\r\nmine\r\n")
+
+    def test_moved_line_in_my_edit_stays_mine(self) -> None:
+        log = self.fixture.repository / LOG_FILE
+        edit_input = {"file_path": str(log)}
+        hunk = {"oldStart": 5, "oldLines": 2, "newStart": 5, "newLines": 2, "lines": ["-first", " second", "+first"]}
+        moved_the_other_way = {"structuredPatch": [hunk]}
+
+        self.fixture.append(LOG_FILE, "first\nsecond\n")
+        self.fixture.run_git("commit", "-q", "-am", "Chore: add two lines")
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "move-1", edit_input)
+        log.write_text(LOG_BASE + "second\nfirst\n")
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "move-1", edit_input, moved_the_other_way)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE + "second\nfirst\n")
+
+    def test_edit_record_marks_exact_edits(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, MY_TEXT, MY_EDITED_TEXT, during=PERSON_TEXT)
+        command, exact, mixed = self.fixture.read_events(OWN_SESSION)
+
+        self.assertEqual((command["exact"], exact["exact"], mixed["exact"]), (None, True, False))
+        self.assertEqual({event["record_format"] for event in (command, exact, mixed)}, {RECORD_FORMAT})
+
+    def test_edit_inside_another_sessions_command_stays_mine(self) -> None:
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.finish_command(started)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE.replace(BASE_TEXT, EDITED_TEXT))
+
+    def test_unexplained_or_old_edit_inside_another_command_is_asked(self) -> None:
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OWN_SESSION}.jsonl"
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT, reported=False)
+        self.fixture.finish_command(started)
+        unexplained = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        old_format = [
+            {key: value for key, value in event.items() if key not in ("exact", "record_format")}
+            for event in self.fixture.read_events(OWN_SESSION)
+        ]
+        record.write_text("".join(json.dumps(event) + "\n" for event in old_format))
+        old = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(unexplained.returncode, FOREIGN_LINES_EXIT, unexplained.stdout + unexplained.stderr)
+        self.assertEqual(old.returncode, FOREIGN_LINES_EXIT, old.stdout + old.stderr)
+
+    def test_command_around_another_sessions_edit_is_asked(self) -> None:
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        started = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.append(LOG_FILE, MINE_1)
+        self.fixture.finish_command(started)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_waiting_command_does_not_hold_up_the_editor(self) -> None:
+        started = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, TITLE_TEXT, EDITED_TITLE_TEXT)
+        self.fixture.finish_command(started)
+        report = self.fixture.report(OWN_SESSION, LOG_FILE)
+        other = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE, session=OTHER_SESSION)
+
+        self.assertIn("may be this session's", report)
+        self.assertEqual(other.returncode, 0, other.stdout + other.stderr)
+        self.assertEqual(
+            self.fixture.read_committed_bytes(LOG_FILE).decode(),
+            LOG_BASE.replace(BASE_TEXT, EDITED_TEXT).replace(TITLE_TEXT, EDITED_TITLE_TEXT),
+        )
+
+    def test_command_inside_another_command_is_neither_sessions(self) -> None:
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.finish_command(started)
+        own = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
+        other = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE, session=OTHER_SESSION)
+
+        self.assertEqual(own.returncode, FOREIGN_LINES_EXIT, own.stdout + own.stderr)
+        self.assertEqual(other.returncode, FOREIGN_LINES_EXIT, other.stdout + other.stderr)
+
+    def test_replacement_inside_another_command_is_asked_not_halved(self) -> None:
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, LOG_BASE.replace(BASE_TEXT, EDITED_TEXT), "w")
+        self.fixture.finish_command(started)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        report = self.fixture.report(OWN_SESSION, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("another session also wrote this file", result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+        self.assertIn("may be this session's", report)
+
+    def test_running_command_of_another_session_is_asked(self) -> None:
+        self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_line_written_and_undone_by_others_in_my_command_is_asked(self) -> None:
+        started = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, BASE_TEXT, BASE_TEXT + MINE_2)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, BASE_TEXT + MINE_2, BASE_TEXT)
+        self.fixture.append(LOG_FILE, MINE_2 + MINE_1)
+        self.fixture.finish_command(started)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_my_replacement_replaced_by_them_is_asked(self) -> None:
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, EDITED_TEXT, DRAFT_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("they changed your replacement", result.stderr)
+
+    def test_edit_finishing_as_my_command_starts_is_asked(self) -> None:
+        log = self.fixture.repository / LOG_FILE
+        edit_input = {"file_path": str(log)}
+        original = log.read_text()
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "edit-early", edit_input)
+        log.write_text(original + THEIRS)
+        started = self.fixture.start_command(OWN_SESSION)
+        self.fixture.run_record_hook(
+            OTHER_SESSION, POST_TOOL_USE, "edit-early", edit_input, make_edit_response(original, original + THEIRS)
+        )
+        self.fixture.append(LOG_FILE, MINE_1)
+        self.fixture.finish_command(started)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_broken_record_line_stops_the_commit(self) -> None:
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+        own_record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OWN_SESSION}.jsonl"
+        cut_in_a_character = '{"root": "한'.encode()[:-1]
+
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        record.write_bytes(b'{"root": "half written\n' + cut_in_a_character)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        with own_record.open("ab") as file:
+            file.write(cut_in_a_character + b"\n")
+        followed = self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "after-broken", {"command": "true"})
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("cannot be read back", result.stderr)
+        self.assertEqual((followed.returncode, followed.stderr), (0, ""))
+
+    def test_overlapping_record_refuses_whole_file(self) -> None:
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+        root = str(self.fixture.repository)
+        missing = "0" * 40
+
+        self.fixture.write(OWN_SESSION, BINARY_FILE, BINARY_TEXT, "w")
+        event = {**self.fixture.read_events(OWN_SESSION)[-1], "before": missing, "after": missing[:-1] + "1"}
+        record.write_text(json.dumps({**event, "root": root}) + "\n")
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, BINARY_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_line_typed_during_my_edit_is_asked(self) -> None:
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT, during=PERSON_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn(PERSON_TEXT, (self.fixture.repository / LOG_FILE).read_text())
+
+    def test_change_during_a_failed_edit_is_asked(self) -> None:
+        edit_input = {"file_path": str(self.fixture.repository / LOG_FILE)}
+
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "edit-failed", edit_input)
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE_FAILURE, "edit-failed", edit_input)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_created_file_is_mine(self) -> None:
+        self.fixture.create_file(OWN_SESSION, OTHER_FILE, NEW_PAGE_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(OTHER_FILE).decode(), NEW_PAGE_TEXT)
+
+    def test_committed_edit_of_a_base_line_then_more(self) -> None:
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_2)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
     def test_new_file_in_new_folder_is_recorded(self) -> None:
         path = self.fixture.repository / NEW_FOLDER_FILE
-        write_input = {"file_path": str(path)}
+        write_input = {"file_path": str(path), "content": NEW_PAGE_TEXT}
+        response = {"type": CREATE_TYPE, "filePath": str(path)}
 
-        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "write-1", write_input)
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "write-1", write_input, tool=WRITE_TOOL)
         path.parent.mkdir()
-        path.write_text("hello\n")
-        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "write-1", write_input, {})
+        path.write_text(NEW_PAGE_TEXT)
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "write-1", write_input, response, tool=WRITE_TOOL)
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, NEW_FOLDER_FILE)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
