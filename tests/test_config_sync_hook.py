@@ -84,10 +84,18 @@ class ConfigSyncHookTest(unittest.TestCase):
 
         self.assertEqual(self._run_hook(), "")
 
-    def test_failed_check_adds_nothing(self):
-        self._write_stand_in(1)
+    def test_failed_check_is_reported(self):
+        self._write_stand_in(3)
+        context = json.loads(self._run_hook())["hookSpecificOutput"]["additionalContext"]
 
-        self.assertEqual(self._run_hook(), "")
+        self.assertIn("could not run", context)
+        self.assertIn("exit code 3", context)
+
+    def test_recorded_checkout_without_install_script_is_reported(self):
+        context = json.loads(self._run_hook())["hookSpecificOutput"]["additionalContext"]
+
+        self.assertIn("could not run", context)
+        self.assertIn("has no scripts/install.py", context)
 
     def test_unknown_checkout_adds_nothing(self):
         (self._claude_home / ".ai-config-install" / "checkout").unlink()

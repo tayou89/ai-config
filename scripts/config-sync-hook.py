@@ -2,9 +2,11 @@
 """Tell a new session when this computer and the shared AI configuration differ.
 
 A SessionStart hook. It runs `install.py --check` from the checkout that the
-last install recorded and adds the report to the session's context. The same
-report is shown again only after a day, so sessions that start together do
-not all repeat it. Any failure leaves the session start unchanged.
+last install recorded and adds the report to the session's context. A check
+that cannot run is reported too, since a silent failure would hide every
+later difference. The same notice is shown again only after a day, so
+sessions that start together do not all repeat it. The hook never blocks or
+fails the session start.
 """
 
 from __future__ import annotations
@@ -16,6 +18,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
+
+
+class _Notice(NamedTuple):
+    heading: str
+    report: str
+
 
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
@@ -31,10 +40,16 @@ _REPORT_LIMIT = 4000
 _DIGEST_KEY = "digest"
 _SHOWN_AT_KEY = "shown_at"
 _HOOK_EVENT = "SessionStart"
-_NOTICE_HEADING = (
+_DIFFERENCES_HEADING = (
     "[CONFIG SYNC] This computer and the shared AI configuration repository differ (install.py --check below). "
     "Tell the user once, in one line, in your first reply. Resolve it only when your task is the shared "
     "configuration; otherwise leave it to such a session (the settings sync rule in CLAUDE.md)."
+)
+_FAILURE_HEADING = (
+    "[CONFIG SYNC] The check that compares this computer with the shared AI configuration repository could not run "
+    "(details below), so differences would go unnoticed. Tell the user once, in one line, in your first reply. Fix it "
+    "only when your task is the shared configuration; otherwise leave it to such a session (the settings sync rule in "
+    "CLAUDE.md)."
 )
 
 
@@ -49,21 +64,33 @@ def main() -> int:
 
 def _add_notice(config_directory: Path) -> None:
     record = config_directory / _STATE_DIRECTORY / _NOTICE_RECORD
-    report = _run_check(config_directory)
-    digest = hashlib.sha256(report.encode("utf-8")).hexdigest()
+    notice = _run_check(config_directory)
+    digest = hashlib.sha256(f"{notice.heading}\n{notice.report}".encode()).hexdigest() if notice else ""
     now = time.time()
 
-    if report and _is_new_report(record, digest, now):
-        print(json.dumps(_make_hook_output(report)))
+    if notice and _is_new_report(record, digest, now):
+        print(json.dumps(_make_hook_output(notice)))
         _record_notice(record, digest, now)
 
 
-def _run_check(config_directory: Path) -> str:
-    """Return the check report, or "" when the computer matches or no checkout is known."""
+def _run_check(config_directory: Path) -> _Notice | None:
+    """Return the notice to show, or None when the computer matches or nothing was ever installed here."""
     checkout = _find_checkout(config_directory)
+
+    if checkout is None:
+        return None
+    elif (checkout / _INSTALL_SCRIPT).is_file():
+        return _read_check_result(checkout)
+    else:
+        missing_script = f"The checkout the last install recorded, {checkout}, has no {_INSTALL_SCRIPT}."
+
+        return _Notice(_FAILURE_HEADING, missing_script)
+
+
+def _read_check_result(checkout: Path) -> _Notice | None:
     environment = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
-    if checkout and (checkout / _INSTALL_SCRIPT).is_file():
+    try:
         result = subprocess.run(
             [sys.executable, "-I", "-X", "utf8", str(checkout / _INSTALL_SCRIPT), "--check"],
             capture_output=True,
@@ -72,9 +99,21 @@ def _run_check(config_directory: Path) -> str:
             timeout=_CHECK_TIMEOUT_SECONDS,
             env=environment,
         )
-        return result.stdout.strip() if result.returncode == _EXIT_DIFFERENCES_FOUND else ""
-    else:
-        return ""
+
+        if result.returncode == _EXIT_DIFFERENCES_FOUND:
+            return _Notice(_DIFFERENCES_HEADING, result.stdout.strip())
+        elif result.returncode == 0:
+            return None
+        else:
+            return _Notice(_FAILURE_HEADING, _describe_failure(result))
+    except subprocess.TimeoutExpired:
+        return _Notice(_FAILURE_HEADING, f"install.py --check did not finish within {_CHECK_TIMEOUT_SECONDS} seconds.")
+
+
+def _describe_failure(result: subprocess.CompletedProcess[str]) -> str:
+    output = (result.stderr or result.stdout).strip()
+
+    return f"install.py --check stopped with exit code {result.returncode}: {output}"
 
 
 def _find_checkout(config_directory: Path) -> Path | None:
@@ -89,8 +128,8 @@ def _find_checkout(config_directory: Path) -> Path | None:
         return None
 
 
-def _make_hook_output(report: str) -> dict:
-    context = f"{_NOTICE_HEADING}\n{report[:_REPORT_LIMIT]}"
+def _make_hook_output(notice: _Notice) -> dict:
+    context = f"{notice.heading}\n{notice.report[:_REPORT_LIMIT]}"
 
     return {"hookSpecificOutput": {"hookEventName": _HOOK_EVENT, "additionalContext": context}}
 
