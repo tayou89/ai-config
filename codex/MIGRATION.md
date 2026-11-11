@@ -20,7 +20,7 @@ The detailed code style remains a personal preference: braces, positive conditio
 | Runtime test probes and remote fixes | Probe required authorized test endpoints; a blocked ping is not proof of failure. Other repositories and infrastructure need their own authorized scope. |
 | Mandatory soak tests and automatic test-stash pop | Use bounded soak tests when in scope; inspect and apply only the specific authorized test patch. |
 | PR prose split by line count | Keep required Purpose/Background/Changes/Verification, but choose paragraphs/lists by meaning under the shared writing principles. |
-| Automatic Claude settings sync, Discord forwarding, session commands | Not migrated: tool-specific behavior and unrelated external actions. No permission or credential configuration is copied. |
+| Automatic Claude settings sync, Discord forwarding, session commands | Not migrated: tool-specific behavior and unrelated external actions. No credentials are copied. Codex command rules in `codex/rules/` (one allow rule for the ego browser command, added 2026-11-11) are merged into `~/.codex/rules/` three ways. |
 | User-invoked `deep-prompt`, `outside-review`, and `domain-pass` skills (added 2026-11-05) | Not migrated yet: they are written for Claude slash commands and subagents, and `outside-review` calls Codex itself as the other model family. |
 
 ## Clarified Technical Assumptions
@@ -41,4 +41,4 @@ Updated: 2026-11-06. The design, decisions-and-collaboration, and planning rules
 
 Validate skill frontmatter and local references, compare installed files with these sources, and verify discovery using the local Codex skill registry. This confirms installation and discovery, not guaranteed compliance in every future output. Hooks are not enforcement mechanisms in this package. Restart Codex if changed skills do not appear; a new conversation provides a clean instruction-loading check.
 
-GitHub and local copies do not synchronize automatically. Update both deliberately. Preserve existing unrelated global instructions and skills when reinstalling.
+GitHub and local copies do not synchronize automatically. Update both deliberately; `scripts/install.py --check` lists what differs in either direction. Preserve existing unrelated global instructions and skills when reinstalling.

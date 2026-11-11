@@ -30,6 +30,7 @@ python3 scripts/install.py --apply
 
 The first command only shows what would change. The second writes it, after copying every file it replaces into `backups/ai-config-install-<time>/` inside the Claude or Codex folder. The script stops when the repository has uncommitted changes or is behind its upstream (`--allow-dirty` overrides this), and when the `python3` (and on Windows `bash`) that the hooks call is missing, because a hook that cannot start lets every command through. Other flags:
 
+- `--check` writes nothing and skips the plugin commands, so it takes under a second. It lists work in this checkout that is not committed, pushed, or pulled (fetching at most once an hour), repository changes not installed here, and what only this computer has: `settings.json` entries, Codex `config.toml` keys, lines in the merged instruction and rule files, and files in the configuration folders (`skills/`, `scripts/`, `agents/`, `commands/`, `output-styles/`, and the Codex `skills/`, `prompts/`, and `rules/`). It exits 7 when it finds any. Entries each computer decides for itself are listed in `PER_COMPUTER_SETTINGS` and keys the Codex app writes in `CODEX_APP_KEYS`; extend those lists rather than leave a difference unexplained.
 - `--prune` moves installed files the repository no longer has (for example a retired file in `rules/`) to the backups folder; without it they are only listed.
 - `--first-merge keep-local` or `--first-merge use-repository` answers the one question the script cannot: when `CLAUDE.md` or the Codex `AGENTS.md` differs from the repository and no earlier install is recorded, are the differences this computer's own lines or stale lines to replace? Later runs merge three ways against the copy installed last time (kept in `.ai-config-install/base/`), so lines added on one computer survive and lines the repository removed disappear.
 
@@ -38,7 +39,7 @@ The first command only shows what would change. The second writes it, after copy
 | `CLAUDE.md` | `CLAUDE.md` | Three-way merge |
 | Each file in `rules/` | `rules/` | Copied |
 | Each directory under `skills/` | `skills/<name>/` | Copied; skills not in the repository, such as a linked `ego-browser`, are left alone |
-| `claude-commit.py`, `shell-guard-hook.py`, `shell_command.py`, `secret_files.py`, `commit_arguments.py`, `own_lines.py`, `session_writes.py`, `session_commits.py`, `session-writes-hook.py`, `reply-language-hook.py` | `scripts/` | Copied (`check-commit.py`, `install.py`, and `sync-shared-rules.py` stay in the repository) |
+| `claude-commit.py`, `shell-guard-hook.py`, `shell_command.py`, `secret_files.py`, `commit_arguments.py`, `own_lines.py`, `session_writes.py`, `session_commits.py`, `session-writes-hook.py`, `reply-language-hook.py`, `config-sync-hook.py` | `scripts/` | Copied (`check-commit.py`, `install.py`, and `sync-shared-rules.py` stay in the repository) |
 | `statusline-command.sh` | `statusline-command.sh` | Copied |
 | Each directory under `mods/` | `mods/<name>/` | Copied; `claude-plans/` and generated `.claude-plugin/types/` there are left alone |
 | `settings.json` | `settings.json` | Merged: `enabledPlugins`, `extraKnownMarketplaces`, and `env` by name, other repository keys replaced, keys only this computer has kept. Paths to `mods/` are filled in for this computer |
@@ -47,7 +48,8 @@ The first command only shows what would change. The second writes it, after copy
 | --- | --- | --- |
 | `codex/AGENTS.md` | `AGENTS.md` | Three-way merge |
 | Each directory under `codex/skills/` | `skills/<name>/` | Copied |
-| `codex/settings.json` `config` | `config.toml` | Top-level keys set; tables and lines the Codex app writes are left alone |
+| Each file in `codex/rules/` | `rules/<name>` | Three-way merge (command rules; this computer's own lines are kept) |
+| `codex/settings.json` `config` | `config.toml` | Top-level keys, and the keys of tables it names (such as `tui`), set; other tables and lines the Codex app writes are left alone |
 
 The script then installs the Claude plugins that `settings.json` enables with `claude plugin marketplace add` and `claude plugin install`, and the Codex plugins in `codex/settings.json` with `codex plugin marketplace add` and `codex plugin add`. Claude Code would also fetch user-enabled plugins in the background after the first session starts, but installing them here makes the result immediate and checkable with `claude plugin list`. Plugins and connectors turned on for your claude.ai account (in the desktop app's Customize) arrive with the sign-in, not from this repository.
 
@@ -64,8 +66,9 @@ The script does not install apps or sign in. On a new computer, in this order:
 2. Sign in yourself: the Claude app and `claude`, the ChatGPT app and `codex login`, and `gh auth login` (HTTPS, credential in the system keychain). Set `git config --global user.name` and `user.email`.
 3. Clone this repository and run the dry run, then `--apply` (with `--first-merge` if it asks).
 4. In a Claude session, run `/mcp` and authorize the plugin servers you use. Plugins a project enables only for itself (`--scope local` or `project`) are not installed by this script; install them again in that project.
+5. Set what each computer keeps for itself: the Claude app's own settings (Settings → Claude Code: notifications, keep awake, browser, the Remote Control default; the branch prefix and auto-archive on pull request close follow the account) and the Codex app's display settings. The `code-plan` skill adds `claude-plans/` to the global gitignore the first time it runs.
 
-Project data outside git (Claude's auto memory and transcripts under `~/.claude/projects/`, review material) is not part of this repository. Auto memory is kept per computer, in a folder named after the project's path, so keep the same user name and project path when copying it.
+Project data outside git (Claude's auto memory and transcripts under `~/.claude/projects/`, the desktop app's session notes under `~/Library/Application Support/Claude/side-session-notes/`, review material) is not part of this repository. Auto memory is kept per computer, in a folder named after the project's path, so keep the same user name and project path when copying it.
 
 ## Maintenance
 
@@ -77,7 +80,9 @@ The reply-language hook (`reply-language-hook.py`) imports nothing from beside i
 
 Every commit in this checkout runs `.githooks/pre-commit` (`install.py` sets `core.hooksPath`), which copies out the index being committed and runs the sync check, every test, and the token scan in that copy. Commits need no approval (user decision, 2026-11-09), so this check is where a broken rule copy or script is stopped; do not bypass it with `--no-verify`. The hook runs the working tree's copy of `check-commit.py`, so a half-finished edit to that script by another session can stop commits until it is finished. After changing `scripts/check-commit.py` or the hook, run `python3 -m unittest tests.test_check_commit`.
 
-Review changes to the original Claude engineering rules for corresponding updates under `codex/`; do not copy Claude-only execution settings blindly. GitHub updates do not synchronize installed local copies automatically. After pulling and reviewing the changes, refresh them with `python3 scripts/install.py`, then `--apply`. After changing the install script, run `python3 tests/test_install.py`; when adding a script to `scripts/`, register it in the install script as a runtime or maintenance script (the test fails otherwise).
+The session-start hook (`config-sync-hook.py`) runs `install.py --check` from the checkout that the last `--apply` recorded in `.ai-config-install/checkout` inside the Claude folder, and adds its report to the session as a `[CONFIG SYNC]` notice; the same report repeats only after a day, and a failed or slow check adds nothing. After changing it, run `python3 tests/test_config_sync_hook.py`.
+
+Review changes to the original Claude engineering rules for corresponding updates under `codex/`; do not copy Claude-only execution settings blindly. GitHub updates do not synchronize installed local copies automatically. After pulling and reviewing the changes, refresh them with `python3 scripts/install.py`, then `--apply`, and confirm with `--check`. After changing the install script, run `python3 tests/test_install.py`; when adding a script to `scripts/`, register it in the install script as a runtime or maintenance script (the test fails otherwise).
 
 ## References
 

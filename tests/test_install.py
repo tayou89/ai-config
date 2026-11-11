@@ -206,7 +206,110 @@ class SetTomlTopLevelTest(unittest.TestCase):
 
     def test_rejects_unsupported_values(self):
         with self.assertRaises(install.InstallError):
-            install.set_toml_top_level("", {"model": ["list"]})
+            install.set_toml_top_level("", {"model": 1.5})
+
+    def test_writes_lists_of_text(self):
+        self.assertEqual(install.set_toml_top_level("", {"notify": ["a", "b"]}), 'notify = ["a", "b"]\n')
+
+    def test_refuses_to_replace_a_value_spanning_lines(self):
+        with self.assertRaises(install.InstallError):
+            install.set_toml_top_level('notify = [\n  "a",\n]\n', {"notify": ["b"]})
+
+
+class SetTomlTableTest(unittest.TestCase):
+    def test_replaces_keys_and_leaves_the_rest_of_the_table(self):
+        text = 'model = "m"\n\n[tui]\nstatus_line = ["old"]\nscreen_reader_detection_done = true\n\n[desktop]\nx = 1\n'
+        values = {"model": "m", "tui": {"status_line": ["new"], "terminal_title": ["t"]}}
+        updated = install.set_toml_values(text, values)
+
+        self.assertEqual(
+            updated,
+            'model = "m"\n\n[tui]\nterminal_title = ["t"]\nstatus_line = ["new"]\n'
+            "screen_reader_detection_done = true\n\n[desktop]\nx = 1\n",
+        )
+
+    def test_adds_a_missing_table_at_the_end(self):
+        updated = install.set_toml_values('model = "m"', {"tui": {"status_line": ["a"]}})
+
+        self.assertEqual(updated, 'model = "m"\n\n[tui]\nstatus_line = ["a"]\n')
+
+    def test_finds_a_header_with_a_comment(self):
+        updated = install.set_toml_values('[tui] # mine\nstatus_line = ["old"]\n', {"tui": {"status_line": ["new"]}})
+
+        self.assertEqual(updated, '[tui] # mine\nstatus_line = ["new"]\n')
+
+    def test_replaces_a_value_followed_by_a_comment(self):
+        updated = install.set_toml_values('[tui]\nstatus_line = ["old"] # mine\n', {"tui": {"status_line": ["new"]}})
+
+        self.assertEqual(updated, '[tui]\nstatus_line = ["new"]\n')
+
+    def test_refuses_a_table_defined_by_top_level_keys(self):
+        for text in ("tui = { status_line = [] }\n", "tui.status_line = []\n"):
+            with self.subTest(text=text), self.assertRaises(install.InstallError):
+                install.set_toml_values(text, {"tui": {"status_line": ["a"]}})
+
+    def test_nested_array_line_does_not_end_the_table(self):
+        text = '[tui]\nx = [\n  [1],\n]\nstatus_line = ["old"]\n'
+        updated = install.set_toml_values(text, {"tui": {"status_line": ["new"]}})
+
+        self.assertEqual(updated.count("status_line"), 1)
+
+
+class TomlKeysTest(unittest.TestCase):
+    def test_names_tables_and_their_bare_keys(self):
+        text = 'model = "m"\n[plugins."a@b"]\nenabled = true\n[tui.model_availability_nux]\n"gpt-x" = 1\n'
+
+        self.assertEqual(
+            install.list_toml_keys(text),
+            ["model", "plugins.a@b", "plugins.a@b.enabled", "tui.model_availability_nux"],
+        )
+
+    def test_reads_quoted_headers_with_brackets_and_dotted_keys(self):
+        text = '[projects."/a[b]"] # trusted\ntrust_level = "trusted"\n[x]\na.b = 1\n'
+
+        self.assertEqual(install.list_toml_keys(text), ["projects./a[b]", "projects./a[b].trust_level", "x", "x.a.b"])
+
+    def test_separates_repository_app_and_local_keys(self):
+        codex_settings = {
+            "config": {"model": "m", "tui": {"status_line": ["a"]}},
+            "marketplaces": {"market": "url"},
+            "plugins": ["tool@market"],
+        }
+        repository = install.make_codex_ownership(codex_settings)
+
+        self.assertTrue(repository.owns("tui.status_line"))
+        self.assertTrue(repository.owns("plugins.tool@market.enabled"))
+        self.assertFalse(repository.owns("tui.terminal_title"))
+        self.assertTrue(install.is_codex_app_key("plugins.browser@openai-bundled"))
+        self.assertTrue(install.is_codex_app_key("projects./Users/someone.trust_level"))
+        self.assertFalse(install.is_codex_app_key("tui.terminal_title"))
+
+
+class CheckoutDifferencesTest(unittest.TestCase):
+    def test_lists_uncommitted_unpushed_and_unpulled_work(self):
+        answers = {"status": " M CLAUDE.md\n", "rev-list": "2\t1\n"}
+        differences = install.find_checkout_differences(self._make_runner(answers, 0), Path("/repo"), 0.0)
+
+        self.assertEqual(len(differences), 3)
+
+    def test_clean_checkout_has_no_differences(self):
+        answers = {"status": "", "rev-list": "0\t0\n"}
+
+        self.assertEqual(install.find_checkout_differences(self._make_runner(answers, 0), Path("/repo"), 0.0), [])
+
+    def test_missing_upstream_is_reported(self):
+        answers = {"status": "", "rev-list": ""}
+
+        self.assertEqual(len(install.find_checkout_differences(self._make_runner(answers, 128), Path("/repo"), 0.0)), 1)
+
+    def _make_runner(self, answers: dict, rev_list_code: int):
+        def run(arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            command = arguments[3] if len(arguments) > 3 else ""
+            code = rev_list_code if command == "rev-list" else 0
+
+            return subprocess.CompletedProcess([], code, stdout=answers.get(command, ""), stderr="")
+
+        return run
 
 
 class RegistrationTest(unittest.TestCase):
@@ -307,10 +410,91 @@ class InstallerTest(unittest.TestCase):
         kept = self._run_installer(apply=True)
         pruned = self._run_installer(apply=True, prune=True)
 
-        self.assertTrue(any("retired.md" in note for note in kept._notes))
+        self.assertTrue(any("retired.md" in line for line in kept._local_only))
         self.assertFalse(extra.exists())
         self.assertTrue(list((self._platform.claude_home / "backups").rglob("retired.md")))
         self.assertTrue(any("retired.md" in change for change in pruned._changes))
+
+    def test_check_writes_nothing_and_lists_both_directions(self):
+        self._run_installer(apply=True)
+        skill = self._platform.claude_home / "skills" / "made-here" / "SKILL.md"
+        skill.parent.mkdir(parents=True)
+        skill.write_text("local skill\n", encoding="utf-8")
+        settings = self._platform.claude_home / "settings.json"
+        merged = json.loads(settings.read_text(encoding="utf-8"))
+        merged["extraKnownMarketplaces"]["added-here"] = {"source": {"source": "github", "repo": "someone/market"}}
+        merged["enabledPlugins"]["discord@claude-plugins-official"] = False
+        settings.write_text(json.dumps(merged), encoding="utf-8")
+        instruction = self._platform.claude_home / "CLAUDE.md"
+        instruction.write_text(instruction.read_text(encoding="utf-8") + LOCAL_LINE + "\n", encoding="utf-8")
+        before = settings.read_text(encoding="utf-8")
+        calls_before = len(self._commands.calls)
+        sections = self._check()
+        local_only = "\n".join(sections[install.LOCAL_ONLY_SECTION])
+
+        self.assertIn("made-here", local_only)
+        self.assertIn("extraKnownMarketplaces.added-here", local_only)
+        self.assertNotIn("discord", local_only)
+        self.assertNotIn("local-mods", local_only)
+        self.assertIn("CLAUDE.md: lines the repository does not have (1)", local_only)
+        self.assertEqual(settings.read_text(encoding="utf-8"), before)
+        self.assertFalse(any(call[0] in ("claude", "codex") for call in self._commands.calls[calls_before:]))
+
+    def test_check_after_install_finds_nothing(self):
+        self._run_installer(apply=True)
+        sections = self._check()
+
+        self.assertEqual(sections, {install.NOT_INSTALLED_SECTION: [], install.LOCAL_ONLY_SECTION: []})
+
+    def test_install_records_the_checkout(self):
+        self._run_installer(apply=True)
+        record = self._platform.claude_home / install.CHECKOUT_RECORD
+
+        self.assertEqual(record.read_text(encoding="utf-8").strip(), str(REPOSITORY_ROOT))
+
+    def test_check_reports_codex_skills_but_not_the_app_skills(self):
+        self._run_installer(apply=True)
+        for name in ("made-here", ".system"):
+            (self._platform.codex_home / "skills" / name).mkdir(parents=True)
+        local_only = "\n".join(self._check()[install.LOCAL_ONLY_SECTION])
+
+        self.assertIn("made-here", local_only)
+        self.assertNotIn(".system", local_only)
+
+    def test_check_reports_a_codex_config_it_cannot_change(self):
+        self._run_installer(apply=True)
+        config = self._platform.codex_home / "config.toml"
+        config.write_text('[tui]\nstatus_line = [\n  "a",\n]\n', encoding="utf-8")
+        not_installed = "\n".join(self._check()[install.NOT_INSTALLED_SECTION])
+
+        self.assertIn("spans several lines", not_installed)
+
+    def test_repeated_local_line_is_counted(self):
+        self._run_installer(apply=True)
+        instruction = self._platform.claude_home / "CLAUDE.md"
+        first_line = next(line for line in instruction.read_text(encoding="utf-8").splitlines() if line.strip())
+        instruction.write_text(instruction.read_text(encoding="utf-8") + first_line + "\n", encoding="utf-8")
+        local_only = "\n".join(self._check()[install.LOCAL_ONLY_SECTION])
+
+        self.assertIn("CLAUDE.md: lines the repository does not have (1)", local_only)
+
+    def test_codex_rules_keep_local_lines(self):
+        self._run_installer(apply=True)
+        rules = self._platform.codex_home / "rules" / "default.rules"
+        rules.write_text(rules.read_text(encoding="utf-8") + "local rule\n", encoding="utf-8")
+        self._run_installer(apply=True)
+
+        self.assertTrue(rules.read_text(encoding="utf-8").endswith("local rule\n"))
+        self.assertIn(
+            "default.rules: lines the repository does not have (1)",
+            "\n".join(self._check()[install.LOCAL_ONLY_SECTION]),
+        )
+
+    def _check(self) -> dict:
+        options = install.Options(apply=False, prune=False, allow_dirty=True, first_merge="", check=True)
+        installer = install.Installer(self._platform, options, self._commands.run, find_any_command)
+
+        return installer.check()
 
     def _run_installer(self, apply: bool, prune: bool = False, first_merge: str = "") -> "install.Installer":
         options = install.Options(apply=apply, prune=prune, allow_dirty=True, first_merge=first_merge)

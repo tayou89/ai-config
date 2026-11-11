@@ -58,6 +58,11 @@
           {
             "type": "command",
             "command": "python3 -c \"import os, subprocess, sys; d = os.path.expanduser('~/.claude'); sys.exit(subprocess.run(['git', '-C', d, 'pull', '--ff-only']).returncode if os.path.isdir(os.path.join(d, '.git')) else 0)\""
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/config-sync-hook.py\"",
+            "timeout": 30
           }
         ]
       }
@@ -179,6 +184,12 @@
       "source": {
         "source": "github",
         "repo": "cloudflare/skills"
+      }
+    },
+    "korean-skills": {
+      "source": {
+        "source": "github",
+        "repo": "daleseo/korean-skills"
       }
     },
     "taste-skill": {

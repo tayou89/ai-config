@@ -2,7 +2,22 @@
   "config": {
     "model": "gpt-6-astra",
     "model_reasoning_effort": "xhigh",
-    "project_doc_max_bytes": 65536
+    "project_doc_max_bytes": 65536,
+    "tui": {
+      "status_line": [
+        "model-with-reasoning",
+        "current-dir",
+        "git-branch",
+        "five-hour-limit",
+        "weekly-limit",
+        "context-remaining"
+      ],
+      "terminal_title": [
+        "spinner",
+        "project",
+        "thread-title"
+      ]
+    }
   },
   "marketplaces": {
     "taste-skill": "https://github.com/Leonxlnx/taste-skill.git"

@@ -2,7 +2,7 @@
 """install.py — install or refresh the Claude Code and Codex setup from this repository.
 
 Usage:
-    install.py [--apply] [--prune] [--allow-dirty] [--first-merge {keep-local,use-repository}]
+    install.py [--apply | --check] [--prune] [--allow-dirty] [--first-merge {keep-local,use-repository}]
 
 Without --apply nothing is written: the script prints what it would change.
 With --apply it first copies every file it replaces into a backups folder,
@@ -15,6 +15,12 @@ copy installed last time, so lines added on this computer survive and lines
 the repository removed disappear. When no earlier copy is recorded and the
 installed file differs, --first-merge says whether the differences are this
 computer's own lines (keep-local) or stale lines to replace (use-repository).
+
+With --check it writes nothing and skips the plugin commands, which take
+seconds, and lists what differs in both directions: work in this checkout
+that is not committed, pushed, or pulled, repository changes not installed
+here, and settings and files only this computer has. The session-start hook
+config-sync-hook.py runs it.
 
 Plugins named in settings.json and codex/settings.json are installed with
 the claude and codex commands. Sign-ins stay manual and are listed at the end.
@@ -30,6 +36,7 @@ Exit codes:
     4  an external command failed
     5  a command the hooks need is missing
     6  this operating system is not supported
+    7  --check found differences
 """
 
 from __future__ import annotations
@@ -45,9 +52,11 @@ import re
 import shutil
 import subprocess
 import sys
+import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Iterator, List, Mapping, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Sequence, Set, Tuple
 
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
@@ -73,6 +82,7 @@ MOD_PRESERVED_PATHS = ("claude-plans", ".claude-plugin/types")
 IGNORED_NAMES = ("__pycache__", ".DS_Store")
 RUNTIME_SCRIPTS = (
     "claude-commit.py",
+    "config-sync-hook.py",
     "shell-guard-hook.py",
     "shell_command.py",
     "secret_files.py",
@@ -112,12 +122,47 @@ CODEX_INSTALLED_STATUS = "installed"
 CODEX_PLUGIN_LINE = re.compile(r"^(\S+@\S+)\s+(not installed|installed)")
 TOML_TOP_LEVEL_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
 DIFF_PREVIEW_LINES = 40
+CODEX_RULES_DIRECTORY = "rules"
+CHECKOUT_RECORD = Path(STATE_DIRECTORY) / "checkout"
+FETCH_HEAD_FILE = "FETCH_HEAD"
+FETCH_INTERVAL_SECONDS = 3600
+PER_COMPUTER_SETTINGS = ("enabledPlugins.discord@claude-plugins-official",)
+ACCOUNT_SKILLS_NAME = "synced"
+CODEX_SYSTEM_SKILLS_NAME = ".system"
+CLAUDE_CONFIG_DIRECTORIES = (SKILLS_DIRECTORY, SCRIPTS_DIRECTORY, "agents", "commands", "output-styles")
+CLAUDE_CONFIG_FILES = ("keybindings.json",)
+CODEX_CONFIG_DIRECTORIES = (SKILLS_DIRECTORY, "prompts", CODEX_RULES_DIRECTORY)
+CODEX_APP_KEYS = (
+    "notify",
+    "service_tier",
+    "features",
+    "shell_environment_policy",
+    "desktop",
+    "projects",
+    "mcp_servers",
+    "tui.model_availability_nux",
+    "tui.screen_reader_detection_done",
+)
+CODEX_APP_MARKETPLACE_PREFIX = "openai-"
+CODEX_MARKETPLACES_TABLE = "marketplaces"
+CODEX_PLUGINS_TABLE = "plugins"
+TOML_TABLE_HEADER = re.compile(r"""^\s*\[((?:[^\[\]"']|"[^"]*"|'[^']*')+)\]\s*(?:#.*)?$""")
+TOML_ARRAY_TABLE_HEADER = re.compile(r"""^\s*\[\[((?:[^\[\]"']|"[^"]*"|'[^']*')+)\]\]\s*(?:#.*)?$""")
+TOML_KEY = re.compile(r"^\s*([A-Za-z0-9_.-]+)\s*=")
+TOML_LONG_STRING_QUOTES = ('"""', "'''")
+TOML_QUOTES = ('"', "'")
+TOML_COMMENT = "#"
+CHECKOUT_SECTION = "Repository checkout"
+NOT_INSTALLED_SECTION = "Repository changes not installed here"
+LOCAL_ONLY_SECTION = "Only on this computer (bring into the repository, or list as per-computer in install.py)"
+IN_SYNC_MESSAGE = "This computer matches the repository."
 MANUAL_STEPS = (
     "Sign in to the Claude app and run `claude` once to sign in there too.",
     "Sign in to the ChatGPT app and run `codex login`.",
     "Run `gh auth login` (HTTPS, store the credential in the system keychain).",
     "In a Claude session, run `/mcp` and authorize the plugin servers you use (for example Figma).",
     "Reinstall plugins a project enables only for itself (installed with --scope local or project).",
+    "Set the Claude and Codex apps' own settings, which each computer keeps for itself.",
 )
 
 EXIT_DIRTY_REPOSITORY = 1
@@ -126,6 +171,7 @@ EXIT_UNREGISTERED = 3
 EXIT_COMMAND_FAILED = 4
 EXIT_HOOK_RUNTIME_MISSING = 5
 EXIT_UNSUPPORTED_PLATFORM = 6
+EXIT_DIFFERENCES_FOUND = 7
 
 
 class InstallError(Exception):
@@ -164,6 +210,18 @@ class Options:
     prune: bool
     allow_dirty: bool
     first_merge: str
+    check: bool = False
+
+
+@dataclass(frozen=True)
+class KeyOwnership:
+    """Keys one owner sets in config.toml: named keys exactly, and whole tables with everything in them."""
+
+    keys: FrozenSet[str]
+    tables: Tuple[str, ...]
+
+    def owns(self, key: str) -> bool:
+        return key in self.keys or any(key == table or key.startswith(table + ".") for table in self.tables)
 
 
 def run_command(arguments: Sequence[str]) -> "subprocess.CompletedProcess[str]":
@@ -260,24 +318,166 @@ def merge_instruction_file(installed: Path, base: Path, repository: Path) -> str
         raise MergeConflictError(installed, result.stdout)
 
 
-def set_toml_top_level(text: str, values: Mapping[str, object]) -> str:
-    """Replace or insert top-level scalar keys before the first table; leave tables alone."""
-    lines = text.splitlines(keepends=True)
-    table_start = next((index for index, line in enumerate(lines) if line.lstrip().startswith("[")), len(lines))
-    remaining = dict(values)
-    head = []
+def set_toml_values(text: str, values: Mapping[str, object]) -> str:
+    """Set codex/settings.json `config` in config.toml: plain values at the top level, objects as tables."""
+    plain_values = {key: value for key, value in values.items() if not isinstance(value, dict)}
+    updated = set_toml_top_level(text, plain_values)
 
-    for line in lines[:table_start]:
-        match = TOML_TOP_LEVEL_KEY.match(line)
-        if match and match.group(1) in remaining:
-            key = match.group(1)
-            head.append(f"{key} = {format_toml_value(key, remaining.pop(key))}\n")
-        else:
-            head.append(line)
-    inserted = [f"{key} = {format_toml_value(key, value)}\n" for key, value in remaining.items()]
+    for table, table_values in values.items():
+        if isinstance(table_values, dict):
+            updated = set_toml_table(updated, table, table_values)
+    return updated
+
+
+def set_toml_top_level(text: str, values: Mapping[str, object]) -> str:
+    """Replace or insert top-level keys before the first table; leave tables alone."""
+    lines = text.splitlines(keepends=True)
+    table_start = find_next_toml_table(lines, 0)
+    head, remaining = replace_toml_keys(lines[:table_start], values)
+    inserted = format_toml_lines(remaining)
+
     if inserted and not head and table_start < len(lines):
         inserted.append("\n")
     return "".join(inserted + head + lines[table_start:])
+
+
+def set_toml_table(text: str, table: str, values: Mapping[str, object]) -> str:
+    """Replace or insert keys of one table, adding the table at the end when it is missing."""
+    lines = text.splitlines(keepends=True)
+    header = next((index for index, line in enumerate(lines) if read_toml_table_name(line) == table), len(lines))
+    table_end = find_next_toml_table(lines, header + 1)
+    body, remaining = replace_toml_keys(lines[header + 1 : table_end], values)
+
+    if header < len(lines):
+        return "".join(lines[: header + 1] + format_toml_lines(remaining) + body + lines[table_end:])
+    else:
+        check_toml_table_free(table, lines[: find_next_toml_table(lines, 0)])
+        return "".join(lines + make_toml_table_header(lines, table) + format_toml_lines(remaining))
+
+
+def replace_toml_keys(lines: Sequence[str], values: Mapping[str, object]) -> Tuple[List[str], Dict[str, object]]:
+    """Return the lines with each named key's value replaced, and the values no line held."""
+    remaining = dict(values)
+    replaced = []
+
+    for line in lines:
+        match = TOML_TOP_LEVEL_KEY.match(line)
+        if match and match.group(1) in remaining:
+            key = match.group(1)
+            check_single_line_value(key, line)
+            replaced.append(format_toml_line(key, remaining.pop(key)))
+        else:
+            replaced.append(line)
+    return replaced, remaining
+
+
+def find_next_toml_table(lines: Sequence[str], start: int) -> int:
+    return next((index for index in range(start, len(lines)) if is_toml_table_header(lines[index])), len(lines))
+
+
+def make_toml_table_header(lines: Sequence[str], table: str) -> List[str]:
+    line_end = "" if not lines or lines[-1].endswith("\n") else "\n"
+    blank_line = "\n" if lines else ""
+
+    return [f"{line_end}{blank_line}[{table}]\n"]
+
+
+def read_toml_table_name(line: str) -> str:
+    """Name a table header without its quotes, so [plugins."a@b"] reads as plugins.a@b; other lines read as ""."""
+    match = TOML_TABLE_HEADER.match(line)
+
+    return match.group(1).strip().replace('"', "").replace("'", "") if match else ""
+
+
+def list_toml_keys(text: str) -> List[str]:
+    """Name every table and every bare key in it as `table.key`; quoted keys are covered by their table."""
+    keys = []
+    table = ""
+
+    for line in text.splitlines():
+        table_name = read_toml_table_name(line)
+        match = TOML_KEY.match(line)
+
+        if table_name:
+            table = table_name
+            keys.append(table)
+        elif match:
+            keys.append(f"{table}.{match.group(1)}" if table else match.group(1))
+    return keys
+
+
+def make_codex_ownership(codex_settings: Mapping[str, Any]) -> KeyOwnership:
+    config = codex_settings["config"]
+    table_keys = {f"{table}.{key}" for table, values in config.items() if isinstance(values, dict) for key in values}
+    marketplaces = tuple(f"{CODEX_MARKETPLACES_TABLE}.{name}" for name in codex_settings["marketplaces"])
+    plugins = tuple(f"{CODEX_PLUGINS_TABLE}.{plugin}" for plugin in codex_settings["plugins"])
+
+    return KeyOwnership(keys=frozenset(set(config) | table_keys), tables=marketplaces + plugins)
+
+
+def is_codex_app_key(key: str) -> bool:
+    """Whether the Codex app writes this key itself, so each computer keeps its own value."""
+    is_app_marketplace = key.startswith(f"{CODEX_MARKETPLACES_TABLE}.{CODEX_APP_MARKETPLACE_PREFIX}")
+    is_app_plugin = key.startswith(f"{CODEX_PLUGINS_TABLE}.") and f"@{CODEX_APP_MARKETPLACE_PREFIX}" in key
+
+    return KeyOwnership(keys=frozenset(), tables=CODEX_APP_KEYS).owns(key) or is_app_marketplace or is_app_plugin
+
+
+def check_toml_table_free(table: str, top_level_lines: Sequence[str]) -> None:
+    """Refuse to add [table] where top-level keys already define it, which TOML forbids."""
+    names = {match.group(1) for match in map(TOML_KEY.match, top_level_lines) if match}
+
+    if any(name == table or name.startswith(table + ".") for name in names):
+        raise InstallError(
+            EXIT_MERGE_CONFLICT,
+            f"config.toml already sets {table} outside a [{table}] table, so it was not changed. Move those keys into [{table}], then run this script again.",
+        )
+
+
+def check_single_line_value(key: str, line: str) -> None:
+    if is_multi_line_value(strip_toml_comment(line.split("=", 1)[1].strip())):
+        raise InstallError(
+            EXIT_MERGE_CONFLICT,
+            f"config.toml: {key} spans several lines, so it was not changed. Write it on one line, then run this script again.",
+        )
+
+
+def strip_toml_comment(value: str) -> str:
+    """Drop a trailing comment, reading # inside quoted text as text."""
+    quote = ""
+    escaped = False
+
+    for index, character in enumerate(value):
+        if escaped:
+            escaped = False
+        elif quote == '"' and character == "\\":
+            escaped = True
+        elif quote and character == quote:
+            quote = ""
+        elif not quote and character in TOML_QUOTES:
+            quote = character
+        elif not quote and character == TOML_COMMENT:
+            return value[:index].rstrip()
+    return value
+
+
+def is_toml_table_header(line: str) -> bool:
+    return bool(TOML_TABLE_HEADER.match(line) or TOML_ARRAY_TABLE_HEADER.match(line))
+
+
+def is_multi_line_value(value: str) -> bool:
+    opens_collection = value.startswith(("[", "{")) and not value.endswith(("]", "}"))
+    opens_long_string = any(value.startswith(quote) and value.count(quote) == 1 for quote in TOML_LONG_STRING_QUOTES)
+
+    return opens_collection or opens_long_string
+
+
+def format_toml_lines(values: Mapping[str, object]) -> List[str]:
+    return [format_toml_line(key, value) for key, value in values.items()]
+
+
+def format_toml_line(key: str, value: object) -> str:
+    return f"{key} = {format_toml_value(key, value)}\n"
 
 
 def format_toml_value(key: str, value: object) -> str:
@@ -287,8 +487,82 @@ def format_toml_value(key: str, value: object) -> str:
         return str(value)
     elif isinstance(value, str):
         return json.dumps(value, ensure_ascii=False)
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return "[" + ", ".join(json.dumps(item, ensure_ascii=False) for item in value) + "]"
     else:
-        raise InstallError(EXIT_UNREGISTERED, f"codex/settings.json: {key} must be text, a number, or true/false.")
+        raise InstallError(
+            EXIT_UNREGISTERED,
+            f"codex/settings.json: {key} must be text, a number, true/false, or a list of text.",
+        )
+
+
+def list_setting_names(settings: Mapping[str, Any]) -> Set[str]:
+    """Name each top-level key, and each entry of the keys merged by name as `key.entry`."""
+    names: Set[str] = set()
+
+    for key, value in settings.items():
+        if key in MERGE_BY_NAME_KEYS and isinstance(value, dict):
+            names.update(f"{key}.{entry}" for entry in value)
+        else:
+            names.add(key)
+    return names
+
+
+def find_base_copy(root: Path, destination: Path) -> Path:
+    """The copy of an instruction file installed last time, which the three-way merge compares against."""
+    return root / STATE_DIRECTORY / BASE_DIRECTORY / destination.name
+
+
+def find_checkout_differences(run: Runner, repository_root: Path, now: float) -> List[str]:
+    """List work in the checkout that is not committed, pushed, or pulled, fetching at most once an hour."""
+    repository = str(repository_root)
+
+    fetch_if_stale(run, repository, now)
+    return list_uncommitted_work(run, repository) + list_unsynchronized_commits(run, repository)
+
+
+def fetch_if_stale(run: Runner, repository: str, now: float) -> None:
+    git_directory = run(["git", "-C", repository, "rev-parse", "--absolute-git-dir"]).stdout.strip()
+    fetch_head = Path(git_directory) / FETCH_HEAD_FILE
+
+    if not fetch_head.exists() or now - fetch_head.stat().st_mtime > FETCH_INTERVAL_SECONDS:
+        run(["git", "-C", repository, "fetch", "--quiet"])
+
+
+def list_uncommitted_work(run: Runner, repository: str) -> List[str]:
+    changed = run(["git", "-C", repository, "status", "--porcelain"]).stdout.splitlines()
+
+    if changed:
+        return [f"{repository} has uncommitted changes"]
+    else:
+        return []
+
+
+def list_unsynchronized_commits(run: Runner, repository: str) -> List[str]:
+    result = run(["git", "-C", repository, "rev-list", "--left-right", "--count", "HEAD...@{upstream}"])
+    counts = result.stdout.split()
+
+    if result.returncode != 0 or len(counts) != 2:
+        return [f"{repository} has no upstream branch to compare with"]
+    else:
+        ahead, behind = (int(count) for count in counts)
+        messages = []
+
+        if ahead:
+            messages.append(f"{ahead} commits in {repository} are not pushed")
+        if behind:
+            messages.append(f"{behind} commits on the remote are not pulled into {repository}")
+        return messages
+
+
+def list_entry_names(directory: Path) -> Set[str]:
+    return {entry.name for entry in list_entries(directory)}
+
+
+def count_lines(path: Path) -> Counter[str]:
+    lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+
+    return Counter(line for line in lines if line.strip())
 
 
 def find_mods(repository_root: Path) -> List[Mod]:
@@ -415,16 +689,34 @@ class Installer:
         self._changes: List[str] = []
         self._notes: List[str] = []
         self._conflicts: List[str] = []
+        self._local_only: List[str] = []
         self._mods = find_mods(REPOSITORY_ROOT)
 
     def install(self) -> None:
         self._report_prerequisites()
         self._set_commit_hooks_path()
+        self._record_checkout()
+        self._install_instruction_files()
         self._install_claude_files()
         self._install_codex_files()
         self._install_claude_plugins()
         self._install_codex_plugins()
         self._link_ego_skill()
+        self._find_local_only()
+
+    def check(self) -> Dict[str, List[str]]:
+        """Collect differences without writing and without the plugin commands, which take seconds."""
+        self._set_commit_hooks_path()
+        self._record_checkout()
+        self._install_instruction_files()
+        self._install_claude_files()
+        self._install_codex_files()
+        self._link_ego_skill()
+        self._find_local_only()
+        return {
+            NOT_INSTALLED_SECTION: self._changes + [conflict.splitlines()[0] for conflict in self._conflicts],
+            LOCAL_ONLY_SECTION: self._local_only,
+        }
 
     def print_summary(self) -> None:
         heading = "Changed" if self._options.apply else "Would change (dry run; pass --apply to write)"
@@ -432,6 +724,10 @@ class Installer:
         print(f"{heading}:")
         for line in self._changes or ["nothing"]:
             print(f"  - {line}")
+        if self._local_only:
+            print(f"{LOCAL_ONLY_SECTION}:")
+            for line in self._local_only:
+                print(f"  - {line}")
         if self._notes:
             print("Notes:")
             for line in self._notes:
@@ -465,14 +761,21 @@ class Installer:
         if current != COMMIT_HOOKS_DIRECTORY:
             self._run_action(["git", "-C", repository, "config", HOOKS_PATH_KEY, COMMIT_HOOKS_DIRECTORY])
 
+    def _record_checkout(self) -> None:
+        """Write where this checkout is, so the session-start hook can run its --check."""
+        record = self._platform.claude_home / CHECKOUT_RECORD
+        recorded = record.read_text(encoding="utf-8").strip() if record.exists() else ""
+
+        if recorded != str(REPOSITORY_ROOT):
+            self._write(record, f"{REPOSITORY_ROOT}\n", self._platform.claude_home)
+
+    def _install_instruction_files(self) -> None:
+        for source, destination, root in self._list_instruction_files():
+            self._install_instruction_file(source, destination, root)
+
     def _install_claude_files(self) -> None:
         claude_home = self._platform.claude_home
 
-        self._install_instruction_file(
-            REPOSITORY_ROOT / CLAUDE_INSTRUCTION_FILE,
-            claude_home / CLAUDE_INSTRUCTION_FILE,
-            claude_home,
-        )
         self._sync_directory(REPOSITORY_ROOT / RULES_DIRECTORY, claude_home / RULES_DIRECTORY, claude_home, ())
         for skill in sorted(list_entries(REPOSITORY_ROOT / SKILLS_DIRECTORY)):
             self._sync_directory(skill, claude_home / SKILLS_DIRECTORY / skill.name, claude_home, ())
@@ -495,11 +798,6 @@ class Installer:
     def _install_codex_files(self) -> None:
         codex_home = self._platform.codex_home
 
-        self._install_instruction_file(
-            CODEX_SOURCE_DIRECTORY / CODEX_INSTRUCTION_FILE,
-            codex_home / CODEX_INSTRUCTION_FILE,
-            codex_home,
-        )
         for skill in sorted(list_entries(CODEX_SOURCE_DIRECTORY / SKILLS_DIRECTORY)):
             self._sync_directory(skill, codex_home / SKILLS_DIRECTORY / skill.name, codex_home, ())
         self._install_codex_config()
@@ -509,23 +807,23 @@ class Installer:
         repository = load_json(REPOSITORY_ROOT / SETTINGS_FILE)
         installed = load_json(path) if path.exists() else {}
         merged = merge_settings(installed, repository, make_machine_settings(self._platform.claude_home, self._mods))
-        local_keys = sorted(key for key in installed if key not in repository)
 
         if merged != installed:
             self._write(path, format_json(merged), self._platform.claude_home)
-        if local_keys:
-            self._notes.append(f"settings.json keys only this computer has (kept): {', '.join(local_keys)}")
 
     def _install_codex_config(self) -> None:
-        path = self._platform.codex_home / CODEX_CONFIG_FILE
-        current = path.read_text(encoding="utf-8") if path.exists() else ""
-        updated = set_toml_top_level(current, load_json(CODEX_SETTINGS_PATH)["config"])
+        try:
+            path = self._platform.codex_home / CODEX_CONFIG_FILE
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            updated = set_toml_values(current, load_json(CODEX_SETTINGS_PATH)["config"])
 
-        if updated != current:
-            self._write(path, updated, self._platform.codex_home)
+            if updated != current:
+                self._write(path, updated, self._platform.codex_home)
+        except InstallError as error:
+            self._conflicts.append(str(error))
 
     def _install_instruction_file(self, source: Path, destination: Path, root: Path) -> None:
-        base = root / STATE_DIRECTORY / BASE_DIRECTORY / destination.name
+        base = find_base_copy(root, destination)
         repository_text = source.read_text(encoding="utf-8")
         conflicts_before = len(self._conflicts)
 
@@ -587,12 +885,11 @@ class Installer:
                 self._back_up(path, root)
                 path.unlink()
         else:
-            self._notes.append(f"{path} is not in the repository; pass --prune to move it to backups.")
+            self._local_only.append(f"{path} (not in the repository; --prune moves it to backups)")
 
     def _install_claude_plugins(self) -> None:
         if self._which("claude"):
-            repository = load_json(REPOSITORY_ROOT / SETTINGS_FILE)
-            settings = merge_settings({}, repository, make_machine_settings(self._platform.claude_home, self._mods))
+            settings = self._make_repository_settings()
             plugins = sorted(plugin for plugin, enabled in settings.get(ENABLED_PLUGINS_KEY, {}).items() if enabled)
             marketplaces = self._read_json_command(["claude", "plugin", "marketplace", "list", "--json"])
             known = {marketplace["name"] for marketplace in marketplaces}
@@ -636,6 +933,82 @@ class Installer:
                 link.symlink_to(source, target_is_directory=True)
         elif self._platform.links_ego_skill and not source.exists():
             self._notes.append("ego lite is not installed, so the ego-browser skill was not linked.")
+
+    def _find_local_only(self) -> None:
+        self._find_local_settings()
+        self._find_local_codex_keys()
+        self._find_local_instruction_lines()
+        self._find_unowned_paths()
+
+    def _find_local_settings(self) -> None:
+        path = self._platform.claude_home / SETTINGS_FILE
+        installed = load_json(path) if path.exists() else {}
+        expected = list_setting_names(self._make_repository_settings())
+        local_names = list_setting_names(installed) - expected - set(PER_COMPUTER_SETTINGS)
+
+        for name in sorted(local_names):
+            self._local_only.append(f"{path}: {name}")
+
+    def _find_local_codex_keys(self) -> None:
+        path = self._platform.codex_home / CODEX_CONFIG_FILE
+        repository = make_codex_ownership(load_json(CODEX_SETTINGS_PATH))
+        keys = list_toml_keys(path.read_text(encoding="utf-8")) if path.exists() else []
+
+        for key in keys:
+            if not repository.owns(key) and not is_codex_app_key(key):
+                self._local_only.append(f"{path}: {key}")
+
+    def _find_local_instruction_lines(self) -> None:
+        """Compare with the copy installed last time, so lines the repository has changed since are not taken for local ones."""
+        for source, destination, root in self._list_instruction_files():
+            base = find_base_copy(root, destination)
+            local_lines = count_lines(destination) - count_lines(base if base.exists() else source)
+
+            if local_lines:
+                self._local_only.append(
+                    f"{destination}: lines the repository does not have ({sum(local_lines.values())})",
+                )
+
+    def _find_unowned_paths(self) -> None:
+        for directory, owned_names in self._list_config_owners().items():
+            for entry in sorted(list_entries(directory)):
+                if entry.name not in owned_names:
+                    self._local_only.append(f"{entry} (not in the repository)")
+        for name in CLAUDE_CONFIG_FILES:
+            path = self._platform.claude_home / name
+            if path.exists() and not (REPOSITORY_ROOT / name).exists():
+                self._local_only.append(f"{path} (not in the repository)")
+
+    def _list_config_owners(self) -> Dict[Path, Set[str]]:
+        """Map each folder that holds configuration to the names the repository or this script puts there."""
+        claude_home = self._platform.claude_home
+        codex_home = self._platform.codex_home
+        owners = {claude_home / name: list_entry_names(REPOSITORY_ROOT / name) for name in CLAUDE_CONFIG_DIRECTORIES}
+        codex_owners = {
+            codex_home / name: list_entry_names(CODEX_SOURCE_DIRECTORY / name) for name in CODEX_CONFIG_DIRECTORIES
+        }
+
+        owners[claude_home / SKILLS_DIRECTORY] |= {EGO_SKILL_NAME, ACCOUNT_SKILLS_NAME}
+        owners[claude_home / SCRIPTS_DIRECTORY] = set(RUNTIME_SCRIPTS) | set(MAINTENANCE_SCRIPTS)
+        codex_owners[codex_home / SKILLS_DIRECTORY] |= {CODEX_SYSTEM_SKILLS_NAME}
+        return {**owners, **codex_owners}
+
+    def _list_instruction_files(self) -> List[Tuple[Path, Path, Path]]:
+        """The files merged three ways, as (repository source, installed copy, tool folder)."""
+        claude_home = self._platform.claude_home
+        codex_home = self._platform.codex_home
+        codex_rules = sorted(list_entries(CODEX_SOURCE_DIRECTORY / CODEX_RULES_DIRECTORY))
+
+        return [
+            (REPOSITORY_ROOT / CLAUDE_INSTRUCTION_FILE, claude_home / CLAUDE_INSTRUCTION_FILE, claude_home),
+            (CODEX_SOURCE_DIRECTORY / CODEX_INSTRUCTION_FILE, codex_home / CODEX_INSTRUCTION_FILE, codex_home),
+            *((rules, codex_home / CODEX_RULES_DIRECTORY / rules.name, codex_home) for rules in codex_rules),
+        ]
+
+    def _make_repository_settings(self) -> dict:
+        repository = load_json(REPOSITORY_ROOT / SETTINGS_FILE)
+
+        return merge_settings({}, repository, make_machine_settings(self._platform.claude_home, self._mods))
 
     def _read_json_command(self, arguments: Sequence[str]) -> list:
         result = self._run(arguments)
@@ -707,7 +1080,14 @@ def parse_options(arguments: Sequence[str]) -> Options:
         description="Install or refresh the Claude Code and Codex setup from this repository.",
     )
 
-    parser.add_argument("--apply", action="store_true", help="write the changes (default: only show them)")
+    mode = parser.add_mutually_exclusive_group()
+
+    mode.add_argument("--apply", action="store_true", help="write the changes (default: only show them)")
+    mode.add_argument(
+        "--check",
+        action="store_true",
+        help="list differences in both directions quickly, write nothing, and exit 7 when there are any",
+    )
     parser.add_argument(
         "--prune",
         action="store_true",
@@ -726,7 +1106,41 @@ def parse_options(arguments: Sequence[str]) -> Options:
         prune=parsed.prune,
         allow_dirty=parsed.allow_dirty,
         first_merge=parsed.first_merge or "",
+        check=parsed.check,
     )
+
+
+def run_install(platform_paths: Platform, options: Options) -> int:
+    if not options.allow_dirty:
+        run_command(["git", "-C", str(REPOSITORY_ROOT), "fetch", "--quiet"])
+        check_repository_clean(run_command, REPOSITORY_ROOT)
+        check_repository_up_to_date(run_command, REPOSITORY_ROOT)
+    check_hook_commands(platform_paths, shutil.which)
+    installer = Installer(platform_paths, options, run_command, shutil.which)
+    installer.install()
+    installer.print_summary()
+    installer.check_conflicts()
+    return 0
+
+
+def run_check(platform_paths: Platform, options: Options) -> int:
+    checkout = find_checkout_differences(run_command, REPOSITORY_ROOT, time.time())
+    installer = Installer(platform_paths, options, run_command, shutil.which)
+    sections = {CHECKOUT_SECTION: checkout, **installer.check()}
+    found = {heading: lines for heading, lines in sections.items() if lines}
+
+    print_check_report(found)
+    return EXIT_DIFFERENCES_FOUND if found else 0
+
+
+def print_check_report(sections: Mapping[str, Sequence[str]]) -> None:
+    if sections:
+        for heading, lines in sections.items():
+            print(f"{heading}:")
+            for line in lines:
+                print(f"  - {line}")
+    else:
+        print(IN_SYNC_MESSAGE)
 
 
 def main(arguments: Sequence[str]) -> int:
@@ -735,16 +1149,10 @@ def main(arguments: Sequence[str]) -> int:
         platform_paths = detect_platform(os.environ, platform.system())
 
         check_registered_entries(REPOSITORY_ROOT)
-        if not options.allow_dirty:
-            run_command(["git", "-C", str(REPOSITORY_ROOT), "fetch", "--quiet"])
-            check_repository_clean(run_command, REPOSITORY_ROOT)
-            check_repository_up_to_date(run_command, REPOSITORY_ROOT)
-        check_hook_commands(platform_paths, shutil.which)
-        installer = Installer(platform_paths, options, run_command, shutil.which)
-        installer.install()
-        installer.print_summary()
-        installer.check_conflicts()
-        return 0
+        if options.check:
+            return run_check(platform_paths, options)
+        else:
+            return run_install(platform_paths, options)
     except InstallError as error:
         sys.stdout.flush()
         print(error, file=sys.stderr)
