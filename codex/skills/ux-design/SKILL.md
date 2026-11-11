@@ -1,24 +1,26 @@
 ---
 name: ux-design
-description: Apply screen and UX design principles to screen design, design review, UI copy, and design-tool work.
+description: Apply screen and UX design principles to screen design, print and PDF document design, design review, UI copy, and design-tool work.
 ---
 
 <!-- Generated from shared-rules/design.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
 
 # Screen and UX Design Principles
 
-Apply to screen design, design review, and UI copy in every project. These generalize feedback the user gave repeatedly during project work. Follow the project's own design rules first; use this document as the default where they are silent.
+Apply to screen design, print and PDF documents such as résumés and reports, design review, and UI copy in every project. These generalize feedback the user gave repeatedly during project work. Follow the project's own design rules first; use this document as the default where they are silent.
 
 ## Design skills
 
 - For visual design (a new or reshaped screen, layout, typography, color, motion), read the `frontend-design` skill as well and follow its process: a short plan of palette, type, layout, and principles, a check of that plan against generic defaults, the build, then a critique of captures. Decisions the user or the project already made win over its list of generic defaults; where they overlap, point it out instead of changing them (user decision, 2026-11-09).
 - Use the tool's dedicated skills where it has them: `design-critique` for design critique, `ux-copy` for UI copy, and `accessibility-review` for accessibility checks.
-- Give each installed design skill one role so they do not compete (user decision, 2026-11-09): `frontend-design` sets the direction and plan; `design-taste-frontend` (Taste) builds and browser-checks pages, and a site of a kind it does not define (for example a personal site) follows the nearest kind it does define, with the steps that break a higher rule left out; `emil-design-eng` and `apple-design` decide motion and interaction details, `web-motion-techniques` supplies tested recipes for the chosen motion, and `review-animations` reviews them; an anti-pattern detector or critique skill, where installed, reviews the result, and `web-interface-guidelines` checks the page code before it is shown or released.
+- Give each installed design skill one role so they do not compete (user decision, 2026-11-09): `frontend-design` sets the direction and plan; a typography skill, where the project has one installed, refines type within `frontend-design`'s type plan; `design-taste-frontend` (Taste) builds and browser-checks pages, and a site of a kind it does not define (for example a personal site) follows the nearest kind it does define, with the steps that break a higher rule left out; `emil-design-eng` and `apple-design` decide motion and interaction details, `web-motion-techniques` supplies tested recipes for the chosen motion, and `review-animations` reviews them; an anti-pattern detector or critique skill, where installed, reviews the result, and `web-interface-guidelines` checks the page code before it is shown or released.
 - When skills conflict, follow this order: the user's decisions, then the project's rules, then these shared rules, then the skills. Skip a skill step that breaks a higher rule, and say in the report which step was skipped and why. A skill never adds stand-in or stock media, credits, page metadata, or dependencies the project has not approved, and never overrides a choice the user made because the skill lists it as a generic default.
 - Give an independent design reviewer the same design skill files to read, so author and reviewer judge by one standard.
 - Read only the skills of the stage at hand (user decision, 2026-11-09): direction `frontend-design`; building a web page `design-taste-frontend`; motion `emil-design-eng` (`apple-design` for gesture-driven UI), then the one recipe needed from `web-motion-techniques`; copy and accessibility `ux-copy` and `accessibility-review` after the project's own standard; before showing or releasing, scripts first, then `web-interface-guidelines` for code, `review-animations` for motion, and one critique skill. Code-only skills apply to code, not to design-tool frames.
 - When two skills disagree, the skill whose role covers the point wins (motion: `emil-design-eng` and `review-animations`; direction: `frontend-design`); a skill's English-only copy or typography rules apply only where the page's language fits.
 - Use one critique skill per review, and give a reviewer only `ux-design` and the skills of the stage it reviews.
+- In every design round, when making and when reviewing, run the skills of the stage at hand from this section and report which ran, what each changed, and which were skipped and why (user decision, 2026-11-11).
+- Before building options, set a visual target from the references and the user's own past work, written as measurable traits (typefaces, size and weight contrast, number of colours, rule weight), and make the options differ against that target rather than only fixing defects (user decision, 2026-11-11).
 - In every design or copy review, your own check and an independent reviewer's alike, look for anything that reads as AI-made or unnatural, in the design (layout, type, colour, motion) and in the copy of every language the page uses (user decision, 2026-11-11): judge the design against `frontend-design`'s list of traits generated design clusters around, English copy with Taste's `scripts/copy-lint.mjs` and `references/copy-tells.md`, Korean copy with `humanizer-ko`, and any other language by a native-language review as in "Copy". Report each spot with what it points at and the fix, or why it stays (for example, a trait the user chose), and name what was left unchecked.
 
 ## Hierarchy
@@ -100,3 +102,4 @@ Apply to screen design, design review, and UI copy in every project. These gener
 - When adding a component property or changing layer bindings, immediately check that existing bindings (such as text properties) were not overwritten and that screens already using the component keep their values. Set a new property's default to the current appearance so existing screens do not change.
 - Keep a copy of the original before large changes, and always inspect a capture yourself after editing. Check that duplication did not bring along wrapper frames and that text is not clipped or overlapping.
 - Keep sample data (names, dates, numbers) consistent across screens that show one flow, and check that totals add up.
+- At the start of every round, list the user's open requests and every unresolved design-tool comment on every page, each with its status, and keep each on the list until it is done or the user drops it (user decision, 2026-11-11).

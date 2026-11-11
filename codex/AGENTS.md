@@ -62,7 +62,7 @@ Read the matching skill before the task. Paths below are relative to this global
 | Reviewing web UI code before it is shown or released | [web-interface-guidelines](skills/web-interface-guidelines/SKILL.md) |
 | Writing or reviewing Korean prose or UI copy that people other than the user will read (product, site, and design-tool copy, resumes, documents shared beyond the user), not working notes, plans, or reports to the user | [humanizer-ko](skills/humanizer-ko/SKILL.md), with the user's own Korean writing as the style sample |
 | Turning an idea or plan with unrecorded key decisions into settled decisions, as product-planning describes | [grilling](skills/grilling/SKILL.md) |
-| Screen/UX design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
+| Screen/UX design, print and PDF document design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
 | Decision requests, decision records, checkpoint reviews, coordinating other sessions, design comments, or global rule updates | [decisions-and-collaboration](skills/decisions-and-collaboration/SKILL.md) |
 | Product planning, external research that feeds a recommendation, decision, or report (not a single fact lookup inside other work) and source selection, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |
 

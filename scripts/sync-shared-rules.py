@@ -48,7 +48,7 @@ ALWAYS_RULES = {
 SKILL_RULES = {
     "design.md": (
         "ux-design",
-        "Apply screen and UX design principles to screen design, design review, UI copy, and design-tool work.",
+        "Apply screen and UX design principles to screen design, print and PDF document design, design review, UI copy, and design-tool work.",
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
