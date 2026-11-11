@@ -130,8 +130,8 @@ The wrapper:
 9. Refuses a change of 200 or more lines outside documents and lock files without `--reviewed` (FAIL exit 7)
 10. Prints verification table
 11. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker; the repository's own pre-commit hook still runs
-12. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
-13. Adds the new commit to this session's commit list, which `--amend` checks
+12. Reads the commit `git commit` made from the HEAD reflog entry that carries the wrapper's `GIT_REFLOG_ACTION` mark and the commit's subject, not from a later HEAD read, since another session may commit the moment `git commit` returns (commands a hook runs inherit the mark, hence the subject); checks that it replaced the expected HEAD, and if HEAD moved while it started, undoes it with `git update-ref HEAD <moved> <made>`, which moves HEAD only while HEAD is still that commit (FAIL exit 6). With no reflog entry carrying the mark, it checks and records nothing (FAIL exit 1)
+13. Adds that commit to this session's commit list, which `--amend` checks
 
 Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed), `8` staged lines outside the session's write record, or own lines tangled with another session's uncommitted lines (nothing committed), `9` `--amend` of a commit this session did not make or one already pushed (nothing committed).
 
@@ -153,9 +153,9 @@ rm -f "$idx"; git reset -q -- <file1> <file2>
 
 `<base>` is the full sha the first command printed; with `GIT_INDEX_FILE` set, the wrapper requires `--expect-head` and the file list. Git cannot tell which session wrote a line, so a hook records every file this session writes (`scripts/session-writes-hook.py`), and `--own-lines` stages each file as `<base>` plus only the lines that record shows as yours. Without it, the wrapper refuses (exit 8) a staged file that holds lines the record does not show as yours, and lists them. It also refuses your lines that change or split another session's uncommitted lines; ask the user then, since they cannot be committed apart. Add `--include-unrecorded <file>` only for lines the user typed or a command wrote outside the record; the shell guard asks the user before such a call. Keep `--no-stage` for an index that a merge or cherry-pick prepared.
 
-On exit 6 nothing was committed: another commit landed after `<base>`, and the wrapper names it and the files it shares with yours. Take the new HEAD it names as `<base>`, rebuild the private index and any partial-file content from it, show the user the staged diff again if a shared file changed, and run the wrapper again.
+On exit 6 nothing was committed: another commit landed after `<base>`, and the wrapper names it and the files it shares with yours. Take the new HEAD it names as `<base>`, rebuild the private index and any partial-file content from it, show the user the staged diff again if a shared file changed, and run the wrapper again. When the wrapper instead says your commit was not undone because another commit already sits on it, do not push; tell the user.
 
-Then, as its own command before `git push` and never chained with it, run `git show --stat HEAD` and confirm the commit has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history.
+Then, as its own command before `git push` and never chained with it, run `git show --stat <sha>` for the commit the wrapper printed under `=== Done ===` (HEAD may already be another session's later commit) and confirm it has your subject and only your files; if your changes landed in someone else's commit, report it instead of rewriting pushed history.
 
 ## 7. Amend Check
 

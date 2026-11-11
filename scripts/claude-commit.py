@@ -30,6 +30,11 @@ another commit, like `git update-ref <ref> <new> <old>` and
 (GIT_INDEX_FILE) requires it and the file list. After committing, the
 wrapper checks that git commit replaced the expected HEAD and undoes the
 commit with the same compare-and-swap when HEAD moved while it started.
+Another session can commit the moment git commit returns, so reading HEAD
+again could name that session's commit and undo it. So the wrapper marks
+its git commit with GIT_REFLOG_ACTION, as git's own rebase and pull do,
+reads the commit from the reflog entry that carries the mark and the
+subject, and moves HEAD back only while HEAD is still that commit.
 
 Commits need no user approval (user decision, 2026-11-09), so a large
 change gets a checklist review instead: when the staged change touches
@@ -74,9 +79,11 @@ from __future__ import annotations
 import functools
 import os
 import re
+import secrets
 import subprocess
 import sys
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import NoReturn
 
 from commit_arguments import (
@@ -104,8 +111,14 @@ from session_writes import (
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 HEAD_REVISION = "HEAD"
-PREVIOUS_HEAD_REVISION = "HEAD@{1}"
 UNDO_REFLOG_MESSAGE = "claude-commit: undo a commit built on a moved HEAD"
+REFLOG_ACTION_VARIABLE = "GIT_REFLOG_ACTION"
+COMMIT_REFLOG_ACTION = "commit"
+AMEND_REFLOG_ACTION = "commit (amend)"
+REFLOG_MARK_BYTES = 8
+REFLOG_ENTRY_FORMAT = "--format=%H %gs"
+REFLOG_ENTRY_RE = re.compile(r"([0-9a-f]{40,64}) (.*)")
+REFLOG_SPACE_RE = re.compile(r"[\t\n\r ]+")
 SHORT_SHA_LENGTH = 7
 OBJECT_NAME_RE = re.compile(r"[0-9a-f]{7,64}")
 VALID_PREFIXES = ("Feat", "Fix", "Refactor", "Chore", "Merge")
@@ -139,6 +152,20 @@ SEQUENCER_STATE_FILES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 REGULAR_FILE_MODE = "100644"
 EXECUTABLE_FILE_MODE = "100755"
 MAX_SHOWN_FOREIGN_LINES = 12
+
+
+@dataclass(frozen=True)
+class ReflogEntry:
+    commit: str
+    message: str
+
+
+@dataclass(frozen=True)
+class MadeCommit:
+    """The commit git commit made, and the HEAD the reflog entry just before it names, which an amend replaced."""
+
+    commit: str
+    previous_head: str | None
 
 
 def fail(message: str, code: int) -> NoReturn:
@@ -264,15 +291,6 @@ def read_revision(revision: str) -> str | None:
         return None
 
 
-def read_new_head() -> str:
-    new_head = read_revision(HEAD_REVISION)
-
-    if new_head is not None:
-        return new_head
-    else:
-        fail("FAIL: git rev-parse HEAD failed after the commit", EXIT_GIT_ERROR)
-
-
 def resolve_expected_head(expected_head_argument: str | None) -> str | None:
     if expected_head_argument is None:
         return read_revision(HEAD_REVISION)
@@ -338,7 +356,7 @@ def make_undo_message(
     )
 
     if replaced_head is None:
-        return f"FAIL: could not read which commit {shorten(new_head)} replaced (HEAD has no reflog), so it is not known to be built on {shorten(expected_head)}. Check `git log` before pushing."
+        return f"FAIL: could not read which commit {shorten(new_head)} replaced (it has no parent, or for --amend no HEAD reflog entry before it), so it is not known to be built on {shorten(expected_head)}. Check `git log` before pushing."
     elif undone:
         undone_lines = [
             f"{moved_summary}.",
@@ -393,14 +411,13 @@ def check_head_unchanged(expected_head: str | None, files: Sequence[str]) -> Non
         fail(f"FAIL: HEAD no longer points to a commit (expected {shorten(expected_head)})", EXIT_HEAD_MOVED)
 
 
-def check_commit_base(new_head: str, expected_head: str | None, amend: bool, files: Sequence[str]) -> None:
-    replaced_revision = PREVIOUS_HEAD_REVISION if amend else f"{new_head}^1"
-    replaced_head = read_revision(replaced_revision)
+def check_commit_base(made: MadeCommit, expected_head: str | None, amend: bool, files: Sequence[str]) -> None:
+    replaced_head = made.previous_head if amend else read_revision(f"{made.commit}^1")
 
     if replaced_head != expected_head:
-        undone = replaced_head is not None and undo_commit(new_head, replaced_head)
+        undone = replaced_head is not None and undo_commit(made.commit, replaced_head)
 
-        fail(make_undo_message(expected_head, replaced_head, new_head, files, undone), EXIT_HEAD_MOVED)
+        fail(make_undo_message(expected_head, replaced_head, made.commit, files, undone), EXIT_HEAD_MOVED)
 
 
 def check_amend_target(amend: bool, expected_head: str | None) -> None:
@@ -774,9 +791,11 @@ def print_verification(
     print(f"| {'Amends own unpushed commit':<30} | {'OK' if amend else 'n/a (new commit)'}")
 
 
-def do_commit(message: str, amend: bool) -> None:
+def do_commit(message: str, amend: bool) -> MadeCommit:
+    reflog_action = make_reflog_action(amend)
     env = os.environ.copy()
     env["CLAUDE_SKILL_GIT_COMMIT"] = "1"
+    env[REFLOG_ACTION_VARIABLE] = reflog_action
     git_args = ["commit"]
     if amend:
         git_args.append("--amend")
@@ -789,6 +808,50 @@ def do_commit(message: str, amend: bool) -> None:
     )
     if commit_proc.returncode != 0:
         sys.exit(EXIT_GIT_ERROR)
+    return find_made_commit(make_commit_reflog_message(reflog_action, message))
+
+
+def make_reflog_action(amend: bool) -> str:
+    action = AMEND_REFLOG_ACTION if amend else COMMIT_REFLOG_ACTION
+
+    return f"{action} via claude-commit {secrets.token_hex(REFLOG_MARK_BYTES)}"
+
+
+def make_commit_reflog_message(reflog_action: str, message: str) -> str:
+    """The HEAD reflog message git commit writes: the action and the subject, whitespace runs collapsed as git does."""
+    subject = message.split("\n", 1)[0]
+
+    return REFLOG_SPACE_RE.sub(" ", f"{reflog_action}: {subject}").strip(" ")
+
+
+def find_made_commit(reflog_message: str) -> MadeCommit:
+    """Read the commit from the reflog entry git commit wrote, in one pass that later entries cannot shift.
+
+    Commands a hook runs inherit the mark, so the entry must carry the subject too, which a hook's `git reset`
+    ("<mark>: updating HEAD") does not. A post-commit hook committing the same subject writes after it, so the oldest
+    matching entry is the one git commit wrote.
+    """
+    entries = read_head_reflog()
+    matching = [position for position, entry in enumerate(entries) if entry.message == reflog_message]
+
+    if matching:
+        position = matching[-1]
+        previous_head = entries[position + 1].commit if position + 1 < len(entries) else None
+
+        return MadeCommit(entries[position].commit, previous_head)
+    else:
+        fail(
+            f"FAIL: git commit finished, but no HEAD reflog entry carries its mark and subject ({reflog_message}), so which commit it made is not known and nothing was checked. Check `git log` before pushing, and tell the user.",
+            EXIT_GIT_ERROR,
+        )
+
+
+def read_head_reflog() -> list[ReflogEntry]:
+    """HEAD's reflog, newest first; a HEAD without one reads as empty."""
+    reflog_proc = run_git(["log", "--walk-reflogs", REFLOG_ENTRY_FORMAT, HEAD_REVISION], capture_output=True)
+    matches = (REFLOG_ENTRY_RE.fullmatch(line) for line in reflog_proc.stdout.splitlines())
+
+    return [ReflogEntry(match[1], match[2]) for match in matches if match]
 
 
 def read_commit_arguments(argv: list[str]) -> CommitArguments:
@@ -822,12 +885,11 @@ def main(argv: list[str]) -> None:
     check_large_commit_reviewed(code_lines, arguments.reviewed)
     print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK", arguments.amend)
     print("=== Committing ===")
-    do_commit(arguments.message, arguments.amend)
-    new_head = read_new_head()
-    check_commit_base(new_head, expected_head, arguments.amend, files)
-    record_session_commit(new_head)
+    made = do_commit(arguments.message, arguments.amend)
+    check_commit_base(made, expected_head, arguments.amend, files)
+    record_session_commit(made.commit)
     print("=== Done ===")
-    run_git(["log", "--oneline", "-1"])
+    run_git(["log", "--oneline", "-1", made.commit])
 
 
 if __name__ == "__main__":

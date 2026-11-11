@@ -23,6 +23,7 @@ import tempfile
 import time
 import unittest
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 
@@ -76,7 +77,9 @@ PUSH_BRANCH = "main"
 PUSH_LOCATIONS = ("pushing", "matching", "guarded", "detached")
 SEED_FILES = ("a.txt", "b.txt", "shared.txt")
 OTHER_SESSION_SUBJECT = "Feat: land the other session's change"
-HEAD_COMMIT_MESSAGE = "Feat: commit this session's change\n\n- one\n- two\n- three"
+HEAD_COMMIT_SUBJECT = "Feat: commit this session's change"
+HEAD_COMMIT_MESSAGE = f"{HEAD_COMMIT_SUBJECT}\n\n- one\n- two\n- three"
+GIT_ERROR_EXIT = 1
 STAGING_MISMATCH_EXIT = 3
 USAGE_EXIT = 4
 HEAD_MOVED_EXIT = 6
@@ -94,15 +97,34 @@ RANGE_AND_STANDARD_MESSAGE = (
     "Fix: keep 3-5 bullets per message\n\n"
     "- Country codes follow ISO 3166-1\n- Dated 2026-11-09\n- Step-by-step"
 )
-SHIM_TEXT = """#!/bin/sh
-# Lands another commit after the wrapper's HEAD check and before git commit reads HEAD.
-if [ "$1" = commit ] && [ ! -e "{marker}" ]; then
+SPACED_SUBJECT_MESSAGE = "Fix: commit  this session's change\n\n- one\n- two\n- three"
+HOOK_COMMIT_SUBJECT = "Chore: commit from a post-commit hook"
+POST_COMMIT_HOOK = "post-commit"
+POST_COMMIT_HOOK_TEXT = """#!/bin/sh
+if [ ! -e "{marker}" ]; then
   touch "{marker}"
+  git commit -q --allow-empty -m "{subject}"
+fi
+"""
+PRE_COMMIT_HOOK = "pre-commit"
+PRE_COMMIT_HOOK_TEXT = "#!/bin/sh\ngit reset -q --soft HEAD\n"
+HOOK_RESET_REFLOG_RE = r"via claude-commit [0-9a-f]+: updating HEAD"
+LANDING_VARIABLE = "SHIM_LANDING"
+SHIM_TEXT = """#!/bin/sh
+# Lands another session's commit around the wrapper's git commit, as {landing_variable} says:
+# after the wrapper's HEAD check and before git commit reads HEAD, right after git commit returns, or both.
+land_other_commit() {{
   tree=$(env -u GIT_INDEX_FILE "{real_git}" rev-parse "HEAD^{{tree}}")
   other=$(env -u GIT_INDEX_FILE "{real_git}" commit-tree "$tree" -p HEAD -m "{subject}")
-  env -u GIT_INDEX_FILE "{real_git}" update-ref HEAD "$other"
+  env -u GIT_INDEX_FILE -u GIT_REFLOG_ACTION "{real_git}" update-ref -m "commit: {subject}" HEAD "$other"
+}}
+if [ "$1" != commit ] || [ -e "{marker}" ]; then
+  exec "{real_git}" "$@"
 fi
-exec "{real_git}" "$@"
+touch "{marker}"
+case "${landing_variable}" in *before*) land_other_commit ;; esac
+"{real_git}" "$@" || exit
+case "${landing_variable}" in *after*) land_other_commit ;; esac
 """
 
 EDIT_TOOL = "Edit"
@@ -496,6 +518,14 @@ class ShellGuardHookTest(unittest.TestCase):
         self.assertNotIn(INTERNAL_TERM_FAILURE, result.stderr)
 
 
+class Landing(str, Enum):
+    """When the git shim lands another session's commit around the wrapper's git commit."""
+
+    BEFORE_COMMIT = "before"
+    AFTER_COMMIT = "after"
+    AROUND_COMMIT = "before after"
+
+
 class WrapperHeadFixture:
     def __init__(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
@@ -524,13 +554,27 @@ class WrapperHeadFixture:
             marker=self.root / "shim-fired",
             real_git=shutil.which("git"),
             subject=OTHER_SESSION_SUBJECT,
+            landing_variable=LANDING_VARIABLE,
         )
 
         self.shim_directory.mkdir()
         shim.write_text(shim_text)
         shim.chmod(0o755)
 
-    def environment(self, index: Path | None = None, shim: bool = False, session: str | None = None) -> dict[str, str]:
+    def add_post_commit_hook(self) -> None:
+        hook_text = POST_COMMIT_HOOK_TEXT.format(marker=self.root / "hook-fired", subject=HOOK_COMMIT_SUBJECT)
+
+        self.add_hook(POST_COMMIT_HOOK, hook_text)
+
+    def add_hook(self, name: str, hook_text: str) -> None:
+        hook = self.repository / ".git" / "hooks" / name
+
+        hook.write_text(hook_text)
+        hook.chmod(0o755)
+
+    def environment(
+        self, index: Path | None = None, landing: Landing | None = None, session: str | None = None
+    ) -> dict[str, str]:
         environment = dict(os.environ)
         settings = {
             "GIT_CONFIG_GLOBAL": str(self.git_config),
@@ -543,8 +587,9 @@ class WrapperHeadFixture:
         environment.update(settings)
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
-        if shim:
+        if landing is not None:
             environment["PATH"] = f"{self.shim_directory}{os.pathsep}{environment['PATH']}"
+            environment[LANDING_VARIABLE] = landing.value
         if session is not None:
             environment[SESSION_VARIABLE] = session
         return environment
@@ -562,11 +607,11 @@ class WrapperHeadFixture:
         return result.stdout.strip()
 
     def run_wrapper(
-        self, *arguments: str, shim: bool = False, session: str | None = None
+        self, *arguments: str, landing: Landing | None = None, session: str | None = None
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(COMMIT_WRAPPER), *arguments],
-            env=self.environment(self.private_index, shim, session),
+            env=self.environment(self.private_index, landing, session),
             cwd=self.repository,
             capture_output=True,
             text=True,
@@ -674,12 +719,87 @@ class CommitWrapperHeadTest(unittest.TestCase):
     def test_head_moving_as_commit_starts_is_undone(self) -> None:
         self.fixture.edit("b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
-        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt", shim=True)
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, landing=Landing.BEFORE_COMMIT)
 
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
         self.assertIn("was undone", result.stderr)
+
+    def test_commit_landing_right_after_mine_is_kept(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, landing=Landing.AFTER_COMMIT, session=OWN_SESSION)
+        mine = self.fixture.run_git("rev-parse", "HEAD^")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.read_subject(mine), HEAD_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^^"), base)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [mine])
+
+    def test_my_moved_commit_under_another_is_left_in_place(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, landing=Landing.AROUND_COMMIT)
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.read_subject("HEAD^"), HEAD_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^^^"), base)
+        self.assertIn("was not undone", result.stderr)
+
+    def test_commit_by_a_post_commit_hook_is_not_taken_for_mine(self) -> None:
+        self.fixture.add_post_commit_hook()
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
+        mine = self.fixture.run_git("rev-parse", "HEAD^")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), HOOK_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.read_subject(mine), HEAD_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^^"), base)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [mine])
+
+    def test_head_entry_from_a_hook_command_is_not_taken_for_my_commit(self) -> None:
+        self.fixture.add_hook(PRE_COMMIT_HOOK, PRE_COMMIT_HOOK_TEXT)
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
+        mine = self.fixture.read_head()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertRegex(self.fixture.run_git("log", "--walk-reflogs", "--format=%gs", "HEAD"), HOOK_RESET_REFLOG_RE)
+        self.assertEqual(self.fixture.read_subject(mine), HEAD_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [mine])
+
+    def test_subject_with_a_run_of_spaces_is_found(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        arguments = ["--expect-head", base, "--no-stage", SPACED_SUBJECT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [self.fixture.read_head()])
+
+    def test_commit_without_a_reflog_is_reported_and_left_in_place(self) -> None:
+        self.fixture.run_git("config", "core.logAllRefUpdates", "false")
+        shutil.rmtree(self.fixture.repository / ".git" / "logs")
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, GIT_ERROR_EXIT, result.stderr)
+        self.assertIn("no HEAD reflog entry carries its mark", result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), HEAD_COMMIT_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
 
     def test_added_token_is_refused_without_showing_it(self) -> None:
         self.fixture.edit("b.txt", f"key = {FAKE_GITHUB_TOKEN}\n")
@@ -755,13 +875,30 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.fixture.edit("b.txt", "more of mine\n")
         base = self.fixture.build_private_index("b.txt")
         amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
-        result = self.fixture.run_wrapper(*amend_arguments, shim=True, session=OWN_SESSION)
+        result = self.fixture.run_wrapper(*amend_arguments, landing=Landing.BEFORE_COMMIT, session=OWN_SESSION)
 
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
         self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [base])
+
+    def test_commit_landing_right_after_my_amend_is_kept(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        first_base = self.fixture.build_private_index("b.txt")
+        first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
+        self.fixture.edit("b.txt", "more of mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*amend_arguments, landing=Landing.AFTER_COMMIT, session=OWN_SESSION)
+        amended = self.fixture.run_git("rev-parse", "HEAD^")
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^^"), first_base)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [base, amended])
 
 
 @dataclass(frozen=True)
