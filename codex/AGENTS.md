@@ -65,7 +65,7 @@ Read the matching skill before the task. Paths below are relative to this global
 | Turning an idea or plan with unrecorded key decisions into settled decisions, as product-planning describes | [grilling](skills/grilling/SKILL.md) |
 | Screen/UX design, print and PDF document design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
 | Decision requests, decision records, checkpoint reviews, coordinating other sessions, design comments, or global rule updates | [decisions-and-collaboration](skills/decisions-and-collaboration/SKILL.md) |
-| Product planning, external research that feeds a recommendation, decision, or report (not a single fact lookup inside other work) and source selection, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |
+| Product planning, external research or measurements of your own (logs, tests, data) that feed a recommendation, decision, or report (not a single fact lookup inside other work) and source selection, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |
 
 The last three skills and the Core Collaboration and Shared Writing Principles below are generated from the repository's `shared-rules/`; edit the source and regenerate instead of editing installed copies.
 
