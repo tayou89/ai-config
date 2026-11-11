@@ -80,6 +80,7 @@ RUNTIME_SCRIPTS = (
     "reply-language-hook.py",
     "own_lines.py",
     "session_writes.py",
+    "session_commits.py",
     "session-writes-hook.py",
 )
 MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py")

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Tests for scripts/shell-guard-hook.py, secret_files.py, commit_arguments.py, claude-commit.py,
-own_lines.py, session_writes.py and session-writes-hook.py.
+own_lines.py, session_writes.py, session_commits.py and session-writes-hook.py.
 
 Each case feeds the hook the same JSON that Claude Code sends and checks
 its decision: deny, ask, or pass (no output). Fixture repositories and a
@@ -111,6 +111,10 @@ PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
 POST_TOOL_USE_FAILURE = "PostToolUseFailure"
 FOREIGN_LINES_EXIT = 8
+AMEND_TARGET_EXIT = 9
+REMOTE_MAIN = "refs/remotes/origin/main"
+REMOTE_HEAD = "refs/remotes/origin/HEAD"
+COMMIT_LIST_SUFFIX = ".commits"
 PARALLEL_ROOT = "/repository"
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -501,6 +505,7 @@ class WrapperHeadFixture:
         self.other_index = self.root / "other-index"
         self.shim_directory = self.root / "bin"
         self.git_config = self.root / "gitconfig"
+        self.config_directory = self.root / "config"
 
     def create(self) -> None:
         self.git_config.write_text("[user]\n\tname = Wrapper Test\n\temail = wrapper@example.com\n")
@@ -525,16 +530,23 @@ class WrapperHeadFixture:
         shim.write_text(shim_text)
         shim.chmod(0o755)
 
-    def environment(self, index: Path | None = None, shim: bool = False) -> dict[str, str]:
+    def environment(self, index: Path | None = None, shim: bool = False, session: str | None = None) -> dict[str, str]:
         environment = dict(os.environ)
+        settings = {
+            "GIT_CONFIG_GLOBAL": str(self.git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            CONFIG_DIRECTORY_VARIABLE: str(self.config_directory),
+        }
 
         environment.pop(PRIVATE_INDEX_VARIABLE, None)
         environment.pop(SESSION_VARIABLE, None)
-        environment.update({"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1"})
+        environment.update(settings)
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
         if shim:
             environment["PATH"] = f"{self.shim_directory}{os.pathsep}{environment['PATH']}"
+        if session is not None:
+            environment[SESSION_VARIABLE] = session
         return environment
 
     def run_git(self, *arguments: str, index: Path | None = None) -> str:
@@ -549,10 +561,12 @@ class WrapperHeadFixture:
 
         return result.stdout.strip()
 
-    def run_wrapper(self, *arguments: str, shim: bool = False) -> subprocess.CompletedProcess[str]:
+    def run_wrapper(
+        self, *arguments: str, shim: bool = False, session: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(COMMIT_WRAPPER), *arguments],
-            env=self.environment(self.private_index, shim),
+            env=self.environment(self.private_index, shim, session),
             cwd=self.repository,
             capture_output=True,
             text=True,
@@ -568,6 +582,11 @@ class WrapperHeadFixture:
     def edit(self, path: str, text: str) -> None:
         with (self.repository / path).open("a") as file:
             file.write(text)
+
+    def read_listed_commits(self, session: str) -> list[str]:
+        commit_list = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}{COMMIT_LIST_SUFFIX}"
+
+        return [json.loads(line)["commit"] for line in commit_list.read_text().splitlines()]
 
     def build_private_index(self, *paths: str) -> str:
         base = self.read_head()
@@ -730,13 +749,19 @@ class CommitWrapperHeadTest(unittest.TestCase):
 
     def test_amend_as_head_moves_is_undone(self) -> None:
         self.fixture.edit("b.txt", "mine\n")
+        first_base = self.fixture.build_private_index("b.txt")
+        first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
+        self.fixture.edit("b.txt", "more of mine\n")
         base = self.fixture.build_private_index("b.txt")
         amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
-        result = self.fixture.run_wrapper(*amend_arguments, shim=True)
+        result = self.fixture.run_wrapper(*amend_arguments, shim=True, session=OWN_SESSION)
 
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+        self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [base])
 
 
 @dataclass(frozen=True)
@@ -756,6 +781,7 @@ LOG_BASE = "# log\n\n## base\ntext\n"
 MINE_1 = "\n## mine 1\nmy text\n"
 THEIRS = "\n## theirs\ntheir text\n"
 MINE_2 = "\n## mine 2\nmore\n"
+MINE_3 = "\n## mine 3\nlast\n"
 MY_TEXT = "my text\n"
 MY_EDITED_TEXT = "my edited text\n"
 BASE_TEXT = "\ntext\n"
@@ -1563,7 +1589,9 @@ class SessionWritesFixture:
             check=False,
         )
 
-    def run_own_lines_commit(self, *arguments: str, session: str = OWN_SESSION) -> subprocess.CompletedProcess[str]:
+    def run_own_lines_commit(
+        self, *arguments: str, session: str | None = OWN_SESSION
+    ) -> subprocess.CompletedProcess[str]:
         base = self.run_git("rev-parse", "HEAD")
 
         self.run_git("read-tree", base, index=self.private_index)
@@ -2093,6 +2121,72 @@ class SessionWritesTest(unittest.TestCase):
 
         self.assertEqual(both.returncode, USAGE_EXIT, both.stderr)
         self.assertEqual(unlisted.returncode, USAGE_EXIT, unlisted.stderr)
+
+
+class CommitWrapperAmendTest(unittest.TestCase):
+    """--amend rewrites only a commit this session made through the wrapper and has not pushed."""
+
+    fixture: SessionWritesFixture
+
+    def setUp(self) -> None:
+        self.fixture = SessionWritesFixture()
+        self.fixture.create()
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def commit_section(self, session: str, text: str, *options: str) -> subprocess.CompletedProcess[str]:
+        """Append a section as the session and commit its lines, taking HEAD as the base in the same call."""
+        self.fixture.write(session, LOG_FILE, text)
+        return self.fixture.run_own_lines_commit(
+            *options, "--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE, session=session
+        )
+
+    def test_amend_of_another_sessions_commit_is_refused(self) -> None:
+        mine = self.commit_section(OWN_SESSION, MINE_1)
+        theirs = self.commit_section(OTHER_SESSION, THEIRS)
+        their_commit = self.fixture.run_git("rev-parse", "HEAD")
+        amend = self.commit_section(OWN_SESSION, MINE_2, "--amend")
+
+        self.assertEqual((mine.returncode, theirs.returncode), (0, 0), mine.stderr + theirs.stderr)
+        self.assertEqual(amend.returncode, AMEND_TARGET_EXIT, amend.stdout + amend.stderr)
+        self.assertIn("this session did not make", amend.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), their_commit)
+
+    def test_amend_of_my_commit_passes_again_and_again(self) -> None:
+        first = self.commit_section(OWN_SESSION, MINE_1)
+        parent = self.fixture.run_git("rev-parse", "HEAD^")
+        amend = self.commit_section(OWN_SESSION, MINE_2, "--amend")
+        again = self.commit_section(OWN_SESSION, MINE_3, "--amend")
+
+        self.assertEqual([first.returncode, amend.returncode, again.returncode], [0, 0, 0], amend.stderr + again.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), parent)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_amend_of_an_unlisted_commit_is_refused(self) -> None:
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        unlisted = self.commit_section(OWN_SESSION, MINE_1, "--amend")
+        outside = self.fixture.run_own_lines_commit(
+            "--amend", "--no-stage", HEAD_COMMIT_MESSAGE, LOG_FILE, session=None
+        )
+
+        self.assertEqual(unlisted.returncode, AMEND_TARGET_EXIT, unlisted.stdout + unlisted.stderr)
+        self.assertIn("this session did not make", unlisted.stderr)
+        self.assertEqual(outside.returncode, AMEND_TARGET_EXIT, outside.stdout + outside.stderr)
+        self.assertIn("only a Claude session", outside.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_amend_of_a_pushed_commit_is_refused(self) -> None:
+        mine = self.commit_section(OWN_SESSION, MINE_1)
+        self.fixture.run_git("update-ref", REMOTE_MAIN, "HEAD")
+        self.fixture.run_git("symbolic-ref", REMOTE_HEAD, REMOTE_MAIN)
+        pushed = self.fixture.run_git("rev-parse", "HEAD")
+        amend = self.commit_section(OWN_SESSION, MINE_2, "--amend")
+
+        self.assertEqual(mine.returncode, 0, mine.stdout + mine.stderr)
+        self.assertEqual(amend.returncode, AMEND_TARGET_EXIT, amend.stdout + amend.stderr)
+        self.assertIn("is already on origin/main, so", amend.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), pushed)
 
 
 def print_table() -> None:

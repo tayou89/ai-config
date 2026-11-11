@@ -46,6 +46,14 @@ base plus only those lines.
 --include-unrecorded <file> commits that file whole after the user has
 seen its lines; the shell guard asks before such a call.
 
+Sessions that share a checkout commit as the same person, so --amend can
+rewrite a commit another session landed a moment earlier: --expect-head
+does not stop it, since one command can read that commit as its base. So
+the wrapper adds each commit it makes to its session's list
+(session_commits.py) and refuses --amend unless HEAD is on that list and
+on no remote-tracking branch, as Perforce lets only a changelist's owner
+change it and Mercurial refuses to amend a public changeset.
+
 Exit codes:
     0  success (commit created)
     1  git error
@@ -57,6 +65,8 @@ Exit codes:
     7  large code change without --reviewed (nothing committed)
     8  staged lines this session's write record does not show as its own,
        or own lines that cannot be separated from them (nothing committed)
+    9  --amend of a commit this session did not make, or one already
+       pushed (nothing committed)
 """
 
 from __future__ import annotations
@@ -79,6 +89,7 @@ from commit_arguments import (
 )
 from own_lines import ContestedLine, FileHistory, OwnCommitContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
+from session_commits import add_session_commit, is_session_commit
 from session_writes import (
     SessionWritesError,
     decode_content,
@@ -120,6 +131,10 @@ EXIT_CREDENTIAL_FILE = 5
 EXIT_HEAD_MOVED = 6
 EXIT_REVIEW_MISSING = 7
 EXIT_FOREIGN_LINES = 8
+EXIT_AMEND_TARGET = 9
+REMOTE_BRANCH_FORMAT = "--format=%(if)%(symref)%(then)%(else)%(refname:short)%(end)"
+NO_SESSION_REASON = "cannot be shown to be this session's: only a Claude session lists the commits it makes"
+OTHER_COMMIT_REASON = "this session did not make through this wrapper (another session's or a person's commit, or one made before the wrapper listed commits)"
 SEQUENCER_STATE_FILES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 REGULAR_FILE_MODE = "100644"
 EXECUTABLE_FILE_MODE = "100755"
@@ -386,6 +401,65 @@ def check_commit_base(new_head: str, expected_head: str | None, amend: bool, fil
         undone = replaced_head is not None and undo_commit(new_head, replaced_head)
 
         fail(make_undo_message(expected_head, replaced_head, new_head, files, undone), EXIT_HEAD_MOVED)
+
+
+def check_amend_target(amend: bool, expected_head: str | None) -> None:
+    if amend and expected_head is not None:
+        check_session_commit(expected_head)
+        check_commit_unpushed(expected_head)
+    elif amend:
+        fail("FAIL: --amend needs a commit to rewrite, and HEAD has none", EXIT_AMEND_TARGET)
+
+
+def check_session_commit(head: str) -> None:
+    session_id = read_session_id()
+
+    if session_id is None:
+        fail(make_amend_refusal(head, NO_SESSION_REASON), EXIT_AMEND_TARGET)
+    elif not is_session_commit(session_id, read_repository_root(), head):
+        fail(make_amend_refusal(head, OTHER_COMMIT_REASON), EXIT_AMEND_TARGET)
+
+
+def check_commit_unpushed(head: str) -> None:
+    remote_branches = list_remote_branches(head)
+
+    if remote_branches:
+        pushed_reason = f"is already on {', '.join(remote_branches)}, so rewriting it would need a force push"
+
+        fail(make_amend_refusal(head, pushed_reason), EXIT_AMEND_TARGET)
+
+
+def list_remote_branches(commit: str) -> list[str]:
+    """Remote-tracking branches that hold the commit, leaving out symbolic ones such as origin/HEAD.
+
+    A failed lookup stops the amend, since an empty answer would read as unpushed.
+    """
+    branches_proc = run_git(["branch", "--remotes", "--contains", commit, REMOTE_BRANCH_FORMAT], capture_output=True)
+
+    if branches_proc.returncode == 0:
+        return branches_proc.stdout.split()
+    else:
+        fail(f"FAIL: git could not list the branches that hold {shorten(commit)}, so --amend stopped", EXIT_GIT_ERROR)
+
+
+def make_amend_refusal(head: str, reason: str) -> str:
+    subject = run_git(["log", "-1", "--format=%s", head], capture_output=True).stdout.strip()
+    lines = [
+        f'FAIL: --amend would rewrite {shorten(head)} "{subject}", which {reason}.',
+        "Resolve: commit your change as a new commit on top of it, taking HEAD as the base with `git rev-parse HEAD` in a command of its own.",
+    ]
+
+    return "\n".join(lines)
+
+
+def record_session_commit(commit: str) -> None:
+    session_id = read_session_id()
+
+    if session_id is not None and not add_session_commit(session_id, read_repository_root(), commit):
+        print(
+            f"Note: {shorten(commit)} could not be added to this session's commit list, so --amend will refuse it.",
+            file=sys.stderr,
+        )
 
 
 def read_staged_content(path: str) -> bytes | None:
@@ -680,6 +754,7 @@ def print_verification(
     expected_head: str | None,
     code_lines: int,
     own_lines_status: str,
+    amend: bool,
 ) -> None:
     print("=== Verification ===")
     print(f"| {'Item':<30} | Status")
@@ -696,6 +771,7 @@ def print_verification(
     print(f"| {'Large change reviewed':<30} | OK ({code_lines} code lines)")
     print(f"| {'HEAD is the index base':<30} | OK ({shorten(expected_head)})")
     print(f"| {'Only own lines staged':<30} | {own_lines_status}")
+    print(f"| {'Amends own unpushed commit':<30} | {'OK' if amend else 'n/a (new commit)'}")
 
 
 def do_commit(message: str, amend: bool) -> None:
@@ -731,6 +807,7 @@ def main(argv: list[str]) -> None:
     check_private_index_arguments(arguments.expected_head, files)
     expected_head = resolve_expected_head(arguments.expected_head)
     check_head_unchanged(expected_head, files)
+    check_amend_target(arguments.amend, expected_head)
     print("=== Recent commits ===")
     run_git(["log", "--oneline", "-3"])
     stage_changes(arguments, expected_head)
@@ -743,10 +820,12 @@ def main(argv: list[str]) -> None:
         check_staged_lines(arguments.included_paths, expected_head)
     code_lines = count_code_lines()
     check_large_commit_reviewed(code_lines, arguments.reviewed)
-    print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK")
+    print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK", arguments.amend)
     print("=== Committing ===")
     do_commit(arguments.message, arguments.amend)
-    check_commit_base(read_new_head(), expected_head, arguments.amend, files)
+    new_head = read_new_head()
+    check_commit_base(new_head, expected_head, arguments.amend, files)
+    record_session_commit(new_head)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1"])
 

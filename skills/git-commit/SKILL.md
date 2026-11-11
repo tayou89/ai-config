@@ -101,6 +101,8 @@ EOF
 )" <file1> ...
 ```
 
+In a shared checkout, add `--amend` to the 6a command instead. The wrapper rewrites only a commit this session made through it (section 7).
+
 For merge / cherry-pick / other commits where the index is already prepared (re-staging would fail on deleted/renamed paths), use `--no-stage`:
 
 ```bash
@@ -118,7 +120,7 @@ EOF
 
 The wrapper:
 1. Validates subject prefix + length, body line length, body line count, bullet count, internal-term ban
-2. Refuses if HEAD is not the `--expect-head` commit, which a private index requires (FAIL exit 6; see 6a)
+2. Refuses if HEAD is not the `--expect-head` commit, which a private index requires (FAIL exit 6; see 6a), and refuses `--amend` unless HEAD is a commit this session made through the wrapper and on no remote-tracking branch (FAIL exit 9)
 3. Prints `git log --oneline -3` for amend awareness
 4. Stages exact files passed as argv (skipped with `--no-stage`)
 5. Prints `git diff --cached --stat`
@@ -129,8 +131,9 @@ The wrapper:
 10. Prints verification table
 11. Invokes `git commit` (subprocess, hook does not re-fire) with `CLAUDE_SKILL_GIT_COMMIT=1` marker; the repository's own pre-commit hook still runs
 12. Checks that `git commit` replaced the expected HEAD; if HEAD moved while it started, undoes the commit with `git update-ref HEAD <moved> <new>` (FAIL exit 6)
+13. Adds the new commit to this session's commit list, which `--amend` checks
 
-Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed), `8` staged lines outside the session's write record, or own lines tangled with another session's uncommitted lines (nothing committed).
+Exit codes: `0` success, `1` git error, `2` message validation, `3` staging mismatch, `4` usage error, `5` credential file or token staged, `6` HEAD moved since the index was built (nothing committed), `7` large change without `--reviewed` (nothing committed), `8` staged lines outside the session's write record, or own lines tangled with another session's uncommitted lines (nothing committed), `9` `--amend` of a commit this session did not make or one already pushed (nothing committed).
 
 Right after a successful commit that completes a task from a plan, apply `code-plan` "After Each Commit" before anything else.
 
@@ -157,6 +160,8 @@ Then, as its own command before `git push` and never chained with it, run `git s
 ## 7. Amend Check
 
 Before drafting a new commit, check `git log --oneline -3`. When the current changes continue your own previous commit (same file and purpose, filling its gaps, same plan or feature) and that commit is not pushed yet, amend it with `--amend` instead of adding a commit. Never amend a pushed commit or someone else's: rewriting pushed history needs a force push, which the shell guard asks the user about.
+
+The wrapper enforces this, since sessions in one checkout commit as the same person and another session's commit can land seconds before yours: it lists each commit it makes for the session and refuses `--amend` (exit 9) unless HEAD is on that list and on no remote-tracking branch. `--expect-head` alone does not catch it, because a base read inside the amend command is that other commit. On exit 9 nothing was committed; commit the change as a new commit on top instead. A commit made outside a Claude session, or before the wrapper listed commits, cannot be amended through it either.
 
 ## 8. Push
 
