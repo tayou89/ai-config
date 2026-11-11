@@ -38,7 +38,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 
@@ -266,13 +266,13 @@ def load_file_history(session_id: str, root: str, path: str) -> FileHistory | No
     Raises SessionWritesError when a record, or contents it names, cannot be read back.
     """
     events = _read_file_events(root, path)
-    own = [event for session, event in events if session == session_id]
+    own = _align_parallel_writes(event for session, event in events if session == session_id)
     working_tree = Path(root, path)
     working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
 
     if own:
         foreign = _list_foreign_writes(session_id, root, path, events)
-        own_writes = tuple(_make_recorded_write(event, foreign) for event in sorted(own, key=_get_event_end))
+        own_writes = tuple(_make_recorded_write(event, foreign) for event in own)
         return FileHistory(_read_blob(root, own[0].before), own_writes, working_text)
     else:
         return None
@@ -285,7 +285,7 @@ def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | No
     """
     try:
         events = _read_file_events(root, path)
-        own = sorted((event for session, event in events if session == session_id), key=_get_event_end)
+        own = _align_parallel_writes(event for session, event in events if session == session_id)
         foreign = _list_foreign_writes(session_id, root, path, events)
         chain = [base_blob, *(blob for event in own for blob in (event.before, event.after))]
         working_tree = _store_files(root, [path])[path]
@@ -567,6 +567,47 @@ def _read_modified_time(path: Path) -> float | None:
         return modified
 
 
+def _align_parallel_writes(own: Iterable[WriteEvent]) -> list[WriteEvent]:
+    """This session's writes in the order they ended, each starting where its parallel own writes left the file.
+
+    One session can run calls side by side, and a call takes its before
+    snapshot as it starts, so a call that ends later also shows what an
+    earlier-ending call wrote meanwhile. Read as they are, the chain would
+    show someone else undoing that write and the later call redoing it,
+    which tangles the session's own lines with lines of no one.
+    """
+    aligned: list[WriteEvent] = []
+
+    for event in sorted(own, key=_get_event_end):
+        is_parallel = (
+            bool(aligned) and aligned[-1].after != event.before and _is_taken_before_own_writes(aligned, event)
+        )
+
+        aligned.append(replace(event, before=aligned[-1].after) if is_parallel else event)
+    return aligned
+
+
+def _is_taken_before_own_writes(aligned: Sequence[WriteEvent], event: WriteEvent) -> bool:
+    """Whether nothing but own writes that ran during the event changed the file after its before snapshot.
+
+    That holds when the latest own writes, followed back as an unbroken chain
+    while each overlaps the event, reach one that started from the event's
+    before snapshot. Overlap here takes no margin: a margin would widen what
+    counts as the session's own, while a missed overlap only leaves the chain
+    as recorded, so the commit asks.
+    """
+    chain_after = aligned[-1].after
+
+    for previous in reversed(aligned):
+        if previous.after != chain_after or not _is_overlapping_within(previous, event, 0.0):
+            return False
+        elif previous.before == event.before:
+            return True
+        else:
+            chain_after = previous.before
+    return False
+
+
 def _make_recorded_write(event: WriteEvent, foreign: Sequence[WriteEvent]) -> RecordedWrite:
     before = _read_blob(event.root, event.before)
     after = _read_blob(event.root, event.after)
@@ -594,6 +635,10 @@ def _is_overlapping(event: WriteEvent, other: WriteEvent) -> bool:
     is_enclosed = min(event.record_format, other.record_format) >= RECORD_FORMAT
     margin = 0.0 if is_enclosed else _OVERLAP_MARGIN_SECONDS
 
+    return _is_overlapping_within(event, other, margin)
+
+
+def _is_overlapping_within(event: WriteEvent, other: WriteEvent, margin: float) -> bool:
     return other.start < event.end + margin and event.start < other.end + margin
 
 

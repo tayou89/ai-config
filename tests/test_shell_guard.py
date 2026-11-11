@@ -111,6 +111,7 @@ PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
 POST_TOOL_USE_FAILURE = "PostToolUseFailure"
 FOREIGN_LINES_EXIT = 8
+PARALLEL_ROOT = "/repository"
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 RECORD_DIRECTORY_NAME = "session-writes"
@@ -760,6 +761,12 @@ MY_EDITED_TEXT = "my edited text\n"
 BASE_TEXT = "\ntext\n"
 DRAFT_TEXT = "\ndraft text\n"
 EDITED_TEXT = "\nedited text\n"
+LOG_TITLE = "# log\n"
+THEIR_TITLE = "# their log\n"
+BASE_HEADING = "\n## base\n"
+FIRST_NOTE = "first note\n"
+REWORDED_NOTE = "first note, reworded\n"
+SECOND_NOTE = "second note\n"
 OWN_LINES_CASES = (
     OwnLinesCase(
         "another session's section between two of mine",
@@ -1261,6 +1268,7 @@ sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 RECORD_HOOK_SPECIFICATION = importlib.util.spec_from_file_location("session_writes_hook", RECORD_HOOK)
 record_hook = importlib.util.module_from_spec(RECORD_HOOK_SPECIFICATION)
 RECORD_HOOK_SPECIFICATION.loader.exec_module(record_hook)
+session_writes = importlib.import_module("session_writes")
 CRLF_PATCH = [
     {"oldStart": 1, "oldLines": 3, "newStart": 1, "newLines": 4, "lines": [" one", "-two", "+TWO", "+added", " three"]}
 ]
@@ -1276,6 +1284,40 @@ NO_NEWLINE_PATCH = [
         "lines": ["-last", NO_NEWLINE_MARKER, "+last", "+second", NO_NEWLINE_MARKER],
     },
 ]
+
+
+def make_parallel_write(start: float, end: float, before: str, after: str) -> session_writes.WriteEvent:
+    return session_writes.WriteEvent(PARALLEL_ROOT, LOG_FILE, before, after, start, end, BASH_TOOL)
+
+
+class ParallelWritesTest(unittest.TestCase):
+    """How one session's calls that ran side by side are chained before their changes are attributed."""
+
+    def test_side_by_side_calls_are_chained(self) -> None:
+        cases = (
+            (
+                "a call beside an edit starts where the edit left the file",
+                [(1, 3, "a", "b"), (2, 4, "a", "b")],
+                ["a", "b"],
+            ),
+            (
+                "a call beside two chained edits starts after both",
+                [(1, 2, "a", "b"), (2.5, 3, "b", "c"), (1.5, 4, "a", "d")],
+                ["a", "b", "c"],
+            ),
+            ("a later call from the same file is left as recorded", [(1, 2, "a", "b"), (3, 4, "a", "c")], ["a", "a"]),
+            (
+                "a chain someone else broke is left as recorded",
+                [(1, 2, "a", "b"), (2.2, 2.5, "x", "c"), (1.5, 3, "a", "d")],
+                ["a", "x", "a"],
+            ),
+        )
+
+        for name, writes, befores in cases:
+            with self.subTest(name):
+                aligned = session_writes._align_parallel_writes(make_parallel_write(*write) for write in writes)
+
+                self.assertEqual([write.before for write in aligned], befores)
 
 
 class RecordHookExactnessTest(unittest.TestCase):
@@ -1964,6 +2006,50 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_my_committed_paragraph_is_not_added_again(self) -> None:
+        """Paragraphs end in blank lines as the base's do, so lining up the base by text put one in twice."""
+        self.fixture.edit(OWN_SESSION, LOG_FILE, LOG_TITLE, f"{FIRST_NOTE}\n{LOG_TITLE}")
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_HEADING, f"\n{SECOND_NOTE}{BASE_HEADING}")
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, FIRST_NOTE, REWORDED_NOTE)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_command_beside_my_edit_stays_mine(self) -> None:
+        """A command run beside this session's Edit starts from the same file and records the Edit's change again."""
+        command = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.finish_command(command)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_command_writing_after_my_parallel_edit_stays_mine(self) -> None:
+        command = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.append(LOG_FILE, MINE_2)
+        self.fixture.finish_command(command)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def test_other_edit_between_my_parallel_calls_is_asked(self) -> None:
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        command = self.fixture.start_command(OWN_SESSION)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, EDITED_TEXT)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, LOG_TITLE, THEIR_TITLE)
+        self.fixture.finish_command(command)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn(THEIR_TITLE.strip(), result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
 
     def test_new_file_in_new_folder_is_recorded(self) -> None:
         path = self.fixture.repository / NEW_FOLDER_FILE
