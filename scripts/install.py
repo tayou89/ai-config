@@ -79,7 +79,7 @@ BASE_DIRECTORY = "base"
 BACKUP_PREFIX = "ai-config-install-"
 MOD_MARKETPLACE_FILE = Path(".claude-plugin") / "marketplace.json"
 MOD_PRESERVED_PATHS = ("claude-plans", ".claude-plugin/types")
-IGNORED_NAMES = ("__pycache__", ".DS_Store")
+IGNORED_NAMES = ("__pycache__", ".DS_Store", ".mypy_cache", ".ruff_cache", ".pytest_cache")
 RUNTIME_SCRIPTS = (
     "claude-commit.py",
     "config-sync-hook.py",

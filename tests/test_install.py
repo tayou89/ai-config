@@ -325,6 +325,14 @@ class RegistrationTest(unittest.TestCase):
                 install.check_registered_entries(root)
             self.assertEqual(raised.exception.exit_code, install.EXIT_UNREGISTERED)
 
+    def test_tool_caches_are_not_scripts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            for cache in (".mypy_cache", ".ruff_cache", ".pytest_cache"):
+                (root / "scripts" / cache).mkdir(parents=True)
+            install.check_registered_entries(root)
+
 
 class InstallerTest(unittest.TestCase):
     def setUp(self):
