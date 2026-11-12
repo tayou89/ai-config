@@ -28,6 +28,7 @@ from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens
 
 CHECKS = (
     ("generated rule copies match shared-rules/", ["scripts/sync-shared-rules.py", "--check"]),
+    ("always-loaded rules within their size budgets", ["scripts/check-rule-size.py"]),
     ("tests", ["-m", "unittest", "discover", "-s", "tests", "-q"]),
 )
 GIT_VARIABLE_PREFIX = "GIT_"

@@ -52,11 +52,15 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, propose, start, or close other sessions, handle design-tool comments, or add and change the global rules.",
+        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, propose, start, or close other sessions, run a main session, keep a shared notes folder, or handle design-tool comments.",
     ),
     "planning.md": (
         "product-planning",
         "Apply planning and research principles to product planning, external research and source selection, vendor or tool selection, pricing and quota research, and early-launch criteria.",
+    ),
+    "rule-writing.md": (
+        "rule-writing",
+        "Decide where a rule, skill, hook, or memory goes and how to write it, keep always-loaded rules within budget, and change the shared configuration. Apply before adding, changing, moving, or removing one, or changing a shared setting.",
     ),
 }
 

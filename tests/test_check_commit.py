@@ -21,7 +21,9 @@ PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 GOOD_VALUE = "good\n"
 BAD_VALUE = "bad\n"
 FAKE_GITHUB_TOKEN = "gh" + "p_" + "B" * 36
-SYNC_STAND_IN = "import sys\nsys.exit(0)\n"
+PASSING_STAND_IN = "import sys\nsys.exit(0)\n"
+FAILING_STAND_IN = "import sys\nsys.exit(1)\n"
+STAND_IN_SCRIPTS = ("sync-shared-rules.py", "check-rule-size.py")
 SAMPLE_TEST = '''import os
 import unittest
 from pathlib import Path
@@ -49,7 +51,8 @@ class CheckCommitFixture:
             target = self.repository / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(REPOSITORY_ROOT / relative, target)
-        (self.repository / "scripts" / "sync-shared-rules.py").write_text(SYNC_STAND_IN)
+        for stand_in in STAND_IN_SCRIPTS:
+            (self.repository / "scripts" / stand_in).write_text(PASSING_STAND_IN)
         (self.repository / "tests").mkdir()
         (self.repository / "tests" / "test_sample.py").write_text(SAMPLE_TEST)
         (self.repository / "value.txt").write_text(GOOD_VALUE)
@@ -137,10 +140,16 @@ class CheckCommitTest(unittest.TestCase):
         self.assertIn("tests", result.stderr)
 
     def test_failing_sync_check_stops_the_commit(self) -> None:
-        result = self.fixture.commit_private_index("scripts/sync-shared-rules.py", "import sys\nsys.exit(1)\n")
+        result = self.fixture.commit_private_index("scripts/sync-shared-rules.py", FAILING_STAND_IN)
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("generated rule copies", result.stderr)
+
+    def test_failing_size_check_stops_the_commit(self) -> None:
+        result = self.fixture.commit_private_index("scripts/check-rule-size.py", FAILING_STAND_IN)
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("size budgets", result.stderr)
 
     def test_added_token_stops_the_commit(self) -> None:
         base = self.fixture.read_head()

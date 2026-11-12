@@ -63,6 +63,11 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/config-sync-hook.py\"",
             "timeout": 30
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/project-goal-hook.py\"",
+            "timeout": 10
           }
         ]
       }
@@ -176,10 +181,31 @@
     "command": "/usr/bin/python3 \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || python3 \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || python \"$HOME/.claude/statusline-command.sh\" 2>/dev/null || \"$LOCALAPPDATA/Programs/Python/Python312/python.exe\" \"$HOME/.claude/statusline-command.sh\""
   },
   "enabledPlugins": {
-    "cloudflare@cloudflare": true,
+    "cloudflare@cloudflare": false,
     "frontend-design@claude-plugins-official": true,
     "taste-skill@taste-skill": true,
     "usage-panel@local-mods": true
+  },
+  "skillOverrides": {
+    "anthropic-skills:consolidate-memory": "name-only",
+    "anthropic-skills:deep-research": "name-only",
+    "anthropic-skills:explain-usage": "name-only",
+    "anthropic-skills:import-memory": "name-only",
+    "anthropic-skills:morning": "name-only",
+    "anthropic-skills:setup-claude": "name-only",
+    "anthropic-skills:skill-creator": "name-only",
+    "code-review": "name-only",
+    "fewer-permission-prompts": "name-only",
+    "init": "name-only",
+    "keybindings-help": "name-only",
+    "knowledge-vault": "name-only",
+    "loop": "name-only",
+    "milestone-delivery": "name-only",
+    "run": "name-only",
+    "schedule": "name-only",
+    "security-review": "name-only",
+    "simplify": "name-only",
+    "workflow-authoring": "name-only"
   },
   "autoUpdatesChannel": "latest",
   "theme": "dark",

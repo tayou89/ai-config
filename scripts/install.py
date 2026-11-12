@@ -95,6 +95,7 @@ IGNORED_NAMES = ("__pycache__", ".DS_Store", ".mypy_cache", ".ruff_cache", ".pyt
 RUNTIME_SCRIPTS = (
     "claude-commit.py",
     "config-sync-hook.py",
+    "project-goal-hook.py",
     "shell-guard-hook.py",
     "shell_command.py",
     "secret_files.py",
@@ -106,7 +107,7 @@ RUNTIME_SCRIPTS = (
     "session-writes-hook.py",
     "start-session-hook.py",
 )
-MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py")
+MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py", "check-rule-size.py")
 HOOKS_PATH_KEY = "core.hooksPath"
 COMMIT_HOOKS_DIRECTORY = ".githooks"
 MERGE_BY_NAME_KEYS = ("enabledPlugins", "extraKnownMarketplaces", "env")

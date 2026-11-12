@@ -7,7 +7,7 @@ description: Review changes, write the commit message, and commit and push witho
 
 All commits MUST go through `~/.claude/scripts/claude-commit.py`. Direct `git commit` is denied by a PreToolUse hook with no bypass. The wrapper enforces the full checklist (subject prefix, line-length, body-lines, bullet-count, internal-terms, amend check, staged-stat review, stage-matches-argv) automatically, so no step can be skipped.
 
-Routine commits and pushes need no user approval (user decision, 2026-11-09, replacing the per-commit approval and the 2026-11-08 push prompt): this skill's self-check, the wrapper, the shell guard, and a repository's pre-commit check stand where that approval was. Changes to rules, skills, hooks, and shared settings still need the user's review before they are applied (section 5).
+Routine commits and pushes need no user approval (user decision, 2026-11-09): this skill's self-check, the wrapper, the shell guard, and a repository's pre-commit check stand where that approval was. Changes to rules, skills, hooks, and shared settings still need the user's review before they are applied (section 5).
 
 ## 1. Branch Check (First Commit of Session Only)
 
