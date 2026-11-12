@@ -51,7 +51,7 @@ For structural decisions (new file layout, where a new type lives, module split,
 
 Before drafting any plan, perform all of the following. Skipping any is the root cause of avoidable plan revisions.
 
-1. **Owner and duplication scan**: For every piece of state, config, or flag the plan touches, name the owner class/module, and search the codebase for the guard/query/narrow patterns (NO_OPERATION guards, type narrows, optional chains) the plan would introduce. Apply `code-style` "Boilerplate Belongs on the Owner": the same multi-line pattern in 2+ call sites, or more than ~5 lines of it at any one call site before real work, means the plan adds a typed API on the owner (e.g. `getX()` / `registerXHandler(callback)`) instead of the client code.
+1. **Owner and duplication scan**: For every piece of state, config, or flag the plan touches, name the owner class/module, and search the codebase for the guard/query/narrow patterns (NO_OPERATION guards, type narrows, optional chains) the plan would introduce. Where `code-style` "Boilerplate Belongs on the Owner" calls for it, the plan adds a typed API on the owner (e.g. `getX()` / `registerXHandler(callback)`) instead of the client code.
 2. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Present the best, not the first found.
 3. **Cross-cutting policy fields vs metadata**: Behavior-controlling flags (cancel policy, retry policy, timeout policy) belong as top-level fields on the entity, at the same level as other policy fields, not crammed into `metadata`/generic data containers. `metadata` is for identifiers and payload, not for policy.
 
@@ -59,7 +59,7 @@ Before drafting any plan, perform all of the following. Skipping any is the root
 
 v2+ plan revisions are failure signals — the design thinking that led to v(N+1) should have happened at v1. Acceptable revisions: user requirement change, externally-discovered constraint. Unacceptable: design omissions that section 4a should have caught (missed duplication, missed owner, missed alternative).
 
-When a revision happens, in the new version's "Changes from v(N-1)" section, briefly state what v(N-1) missed and why. Then check if the miss should become a permanent rule — add it to the relevant skill or CLAUDE.md immediately, not "next time". One correction is enough to warrant a rule (CLAUDE.md "Prevent recurrence on first correction").
+When a revision happens, in the new version's "Changes from v(N-1)" section, briefly state what v(N-1) missed and why. Then check whether the miss should become a permanent rule and, if so, record it at once as `collaboration-core` "Decisions and corrections" describes; one correction is enough.
 
 ## 4c. Plan Completeness
 

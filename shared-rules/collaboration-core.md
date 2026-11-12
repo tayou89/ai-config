@@ -32,10 +32,9 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 ## Decisions and corrections
 
-- When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.
 - When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn.
 - When a recorded fact turns out wrong or records disagree, check the authoritative source and correct every record that holds the wrong value instead of marking it unverified or unreconciled; mark it unverified only when no check is possible.
-- Record a user correction or decision at once in the narrowest place that fits (a skill, the project rules, or memory), and follow the `rule-writing` skill whenever you add, change, or remove a rule: it sets when a rule may go into an always-loaded global file and what to remove alongside it (user decision, 2026-11-12).
+- Record a user correction or decision at once in the narrowest place that fits, updating the rule that already covers it rather than adding another, tell the user in one line where it went, and follow the `rule-writing` skill whenever you add, change, or remove a rule: it sets what the narrowest place is, when a rule may go into an always-loaded global file, and what to remove alongside it (user decision, 2026-11-12).
 
 ## Shared files and sessions
 

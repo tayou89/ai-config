@@ -18,7 +18,7 @@ Use normal Git commands or the connected GitHub interface. Claude's commit wrapp
 
 ## Commit Message
 
-Use English with a capitalized type: `Feat`, `Fix`, `Refactor`, `Chore`, or `Merge`. Subject starts with a concrete verb, has no trailing period, and is at most 72 characters (about 50 preferred).
+Use English, unless the project's rules choose another language, with a capitalized type: `Feat`, `Fix`, `Refactor`, `Chore`, or `Merge`. Subject starts with a concrete verb, has no trailing period, and is at most 72 characters (about 50 preferred).
 
 Separate the body by one blank line. Use 3–5 `- ` bullets, at most 8 nonblank body lines, and at most 72 characters per line. Explain purpose and context, especially in the first bullet. Write subject and body for a reader who has not seen the project's own documents, saying why the change was made rather than summarizing the changed document, and leave out internal shorthand (Step N, Phase N, Pattern N, document section numbers such as `0-16`, option or draft letters, session or tool nicknames) and the work's date or author, which Git already records. Do not add generated attribution or Co-Authored-By trailers unless the user explicitly requests them or the repository requires them.
 

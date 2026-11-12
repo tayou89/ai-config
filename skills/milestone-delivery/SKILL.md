@@ -5,7 +5,7 @@ description: Milestone workflow for a project whose rules explicitly adopt miles
 
 # Milestone Delivery
 
-Apply only after a project's rules explicitly adopt milestone delivery (user decision, 2026-11-11); other projects keep the plain `code-plan` flow. Templates come from the knowledge vault (`knowledge-vault`).
+Apply only after a project's rules explicitly adopt milestone delivery (user decision, 2026-11-11); other projects keep the plain `code-plan` flow. The adoption record in the project rules holds where it applies and from when, a link to this skill, the project's document locations and decision record, its learning goal if it keeps one, and the deviations the user approved, without copying this skill or the vault templates: this skill owns the workflow and approvals, and the vault owns template formats and what its report collection requires (user decision, 2026-11-12). Templates come from the knowledge vault (`knowledge-vault`).
 
 ## Approvals
 
