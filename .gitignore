@@ -3,6 +3,7 @@
 
 # 머신별 설정
 settings.local.json
+scheduled-tasks/
 
 # 런타임/캐시 데이터
 cache/

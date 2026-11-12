@@ -129,6 +129,7 @@ Before requesting plan approval, audit every diff block line-by-line against `co
 ## 7. Request Approval
 
 Show plan summary and wait for **explicit approval**. No implementation code before approval.
+In a project whose rules adopt `milestone-delivery`, an approved milestone plan is the approval for the implementation steps inside it, under that skill's conditions.
 
 ## 8. After Approval
 
@@ -139,6 +140,7 @@ Plans are written at a point in time and may omit applicable rules. When executi
 ## 9. Mid-Implementation Changes
 
 **Design changes** (logic, API, architecture): write new version (v{N+1}), mark previous as SUPERSEDED, get approval.
+In a `milestone-delivery` project, a child-plan revision that stays inside the approved milestone scope and approved designs is recorded as a new version without a new approval; changing an approved design still needs approval.
 **Minor fixes** (params, typos, user-directed): inline edit in current version, no separate approval needed.
 **Plan-implementation gap**: If implementation surfaces 3+ unanticipated changes (cast additions, signature mismatches, narrowing requirements, type errors not predicted by plan) beyond plan scope, halt and re-evaluate the plan's feasibility assumptions before proceeding. Don't accumulate workarounds — each unplanned cast is a signal that the plan-time feasibility check missed something. Update the plan or switch alternatives based on actual implementation findings.
 

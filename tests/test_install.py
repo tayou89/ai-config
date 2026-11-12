@@ -27,6 +27,10 @@ from unittest import mock
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SCRIPT = REPOSITORY_ROOT / "scripts" / "install.py"
 LOCAL_LINE = "- A line only this computer has."
+VAULT_VARIABLE = "KNOWLEDGE_VAULT_DIR"
+FIRST_VAULT_FOLDER = "/Users/someone/vault"
+SECOND_VAULT_FOLDER = "/home/someone/notes/vault"
+SCHEDULED_TASKS_DIRECTORY = "scheduled-tasks"
 GIT_REPOSITORY_NAME = re.compile(r"([^/]+?)(?:\.git)?/?$")
 SPECIFICATION = importlib.util.spec_from_file_location("install", INSTALL_SCRIPT)
 install = importlib.util.module_from_spec(SPECIFICATION)
@@ -103,6 +107,41 @@ def write_checkout_record(claude_home: Path, checkout: Path) -> Path:
     record.parent.mkdir(parents=True)
     record.write_text(f"{checkout}\n", encoding="utf-8")
     return record
+
+
+def make_test_platform(home: Path) -> "install.Platform":
+    return install.Platform(
+        system_name="Darwin",
+        home=home,
+        claude_home=home / ".claude",
+        codex_home=home / ".codex",
+        application_paths=(),
+        hook_commands=("python3",),
+        links_ego_skill=True,
+    )
+
+
+def run_installer_on(
+    platform: "install.Platform",
+    commands: StubCommands,
+    options: "install.Options",
+) -> "install.Installer":
+    installer = install.Installer(platform, options, commands.run, find_any_command)
+
+    with redirect_stdout(io.StringIO()):
+        installer.install()
+    return installer
+
+
+def write_settings(platform: "install.Platform", settings: dict) -> None:
+    path = platform.claude_home / "settings.json"
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(settings), encoding="utf-8")
+
+
+def read_settings(platform: "install.Platform") -> dict:
+    return json.loads((platform.claude_home / "settings.json").read_text(encoding="utf-8"))
 
 
 class DetectPlatformTest(unittest.TestCase):
@@ -355,17 +394,7 @@ class RegistrationTest(unittest.TestCase):
 class InstallerTest(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
-        home = Path(self._directory.name)
-
-        self._platform = install.Platform(
-            system_name="Darwin",
-            home=home,
-            claude_home=home / ".claude",
-            codex_home=home / ".codex",
-            application_paths=(),
-            hook_commands=("python3",),
-            links_ego_skill=True,
-        )
+        self._platform = make_test_platform(Path(self._directory.name))
         self._commands = StubCommands(self._platform.codex_home / "config.toml")
 
     def tearDown(self):
@@ -547,6 +576,45 @@ class InstallerTest(unittest.TestCase):
             "\n".join(self._check()[install.LOCAL_ONLY_SECTION]),
         )
 
+    def test_vault_folder_setting_survives_and_is_not_reported(self):
+        write_settings(self._platform, {"env": {VAULT_VARIABLE: FIRST_VAULT_FOLDER}})
+        self._run_installer(apply=True)
+        local_only = "\n".join(self._check()[install.LOCAL_ONLY_SECTION])
+
+        self.assertEqual(read_settings(self._platform)["env"][VAULT_VARIABLE], FIRST_VAULT_FOLDER)
+        self.assertNotIn(VAULT_VARIABLE, local_only)
+
+    def test_install_without_a_vault_folder_setting_adds_none(self):
+        self._run_installer(apply=True)
+
+        self.assertNotIn(VAULT_VARIABLE, read_settings(self._platform)["env"])
+        self.assertEqual(self._check(), {install.NOT_INSTALLED_SECTION: [], install.LOCAL_ONLY_SECTION: []})
+
+    def test_two_computers_keep_their_own_vault_folders(self):
+        repository = json.loads((REPOSITORY_ROOT / "settings.json").read_text(encoding="utf-8"))
+        other = make_test_platform(Path(self._directory.name) / "other")
+        folders = {self._platform: FIRST_VAULT_FOLDER, other: SECOND_VAULT_FOLDER}
+        options = install.Options(apply=True, prune=False, allow_dirty=True, first_merge="")
+
+        for platform, folder in folders.items():
+            write_settings(platform, {"env": {VAULT_VARIABLE: folder}})
+            run_installer_on(platform, StubCommands(platform.codex_home / "config.toml"), options)
+        self._run_installer(apply=True)
+        for platform, folder in folders.items():
+            self.assertEqual(read_settings(platform)["env"][VAULT_VARIABLE], folder)
+        self.assertFalse(install.list_setting_names(repository) & set(install.PER_COMPUTER_SETTINGS))
+
+    def test_scheduled_tasks_are_left_alone(self):
+        task = self._platform.claude_home / SCHEDULED_TASKS_DIRECTORY / "weekly-review" / "SKILL.md"
+        task.parent.mkdir(parents=True)
+        task.write_text(LOCAL_LINE + "\n", encoding="utf-8")
+        installer = self._run_installer(apply=True, prune=True)
+        local_only = "\n".join(self._check()[install.LOCAL_ONLY_SECTION])
+
+        self.assertEqual(task.read_text(encoding="utf-8"), LOCAL_LINE + "\n")
+        self.assertFalse(any(SCHEDULED_TASKS_DIRECTORY in change for change in installer._changes))
+        self.assertNotIn(SCHEDULED_TASKS_DIRECTORY, local_only)
+
     def _check(self) -> dict:
         options = install.Options(apply=False, prune=False, allow_dirty=True, first_merge="", check=True)
         installer = install.Installer(self._platform, options, self._commands.run, find_any_command)
@@ -567,11 +635,8 @@ class InstallerTest(unittest.TestCase):
             first_merge=first_merge,
             checkout=checkout,
         )
-        installer = install.Installer(self._platform, options, self._commands.run, find_any_command)
 
-        with redirect_stdout(io.StringIO()):
-            installer.install()
-        return installer
+        return run_installer_on(self._platform, self._commands, options)
 
 
 class ParseOptionsTest(unittest.TestCase):
