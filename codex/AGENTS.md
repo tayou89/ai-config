@@ -10,7 +10,7 @@ Apply these reusable preferences across projects. Follow system/developer instru
 
 ## Engineering and Design
 
-- Investigate the root cause before modifying code. Read actual implementations and consumers; trace caller, callee, dispatch, state transitions, and relevant logs rather than diagnosing from names. Re-verify disputed findings and retract incorrect claims.
+- When something fails or behaves unexpectedly, in code or anywhere else, investigate and state the root cause before modifying code or proposing instructions or workarounds, and include another session or job changing the same target at the same time among the causes checked (user decision, 2026-11-12). Read actual implementations and consumers; trace caller, callee, dispatch, state transitions, and relevant logs rather than diagnosing from names. Re-verify disputed findings and retract incorrect claims.
 - Before structural changes, search for 2–3 analogous local patterns, list affected definitions and callers, and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
 - Compare at least two viable designs for a substantive change; use the planning skill for deeper structural alternatives. Prefer the sound design for the current requirement even when it takes more work. Avoid speculative future generality, but do not label necessary separation or existing patterns as over-engineering.
 - When presenting multiple decision alternatives, compare correctness, safety/reversibility, adherence to established conventions, fit with the codebase, and effort. Make the recommendation explicit. Do not use elaborate option labels for a simple approval.
