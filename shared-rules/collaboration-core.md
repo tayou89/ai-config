@@ -21,6 +21,11 @@ Apply in every project and task. The rest of the decision and collaboration prin
 - When you hand over a report, plan, or other long document, also give its gist in the reply itself: the conclusion; when it asks for a decision, every option it weighed in a compact table with a few words per axis of the option rules, plus the recommendation and why; and what the user must decide or do, then the link. Open the document with the same summary, and when relaying another session's report, read and pass on that opening summary rather than only the link (user decision, 2026-11-12).
 - Do not open or switch the user's apps or browser screens on your own. Hand over only the link, the open command, or the file itself, and open it only when the user asks at that moment.
 
+## Labels and abbreviations
+
+- Never refer to an option, plan, decision, or step by its label alone (such as "option 1", "①", "plan A"): in every reply that mentions it, say in a sentence or two what it does, since the user may not remember it after a long conversation, a summary, or another session. When a conversation holds several decisions, do not let the same bare labels recur across them; name each option by its content (user correction, 2026-11-12).
+- Spell out every acronym, abbreviation, and initialism in each reply that uses it, not only at its first use in the conversation, and write the names of people, sites, products, and organizations in full rather than as initials (user correction, 2026-11-12).
+
 ## Decisions and corrections
 
 - When the user decides, record it in the rule document on the spot and tell the user in one line where it was recorded.
