@@ -65,6 +65,8 @@ When a revision happens, in the new version's "Changes from v(N-1)" section, bri
 
 All uncertain items must be fully investigated and resolved during the planning phase. Plans must not contain "TBD", "needs verification", or items deferred to implementation. If something cannot be determined without code changes, state the concrete experiment and its possible outcomes in the plan. Sample code in plans is feasibility-checked before approval: section 6 decides when the full check runs and when an additive-only plan records `Mock feasibility: skipped (additive-only change)` instead.
 
+When a plan serves a goal made of listed parts (stages, areas, audiences), map each part to the steps and outputs that cover it before presenting the plan; an empty row is a gap to fill or a scope question to ask.
+
 ## Language
 
 Plan content (headings, descriptions, steps) must be written in **Korean**.
