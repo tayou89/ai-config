@@ -11,8 +11,10 @@ its actual decision as a Markdown table instead of running unittest.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
 import importlib.util
+import io
 import json
 import os
 import random
@@ -25,6 +27,8 @@ import unittest
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
@@ -173,6 +177,12 @@ RANDOM_REPEATED_TEXTS = ("\n", "a\n", "b\n")
 TITLE_TEXT = "# log\n"
 EDITED_TITLE_TEXT = "# edited log\n"
 NEW_PAGE_TEXT = "new page\n"
+PENDING_SUFFIX = ".pending.json"
+SCRATCH_REPOSITORY = "scratch"
+TRASH_FOLDER = "trash"
+MISSING_ROOT = "/missing-repository"
+MISSING_BLOB = "0" * 40
+VANISHED_RECORD = "another session removed this record file"
 
 
 @dataclass
@@ -1517,6 +1527,12 @@ class RecordHookExactnessTest(unittest.TestCase):
         self.assertIs(record_hook._judge_exactness(unknown, "/", None, None), False)
         self.assertIsNone(record_hook._judge_exactness(command, "/", None, None))
 
+    def test_contents_that_cannot_be_read_back_are_not_exact(self) -> None:
+        """Like a folder moved away after its after snapshot: raising here would leave the pending file behind."""
+        edit = {"tool_name": EDIT_TOOL, "hook_event_name": POST_TOOL_USE, "tool_response": {"structuredPatch": []}}
+
+        self.assertIs(record_hook._judge_exactness(edit, MISSING_ROOT, MISSING_BLOB, MISSING_BLOB), False)
+
 
 def make_edit_response(original: str, edited: str) -> dict:
     """The Edit tool's response: the file it read and a jsdiff structured patch, both with line endings in LF."""
@@ -1620,6 +1636,38 @@ class SessionWritesFixture:
         broken_index: Path | None = None,
         tool: str | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        payload = self.make_hook_payload(session, event, tool_use, tool_input, response, tool)
+
+        return subprocess.run(
+            [sys.executable, str(RECORD_HOOK)],
+            input=json.dumps(payload),
+            env=self.environment(None, broken_index),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def run_record_hook_in_process(self, payload: dict[str, Any]) -> str:
+        """Run the hook's entry point here, where a test can patch what it calls; returns its error output."""
+        errors = io.StringIO()
+
+        with (
+            mock.patch.dict(os.environ, self.environment(None)),
+            mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))),
+            contextlib.redirect_stderr(errors),
+        ):
+            record_hook.main()
+        return errors.getvalue()
+
+    def make_hook_payload(
+        self,
+        session: str,
+        event: str,
+        tool_use: str,
+        tool_input: dict[str, Any],
+        response: dict[str, Any] | None = None,
+        tool: str | None = None,
+    ) -> dict[str, Any]:
         tool = tool or (EDIT_TOOL if "file_path" in tool_input else BASH_TOOL)
         payload = {
             "session_id": session,
@@ -1632,14 +1680,7 @@ class SessionWritesFixture:
 
         if response is not None:
             payload["tool_response"] = response
-        return subprocess.run(
-            [sys.executable, str(RECORD_HOOK)],
-            input=json.dumps(payload),
-            env=self.environment(None, broken_index),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        return payload
 
     def write(self, session: str, path: str, text: str, mode: str = "a") -> None:
         self.tool_uses += 1
@@ -1759,6 +1800,22 @@ class SessionWritesFixture:
         record = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}.jsonl"
 
         return [json.loads(line) for line in record.read_text().splitlines()]
+
+    def list_pending_files(self) -> list[str]:
+        return sorted(
+            pending.name for pending in (self.config_directory / RECORD_DIRECTORY_NAME).glob(f"*/*{PENDING_SUFFIX}")
+        )
+
+    def create_side_repository(self, name: str) -> Path:
+        """Another repository beside the fixture's, such as a session's scratch repository."""
+        repository = self.root / name
+
+        repository.mkdir()
+        for arguments in (("init", "-q"), ("commit", "-q", "--allow-empty", "-m", "Chore: seed")):
+            subprocess.run(
+                ["git", *arguments], env=self.environment(None), cwd=repository, capture_output=True, check=True
+            )
+        return repository
 
 
 class SessionWritesTest(unittest.TestCase):
@@ -1933,7 +1990,7 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("not checked (merge in progress)", result.stdout)
 
-    def test_failed_snapshot_records_nothing(self) -> None:
+    def test_failed_snapshot_claims_nothing(self) -> None:
         broken_index = self.fixture.root / "broken-index"
         command = {"command": "python3 write.py log.md"}
 
@@ -1947,6 +2004,105 @@ class SessionWritesTest(unittest.TestCase):
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
         self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
         self.assertNotIn(b"their text", self.fixture.read_committed_bytes(LOG_FILE))
+
+    def test_call_that_moves_a_repository_away_holds_up_no_one(self) -> None:
+        """A call moved a scratch repository it covered to the Trash (2026-11-11); its pending file stayed an hour."""
+        scratch = self.fixture.create_side_repository(SCRATCH_REPOSITORY)
+        command = {"command": f"mv {scratch} {self.fixture.root / TRASH_FOLDER}"}
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "move-1", command)
+        scratch.rename(self.fixture.root / TRASH_FOLDER)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "move-1", command, {})
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+        self.assertEqual(self.fixture.list_pending_files(), [])
+
+    def test_change_a_failed_after_snapshot_hides_is_asked_only_while_the_call_ran(self) -> None:
+        broken_index = self.fixture.root / "broken-index"
+        command = {"command": "python3 write.py log.md"}
+
+        broken_index.write_text(BROKEN_INDEX_TEXT)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "hidden-1", command)
+        own = self.fixture.start_command(OWN_SESSION)
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.append(LOG_FILE, MINE_1)
+        self.fixture.finish_command(own)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "hidden-1", command, {}, broken_index=broken_index)
+        during = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.fixture.write(OWN_SESSION, OTHER_FILE, MINE_2, "w")
+        after = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
+
+        self.assertEqual(during.returncode, FOREIGN_LINES_EXIT, during.stdout + during.stderr)
+        self.assertEqual(after.returncode, 0, after.stdout + after.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(OTHER_FILE).decode(), MINE_2)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE)
+
+    def test_call_whose_before_snapshot_fails_is_seen_by_others(self) -> None:
+        broken_index = self.fixture.root / "broken-index"
+        command = {"command": "python3 write.py log.md"}
+        head = self.fixture.run_git("rev-parse", "HEAD")
+
+        broken_index.write_text(BROKEN_INDEX_TEXT)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "blind-1", command, broken_index=broken_index)
+        own = self.fixture.start_command(OWN_SESSION)
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.append(LOG_FILE, MINE_1)
+        self.fixture.finish_command(own)
+        running = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "blind-1", command, {})
+        ended = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(running.returncode, FOREIGN_LINES_EXIT, running.stdout + running.stderr)
+        self.assertEqual(ended.returncode, FOREIGN_LINES_EXIT, ended.stdout + ended.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_commands_after_moving_a_written_repository_away_are_recorded(self) -> None:
+        scratch = self.fixture.create_side_repository(SCRATCH_REPOSITORY)
+        scratch_command = {"command": f"python3 write.py {scratch / OTHER_FILE}"}
+        log_command = {"command": "python3 write.py log.md"}
+        expected = [(str(scratch), OTHER_FILE), (str(self.fixture.repository), LOG_FILE)]
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "scratch-1", scratch_command)
+        (scratch / OTHER_FILE).write_text(THEIRS)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "scratch-1", scratch_command, {})
+        scratch.rename(self.fixture.root / TRASH_FOLDER)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "log-1", log_command)
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "log-1", log_command, {})
+        recorded = [(event["root"], event["path"]) for event in self.fixture.read_events(OTHER_SESSION)]
+
+        self.assertEqual(recorded, expected)
+
+    def test_pending_file_from_before_unknown_scopes_is_read(self) -> None:
+        """A call that starts under the previous hook and ends under this one, as the call installing it does."""
+        command = {"command": "python3 write.py log.md"}
+        pending = self.fixture.config_directory / RECORD_DIRECTORY_NAME / OTHER_SESSION / f"old-1{PENDING_SUFFIX}"
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "old-1", command)
+        previous = {key: value for key, value in json.loads(pending.read_text()).items() if key != "unknown"}
+
+        pending.write_text(json.dumps(previous))
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "old-1", command, {})
+
+        self.assertEqual([event["path"] for event in self.fixture.read_events(OTHER_SESSION)], [LOG_FILE])
+        self.assertEqual(self.fixture.list_pending_files(), [])
+
+    @mock.patch.object(record_hook, "remove_expired_records", side_effect=FileNotFoundError(VANISHED_RECORD))
+    def test_failed_cleanup_of_old_records_keeps_the_call_seen(self, cleanup: mock.MagicMock) -> None:
+        """A session's first call drops old records while other sessions remove their own files, so that can fail."""
+        command = {"command": "python3 write.py log.md"}
+        payload = self.fixture.make_hook_payload(OTHER_SESSION, PRE_TOOL_USE, "first-1", command)
+        errors = self.fixture.run_record_hook_in_process(payload)
+
+        cleanup.assert_called_once_with()
+        self.assertIn(VANISHED_RECORD, errors)
+        self.assertEqual(self.fixture.list_pending_files(), [f"first-1{PENDING_SUFFIX}"])
 
     def test_line_endings_are_kept(self) -> None:
         (self.fixture.repository / CRLF_FILE).write_bytes(b"a\r\nb\r\n")

@@ -8,6 +8,11 @@ For Edit and Write it also records whether the tool's own reported change
 turns the before snapshot into the after snapshot exactly: only then is the
 change surely the session's, since the snapshots also catch whatever other
 sessions write meanwhile.
+
+A snapshot that cannot be taken, before or after the call, such as one of a
+folder the call moved away, turns what it would have covered into an unknown
+write over the call's time. Each other snapshot is still recorded, and the
+call stops counting as running once it has ended.
 """
 
 from __future__ import annotations
@@ -16,11 +21,16 @@ import json
 import os
 import sys
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from session_writes import (
     RECORD_FORMAT,
+    PendingCall,
     RepositorySnapshot,
+    SessionWritesError,
+    SnapshotScope,
+    UnknownWrite,
     WriteEvent,
     append_events,
     find_command_roots,
@@ -32,9 +42,7 @@ from session_writes import (
     remove_expired_records,
     remove_pending,
     save_pending,
-    take_file_snapshot,
     take_snapshot,
-    take_snapshot_again,
 )
 
 _PRE_EVENT = "PreToolUse"
@@ -71,59 +79,99 @@ def _record_tool_call(payload: dict[str, Any]) -> None:
     tool_use_id = payload.get("tool_use_id")
 
     if session_id and tool_use_id and payload.get(_EVENT_NAME_KEY) == _PRE_EVENT:
-        _remove_expired_session_records(session_id)
-        start = time.time()
-
-        save_pending(session_id, tool_use_id, _take_snapshots(session_id, payload), start)
+        _record_call_start(session_id, tool_use_id, payload)
     elif session_id and tool_use_id:
         _record_changes(session_id, tool_use_id, payload)
 
 
-def _remove_expired_session_records(session_id: str) -> None:
-    if not (get_record_directory() / session_id).exists():
+def _record_call_start(session_id: str, tool_use_id: str, payload: dict[str, Any]) -> None:
+    """Save the call's pending file, then, on the session's first call, drop expired records.
+
+    The cleanup comes last because it can fail while other sessions remove
+    their own files, and failing before the pending file is saved would leave
+    the call unseen by them.
+    """
+    is_first_call = not (get_record_directory() / session_id).exists()
+    start = time.time()
+    snapshots, unknown = _take_snapshots(_list_scopes(session_id, payload))
+
+    save_pending(session_id, tool_use_id, PendingCall(start, snapshots, unknown))
+    if is_first_call:
         remove_expired_records()
 
 
-def _take_snapshots(session_id: str, payload: dict[str, Any]) -> list[RepositorySnapshot]:
+def _list_scopes(session_id: str, payload: dict[str, Any]) -> list[SnapshotScope]:
     tool_name = payload.get(_TOOL_NAME_KEY, "")
     tool_input = payload.get(_INPUT_KEY) or {}
     file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
 
     if file_path:
-        return _take_file_snapshots(file_path)
+        return _list_file_scopes(file_path)
     else:
         roots = find_command_roots(session_id, tool_input.get("command") or "", payload.get("cwd"))
-        return [take_snapshot(root) for root in roots]
+
+        return [SnapshotScope(root, None) for root in roots]
 
 
-def _take_file_snapshots(file_path: str) -> list[RepositorySnapshot]:
+def _list_file_scopes(file_path: str) -> list[SnapshotScope]:
     root = find_repository_root(file_path)
 
     if root:
-        return [take_file_snapshot(root, os.path.relpath(os.path.realpath(file_path), os.path.realpath(root)))]
+        return [SnapshotScope(root, os.path.relpath(os.path.realpath(file_path), os.path.realpath(root)))]
     else:
         return []
 
 
+def _take_snapshots(scopes: Sequence[SnapshotScope]) -> tuple[list[RepositorySnapshot], list[SnapshotScope]]:
+    """The snapshots that could be taken, and the scopes of those that could not."""
+    taken = [(scope, _try_snapshot(scope)) for scope in scopes]
+    snapshots = [snapshot for _, snapshot in taken if snapshot is not None]
+    unknown = [scope for scope, snapshot in taken if snapshot is None]
+
+    return snapshots, unknown
+
+
+def _try_snapshot(scope: SnapshotScope) -> RepositorySnapshot | None:
+    try:
+        snapshot = take_snapshot(scope)
+    except SessionWritesError:
+        return None
+    else:
+        return snapshot
+
+
 def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any]) -> None:
+    """Record the call's changes and its unknown writes, then drop its pending file, so it is never in neither."""
     pending = read_pending(session_id, tool_use_id)
 
     if pending:
-        start, befores = pending
-        afters = [take_snapshot_again(before) for before in befores]
+        pairs = [(before, _try_snapshot(before.get_scope())) for before in pending.snapshots]
         end = time.time()
         tool_name = payload.get(_TOOL_NAME_KEY, "")
         changes = [
-            (before.root, change) for before, after in zip(befores, afters) for change in list_changes(before, after)
+            (before.root, change)
+            for before, after in pairs
+            if after is not None
+            for change in list_changes(before, after)
         ]
         events = [
             WriteEvent(
-                root, path, old, new, start, end, tool_name, _judge_exactness(payload, root, old, new), RECORD_FORMAT
+                root,
+                path,
+                old,
+                new,
+                pending.start,
+                end,
+                tool_name,
+                _judge_exactness(payload, root, old, new),
+                RECORD_FORMAT,
             )
             for root, (path, old, new) in changes
         ]
+        unknown = [*pending.unknown, *(before.get_scope() for before, after in pairs if after is None)]
+        unknown_writes = [UnknownWrite(scope.root, scope.path, pending.start, end, tool_name) for scope in unknown]
 
-        append_events(session_id, events)
+        append_events(session_id, [*events, *unknown_writes])
         remove_pending(session_id, tool_use_id)
 
 
@@ -132,9 +180,9 @@ def _judge_exactness(
 ) -> bool | None:
     """Whether an Edit or Write call's own reported change turns its before snapshot into its after snapshot.
 
-    None for other tools. A failed call or a response this hook cannot read is
-    not exact: a failure does not promise that nothing changed, and an unknown
-    response cannot account for the change.
+    None for other tools. A failed call, a response this hook cannot read, or
+    contents it cannot read back is not exact: a failure does not promise that
+    nothing changed, and what cannot be read cannot account for the change.
     """
     tool_name = payload.get(_TOOL_NAME_KEY)
     response = payload.get(_RESPONSE_KEY)
@@ -144,9 +192,20 @@ def _judge_exactness(
     elif payload.get(_EVENT_NAME_KEY) == _FAILURE_EVENT or not isinstance(response, dict):
         return False
     else:
+        return _is_change_explained(payload, response, root, before_blob, after_blob)
+
+
+def _is_change_explained(
+    payload: dict[str, Any], response: dict[str, Any], root: str, before_blob: str | None, after_blob: str | None
+) -> bool:
+    try:
         before = read_blob_text(root, before_blob)
         after = read_blob_text(root, after_blob)
-        expected = _expect_edit(response, before) if tool_name == _EDIT_TOOL else _expect_write(payload, response)
+    except SessionWritesError:
+        return False
+    else:
+        is_edit = payload.get(_TOOL_NAME_KEY) == _EDIT_TOOL
+        expected = _expect_edit(response, before) if is_edit else _expect_write(payload, response)
 
         return expected is not None and expected == after
 

@@ -12,16 +12,20 @@ Sessions share one folder, and a snapshot cannot tell who wrote a change made
 while a call ran. So a write counts as the session's only on positive
 evidence: an Edit or Write whose own reported change turns its before snapshot
 into its after snapshot exactly, or any other write that no other session's
-write, or call still running, overlaps in time. Every other write is
-contested, and the commit wrapper asks about its changes instead of guessing.
-Evidence that cannot be read back stops the commit rather than being skipped,
-since a missing record of another session would hand its change to this one.
+write, unknown write, or call still running overlaps in time. Every other
+write is contested, and the commit wrapper asks about its changes instead of
+guessing. Evidence that cannot be read back stops the commit rather than being
+skipped, since a missing record of another session would hand its change to
+this one.
 
 A snapshot that cannot be taken raises SessionWritesError instead of
 returning an empty one: an empty snapshot would read as "nothing was dirty"
-and hand another session's uncommitted lines to this session. File contents
-are kept as bytes end to end (decoded with surrogateescape), so line endings
-and undecodable bytes survive the round trip.
+and hand another session's uncommitted lines to this session. The hook then
+records what that snapshot would have covered as an UnknownWrite over the
+call's time, so the call keeps contesting the writes that overlap it without
+counting as running once it has ended. File contents are kept as bytes end to
+end (decoded with surrogateescape), so line endings and undecodable bytes
+survive the round trip.
 
 Usage (list what --own-lines would leave out):
     session_writes.py report <file1> [<file2> ...]
@@ -74,6 +78,8 @@ _EARLIEST_RECORD_FORMAT = 1
 _PENDING_TOOL = "pending"
 _RECORD_LINE_END = "\n"
 _ROOT_FIELD = "root"
+_KIND_FIELD = "kind"
+_UNKNOWN_KIND = "unknown"
 _MAX_TRACKED_BYTES = 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 10
 _RENAME_OR_COPY_STATUSES = "RC"
@@ -110,6 +116,41 @@ class WriteEvent:
     exact: bool | None = None
     record_format: int = _EARLIEST_RECORD_FORMAT
 
+    def is_covering(self, root: str, path: str) -> bool:
+        return self.root == root and self.path == path
+
+
+@dataclass(frozen=True)
+class SnapshotScope:
+    """The files one snapshot covers: one file, or every file in the repository when `path` is None."""
+
+    root: str
+    path: str | None
+
+    def is_covering(self, root: str, path: str) -> bool:
+        return self.root == root and (self.path is None or self.path == path)
+
+
+@dataclass(frozen=True)
+class UnknownWrite:
+    """Files one tool call may have changed in a way no snapshot shows, since one of its snapshots could not be taken.
+
+    It covers its scope (`path` None for every file in the repository) from
+    `start` to `end`. Other sessions' writes that overlap it are contested,
+    and it never counts toward this session's own lines, so its change is
+    left out of them. A running call reads as one that has not ended.
+    """
+
+    root: str
+    path: str | None
+    start: float
+    end: float
+    tool: str
+    record_format: int = RECORD_FORMAT
+
+    def is_covering(self, root: str, path: str) -> bool:
+        return SnapshotScope(self.root, self.path).is_covering(root, path)
+
 
 @dataclass(frozen=True)
 class RepositorySnapshot:
@@ -118,8 +159,27 @@ class RepositorySnapshot:
     blobs: dict[str, str | None]
     covers_repository: bool
 
+    def get_scope(self) -> SnapshotScope:
+        """A file snapshot holds exactly its one file."""
+        return SnapshotScope(self.root, None if self.covers_repository else next(iter(self.blobs)))
+
+
+@dataclass(frozen=True)
+class PendingCall:
+    """A running call's start, its before snapshots, and the scopes whose before snapshot could not be taken."""
+
+    start: float
+    snapshots: list[RepositorySnapshot]
+    unknown: list[SnapshotScope]
+
+    def is_covering(self, root: str, path: str) -> bool:
+        scopes = [*(snapshot.get_scope() for snapshot in self.snapshots), *self.unknown]
+
+        return any(scope.is_covering(root, path) for scope in scopes)
+
 
 _EVENT_FIELDS = frozenset(event_field.name for event_field in fields(WriteEvent))
+_UNKNOWN_FIELDS = frozenset(unknown_field.name for unknown_field in fields(UnknownWrite))
 
 
 def read_session_id() -> str | None:
@@ -157,30 +217,25 @@ def find_repository_root(path: str) -> str | None:
 
 
 def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[str]:
-    """Repositories a command may write: its folder, folders it names, and ones this session wrote before."""
+    """Repositories a command may write: its folder, folders it names, and ones this session wrote before.
+
+    A repository this session wrote whose folder is gone is left out: there is
+    nothing in it to snapshot, and a call that brings it back creates it as far
+    as snapshots go, like any repository a call creates.
+    """
     named = [os.path.expanduser(match) for match in _ABSOLUTE_PATH_PATTERN.findall(command)]
     candidates = [*([cwd] if cwd else []), *named]
     roots = {root for root in map(find_repository_root, candidates) if root}
+    recorded = {root for root in _read_recorded_roots(session_id) if os.path.isdir(root)}
 
-    return sorted(roots | _read_recorded_roots(session_id))
-
-
-def take_file_snapshot(root: str, path: str) -> RepositorySnapshot:
-    return RepositorySnapshot(root, _read_head(root), _store_files(root, [path]), covers_repository=False)
+    return sorted(roots | recorded)
 
 
-def take_snapshot_again(snapshot: RepositorySnapshot) -> RepositorySnapshot:
-    if snapshot.covers_repository:
-        return take_snapshot(snapshot.root)
+def take_snapshot(scope: SnapshotScope) -> RepositorySnapshot:
+    if scope.path is None:
+        return _take_repository_snapshot(scope.root)
     else:
-        return take_file_snapshot(snapshot.root, next(iter(snapshot.blobs)))
-
-
-def take_snapshot(root: str) -> RepositorySnapshot:
-    status = _run_git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
-    paths = _parse_status_paths(decode_content(status))
-
-    return RepositorySnapshot(root, _read_head(root), _store_files(root, paths), covers_repository=True)
+        return _take_file_snapshot(scope.root, scope.path)
 
 
 def store_text(root: str, text: str) -> str:
@@ -203,8 +258,8 @@ def list_changes(before: RepositorySnapshot, after: RepositorySnapshot) -> list[
     return [change for change in changes if change[1] != change[2]]
 
 
-def append_events(session_id: str, events: Iterable[WriteEvent]) -> None:
-    lines = [json.dumps(asdict(event), ensure_ascii=False) + "\n" for event in events]
+def append_events(session_id: str, events: Iterable[WriteEvent | UnknownWrite]) -> None:
+    lines = [json.dumps(_serialize_event(event), ensure_ascii=False) + "\n" for event in events]
     record = get_record_directory() / f"{session_id}{_RECORD_SUFFIX}"
 
     if lines:
@@ -213,31 +268,23 @@ def append_events(session_id: str, events: Iterable[WriteEvent]) -> None:
             file.write("".join(lines))
 
 
-def save_pending(
-    session_id: str,
-    tool_use_id: str,
-    snapshots: Sequence[RepositorySnapshot],
-    start: float | None = None,
-) -> None:
-    """Keep a call's before snapshots until it ends; `start` is taken before the first snapshot."""
+def save_pending(session_id: str, tool_use_id: str, call: PendingCall) -> None:
+    """Keep a call's before snapshots until it ends; its start is taken before the first snapshot."""
     directory = get_record_directory() / session_id
     pending = directory / f"{tool_use_id}{_PENDING_SUFFIX}"
-    started = time.time() if start is None else start
-    payload = {"start": started, "snapshots": [asdict(snapshot) for snapshot in snapshots]}
 
     if not directory.is_dir():
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / _STARTED_FILE).write_text(str(payload["start"]), encoding=_TEXT_ENCODING)
-    pending.write_text(json.dumps(payload, ensure_ascii=False), encoding=_TEXT_ENCODING)
+        (directory / _STARTED_FILE).write_text(str(call.start), encoding=_TEXT_ENCODING)
+    pending.write_text(json.dumps(asdict(call), ensure_ascii=False), encoding=_TEXT_ENCODING)
 
 
-def read_pending(session_id: str, tool_use_id: str) -> tuple[float, list[RepositorySnapshot]] | None:
-    """A call's start and before snapshots; the file stays until remove_pending(), after its events are kept."""
+def read_pending(session_id: str, tool_use_id: str) -> PendingCall | None:
+    """A call's pending file, which stays until remove_pending(), after its events are kept."""
     pending = get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}"
 
     if pending.exists():
-        payload = json.loads(pending.read_text(encoding=_TEXT_ENCODING))
-        return payload["start"], [RepositorySnapshot(**snapshot) for snapshot in payload["snapshots"]]
+        return _parse_pending_call(pending.read_text(encoding=_TEXT_ENCODING))
     else:
         return None
 
@@ -266,7 +313,7 @@ def load_file_history(session_id: str, root: str, path: str) -> FileHistory | No
     Raises SessionWritesError when a record, or contents it names, cannot be read back.
     """
     events = _read_file_events(root, path)
-    own = _align_parallel_writes(event for session, event in events if session == session_id)
+    own = _list_own_writes(session_id, events)
     working_tree = Path(root, path)
     working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
 
@@ -285,7 +332,7 @@ def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | No
     """
     try:
         events = _read_file_events(root, path)
-        own = _align_parallel_writes(event for session, event in events if session == session_id)
+        own = _list_own_writes(session_id, events)
         foreign = _list_foreign_writes(session_id, root, path, events)
         chain = [base_blob, *(blob for event in own for blob in (event.before, event.after))]
         working_tree = _store_files(root, [path])[path]
@@ -436,7 +483,7 @@ def _parse_float(text: str) -> float | None:
         return value
 
 
-def _read_events(session_id: str) -> list[WriteEvent]:
+def _read_events(session_id: str) -> list[WriteEvent | UnknownWrite]:
     """The session's events, skipping fields a newer hook added.
 
     Raises SessionWritesError on a line that does not parse, such as one
@@ -460,10 +507,22 @@ def _read_record_text(record: Path) -> str:
         return content.decode(_TEXT_ENCODING, errors="replace")
 
 
-def _parse_event(record: Path, number: int, line: str) -> WriteEvent:
+def _serialize_event(event: WriteEvent | UnknownWrite) -> dict[str, object]:
+    """A record line's fields; only an unknown write names its kind, so records from before it read unchanged."""
+    if isinstance(event, UnknownWrite):
+        return {_KIND_FIELD: _UNKNOWN_KIND, **asdict(event)}
+    else:
+        return asdict(event)
+
+
+def _parse_event(record: Path, number: int, line: str) -> WriteEvent | UnknownWrite:
     try:
         entry = json.loads(line)
-        event = WriteEvent(**{key: value for key, value in entry.items() if key in _EVENT_FIELDS})
+        is_unknown = entry.get(_KIND_FIELD) == _UNKNOWN_KIND
+        known = {
+            key: value for key, value in entry.items() if key in (_UNKNOWN_FIELDS if is_unknown else _EVENT_FIELDS)
+        }
+        event: WriteEvent | UnknownWrite = UnknownWrite(**known) if is_unknown else WriteEvent(**known)
     except (ValueError, TypeError, AttributeError) as error:
         raise SessionWritesError(f"{record.name} line {number} cannot be read ({error})") from error
     else:
@@ -493,32 +552,39 @@ def _parse_root(line: str) -> str | None:
         return root if isinstance(root, str) else None
 
 
-def _read_file_events(root: str, path: str) -> list[tuple[str, WriteEvent]]:
-    """Every session's events for one file, each with the session that recorded it."""
+def _read_file_events(root: str, path: str) -> list[tuple[str, WriteEvent | UnknownWrite]]:
+    """Every session's events covering one file, each with the session that recorded it."""
     sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
 
     return [
-        (session, event)
-        for session in sessions
-        for event in _read_events(session)
-        if event.root == root and event.path == path
+        (session, event) for session in sessions for event in _read_events(session) if event.is_covering(root, path)
     ]
+
+
+def _list_own_writes(session_id: str, events: Sequence[tuple[str, WriteEvent | UnknownWrite]]) -> list[WriteEvent]:
+    """This session's writes to the file, aligned.
+
+    An unknown write has no content to chain, so the chain shows a gap there.
+    """
+    return _align_parallel_writes(
+        event for session, event in events if session == session_id and isinstance(event, WriteEvent)
+    )
 
 
 def _list_foreign_writes(
     session_id: str,
     root: str,
     path: str,
-    events: Sequence[tuple[str, WriteEvent]],
-) -> list[WriteEvent]:
-    """Other sessions' recorded writes to the file and their calls still running over it."""
+    events: Sequence[tuple[str, WriteEvent | UnknownWrite]],
+) -> list[WriteEvent | UnknownWrite]:
+    """Other sessions' writes to the file, including their unknown writes and calls still running over it."""
     recorded = [event for session, event in events if session != session_id]
 
     return [*recorded, *_read_running_calls(session_id, root, path)]
 
 
-def _read_running_calls(session_id: str, root: str, path: str) -> list[WriteEvent]:
-    """Other sessions' calls still running whose snapshots cover the file, as writes that have not ended.
+def _read_running_calls(session_id: str, root: str, path: str) -> list[UnknownWrite]:
+    """Other sessions' calls still running whose snapshots cover the file, as unknown writes that have not ended.
 
     A pending file that does not parse counts as covering it from when it was
     written. Calls pending longer than the pending lifetime are taken as left
@@ -532,7 +598,11 @@ def _read_running_calls(session_id: str, root: str, path: str) -> list[WriteEven
     ]
     starts = [_read_pending_start(pending, root, path) for pending in pendings]
 
-    return [WriteEvent(root, path, None, None, start, math.inf, _PENDING_TOOL) for start in starts if start is not None]
+    return [
+        UnknownWrite(root, path, start, math.inf, _PENDING_TOOL, _EARLIEST_RECORD_FORMAT)
+        for start in starts
+        if start is not None
+    ]
 
 
 def _read_pending_start(pending: Path, root: str, path: str) -> float | None:
@@ -542,19 +612,22 @@ def _read_pending_start(pending: Path, root: str, path: str) -> float | None:
     already in its record, so it is skipped.
     """
     try:
-        payload = json.loads(pending.read_text(encoding=_TEXT_ENCODING))
-        snapshots = [RepositorySnapshot(**snapshot) for snapshot in payload["snapshots"]]
-        start = float(payload["start"])
+        call = _parse_pending_call(pending.read_text(encoding=_TEXT_ENCODING))
     except FileNotFoundError:
         return None
-    except (OSError, ValueError, TypeError, KeyError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return _read_modified_time(pending)
     else:
-        is_covering = any(
-            snapshot.root == root and (snapshot.covers_repository or path in snapshot.blobs) for snapshot in snapshots
-        )
+        return call.start if call.is_covering(root, path) else None
 
-        return start if is_covering else None
+
+def _parse_pending_call(text: str) -> PendingCall:
+    """A pending file's call; files written before unknown scopes were kept have none."""
+    payload = json.loads(text)
+    snapshots = [RepositorySnapshot(**snapshot) for snapshot in payload["snapshots"]]
+    unknown = [SnapshotScope(**scope) for scope in payload.get("unknown", [])]
+
+    return PendingCall(float(payload["start"]), snapshots, unknown)
 
 
 def _read_modified_time(path: Path) -> float | None:
@@ -608,20 +681,20 @@ def _is_taken_before_own_writes(aligned: Sequence[WriteEvent], event: WriteEvent
     return False
 
 
-def _make_recorded_write(event: WriteEvent, foreign: Sequence[WriteEvent]) -> RecordedWrite:
+def _make_recorded_write(event: WriteEvent, foreign: Sequence[WriteEvent | UnknownWrite]) -> RecordedWrite:
     before = _read_blob(event.root, event.before)
     after = _read_blob(event.root, event.after)
 
     return RecordedWrite(before, after, _is_contested(event, foreign))
 
 
-def _is_contested(event: WriteEvent, foreign: Sequence[WriteEvent]) -> bool:
+def _is_contested(event: WriteEvent, foreign: Sequence[WriteEvent | UnknownWrite]) -> bool:
     """Whether another session may have written part of this write's change.
 
     An Edit or Write that its own reported change explains exactly is the
     session's whatever ran meanwhile, and one with anything else in its
     snapshots is not. Any other write is contested when another session's
-    write or running call overlaps its time.
+    write, unknown write, or running call overlaps its time.
     """
     if event.exact is not None:
         return not event.exact
@@ -629,7 +702,7 @@ def _is_contested(event: WriteEvent, foreign: Sequence[WriteEvent]) -> bool:
         return any(_is_overlapping(event, other) for other in foreign)
 
 
-def _is_overlapping(event: WriteEvent, other: WriteEvent) -> bool:
+def _is_overlapping(event: WriteEvent, other: WriteEvent | UnknownWrite) -> bool:
     """Whether two writes' times overlap, widened by a margin when either is a record whose times do not enclose
     its snapshots (an earlier record format, or a running call's pending file)."""
     is_enclosed = min(event.record_format, other.record_format) >= RECORD_FORMAT
@@ -638,7 +711,7 @@ def _is_overlapping(event: WriteEvent, other: WriteEvent) -> bool:
     return _is_overlapping_within(event, other, margin)
 
 
-def _is_overlapping_within(event: WriteEvent, other: WriteEvent, margin: float) -> bool:
+def _is_overlapping_within(event: WriteEvent, other: WriteEvent | UnknownWrite, margin: float) -> bool:
     return other.start < event.end + margin and event.start < other.end + margin
 
 
@@ -659,6 +732,17 @@ def _find_existing_directory(path: str) -> str:
     while directory and not os.path.isdir(directory):
         directory = os.path.dirname(directory)
     return directory or os.sep
+
+
+def _take_repository_snapshot(root: str) -> RepositorySnapshot:
+    status = _run_git(root, "--no-optional-locks", "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    paths = _parse_status_paths(decode_content(status))
+
+    return RepositorySnapshot(root, _read_head(root), _store_files(root, paths), covers_repository=True)
+
+
+def _take_file_snapshot(root: str, path: str) -> RepositorySnapshot:
+    return RepositorySnapshot(root, _read_head(root), _store_files(root, [path]), covers_repository=False)
 
 
 def _parse_status_paths(output: str) -> list[str]:
