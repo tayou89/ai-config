@@ -2048,6 +2048,16 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stderr)
         self.assertIn("cannot be committed apart", result.stderr)
 
+    def test_entangled_unrecorded_lines_are_not_called_another_sessions(self) -> None:
+        (self.fixture.repository / LOG_FILE).write_text(PERSON_TEXT)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, PERSON_TEXT, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stderr)
+        self.assertIn("cannot be committed apart", result.stderr)
+        self.assertIn("does not show as its own", result.stderr)
+        self.assertNotIn("another session has not committed", result.stderr)
+
     def test_merge_in_progress_is_not_checked(self) -> None:
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
         (self.fixture.repository / OTHER_FILE).write_text("from the merged branch\n")

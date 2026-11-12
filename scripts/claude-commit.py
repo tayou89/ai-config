@@ -810,9 +810,9 @@ def make_unrecorded_message(path: str) -> str:
 def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
     shown = [f"  ! {line.rstrip()}" for line in entangled[:MAX_SHOWN_FOREIGN_LINES]]
     lines = [
-        f"FAIL: in {path}, {len(entangled)} of your changes are tangled with lines another session has not committed (your line changes or splits theirs, or they changed your replacement), so they cannot be committed apart:",
+        f"FAIL: in {path}, {len(entangled)} of your changes are tangled with uncommitted lines this session's write record does not show as its own (another session's, a person's, or a command the record did not see): your line changes or splits them, or they changed your replacement, so they cannot be committed apart:",
         *shown,
-        f"Resolve: if the other session can commit first, message it and wait; otherwise rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
+        f"Resolve: if another session wrote them and can commit first, message it and wait; otherwise rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
     ]
 
     return "\n".join(lines)
