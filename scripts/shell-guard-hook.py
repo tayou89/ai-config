@@ -20,6 +20,13 @@ a push of the current branch to its own remote passes without a prompt.
 Prints nothing when no check matches, so the normal permission flow
 decides. When the command cannot be analyzed, it asks instead of
 letting the call through.
+
+The --include-unrecorded dialog is the only question about those lines
+(user decision, 2026-11-11): it lists them, and the session does not ask
+in chat first. The commit wrapper keeps each such call it runs as
+approved, since it runs only after this dialog, so a retry of the same
+commit with nothing written since, such as one after HEAD moved, is not
+asked again (session_writes.is_include_approved).
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import os
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -37,14 +45,12 @@ from commit_arguments import CommitArguments, CommitArgumentsError, parse_commit
 from secret_files import get_credential_reason, read_file_head
 from shell_command import (
     CommandCall,
-    CommandExpander,
     GitCommand,
+    expand_shell_command,
     join_directory,
-    load_shell_definitions,
     parse_git_command,
-    read_git_alias,
-    read_text_file,
 )
+from session_writes import SessionWritesError, find_repository_paths, is_include_approved, list_unproven_lines
 
 
 TERMINAL_TOOL = "mcp__terminal__run_in_terminal"
@@ -53,6 +59,9 @@ DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 DECISION_DENY = "deny"
 DECISION_ASK = "ask"
 HOOK_EVENT_NAME = "PreToolUse"
+SESSION_KEY = "session_id"
+MAX_SHOWN_INCLUDE_LINES = 8
+MAX_SHOWN_LINE_LENGTH = 160
 COMMIT_REASON = (
     "Direct git commit blocked. Use ~/.claude/scripts/claude-commit.py "
     "with message and files as args (prepend --amend if amending). "
@@ -75,10 +84,14 @@ DYNAMIC_FILES_REASON = (
     "status output, so the commit holds only your own work."
 )
 INCLUDE_UNRECORDED_REASON = (
-    "This commit keeps lines that this session's write record does not show as its own, in "
-    "{files}: {command}{origin}. Approve only if you have seen those lines (python3 "
-    "~/.claude/scripts/session_writes.py report <file> lists them) and want them in this commit."
+    "이 커밋에는 쓰기 기록으로는 이 세션이 썼다고 확인되지 않은 줄이 함께 들어갑니다. "
+    "아래 줄이 이 커밋에 들어가도 되면 승인해 주세요. 거절하시면 세션이 그 파일을 빼고 커밋합니다.\n"
+    "{lines}\n명령: {command}{origin}"
 )
+INCLUDE_LINES_UNKNOWN = (
+    "{path}: 줄 목록을 읽지 못했습니다. python3 ~/.claude/scripts/session_writes.py report {path} 로 볼 수 있습니다."
+)
+INCLUDE_LINES_MORE = "  … 그 밖에 {count}줄"
 PUSH_REASON = "This push needs your approval because it {risks}: {command}{origin}."
 PRODUCTION_REASON = (
     "This starts an application in production, staging, or live mode "
@@ -263,7 +276,8 @@ class AddArguments:
 def main() -> None:
     payload = json.load(sys.stdin)
     command, cwd = read_tool_command(payload)
-    decision = decide(command, cwd) if command else None
+    session_id = payload.get(SESSION_KEY) or None
+    decision = decide(command, cwd, session_id) if command else None
 
     if decision:
         print(json.dumps(decision))
@@ -281,7 +295,7 @@ def read_tool_command(payload: dict) -> tuple[str, str | None]:
     return (command if isinstance(command, str) else ""), cwd
 
 
-def decide(command: str, cwd: str | None) -> dict | None:
+def decide(command: str, cwd: str | None, session_id: str | None = None) -> dict | None:
     try:
         calls = expand_command(command, cwd)
         git_commands = find_git_commands(calls)
@@ -291,7 +305,7 @@ def decide(command: str, cwd: str | None) -> dict | None:
             + find_credential_reasons(calls, git_commands)
         )
         push_reasons = find_push_reasons(git_commands, find_git_environment_names(calls))
-        ask_reasons = push_reasons + find_unrecorded_include_reasons(calls) + find_production_reasons(calls)
+        ask_reasons = push_reasons + find_unrecorded_include_reasons(calls, session_id) + find_production_reasons(calls)
     except Exception as error:
         deny_reasons = []
         ask_reasons = [ANALYSIS_FAILURE_REASON.format(error=f"{type(error).__name__}: {error}")]
@@ -305,9 +319,8 @@ def decide(command: str, cwd: str | None) -> dict | None:
 
 def expand_command(command: str, cwd: str | None) -> list[CommandCall]:
     config_directory = Path(os.path.expanduser(os.environ.get(CONFIG_DIRECTORY_VARIABLE) or DEFAULT_CONFIG_DIRECTORY))
-    expander = CommandExpander(load_shell_definitions(config_directory), read_git_alias, read_text_file)
 
-    return expander.expand(command, cwd)
+    return expand_shell_command(command, cwd, config_directory)
 
 
 def make_decision(decision: str, reasons: list[str]) -> dict:
@@ -492,16 +505,69 @@ def find_commit_wrapper_credentials(call: CommandCall) -> list[str]:
     return describe_credentials(find_commit_wrapper_files(call.argv), call.cwd)
 
 
-def find_unrecorded_include_reasons(calls: list[CommandCall]) -> list[str]:
+def find_unrecorded_include_reasons(calls: list[CommandCall], session_id: str | None) -> list[str]:
     reasons: list[str] = []
 
     for call in calls:
         arguments = read_commit_wrapper_arguments(call.argv)
+        included = arguments.included_paths if arguments is not None else ()
 
-        if arguments is not None and arguments.included_paths:
-            files = ", ".join(arguments.included_paths)
-            reasons.append(INCLUDE_UNRECORDED_REASON.format(files=files, command=show_command(call), origin=show_origin(call)))
+        if included and not is_approved_include(call, included, session_id):
+            reasons.append(make_include_reason(call, included, session_id))
     return reasons
+
+
+def is_approved_include(call: CommandCall, included: Sequence[str], session_id: str | None) -> bool:
+    scope = find_repository_paths(call.cwd, included) if call.cwd else None
+
+    if scope is not None and session_id:
+        return is_include_approved(session_id, *scope)
+    else:
+        return False
+
+
+def make_include_reason(call: CommandCall, paths: Sequence[str], session_id: str | None) -> str:
+    listing = "\n".join(describe_unproven_lines(call.cwd, path, session_id) for path in paths)
+
+    return INCLUDE_UNRECORDED_REASON.format(lines=listing, command=show_command(call), origin=show_origin(call))
+
+
+def describe_unproven_lines(cwd: str | None, path: str, session_id: str | None) -> str:
+    """The lines --include-unrecorded adds for one file as the dialog shows them, or how to list them."""
+    lines = read_unproven_lines(cwd, path, session_id)
+
+    if lines is None:
+        return INCLUDE_LINES_UNKNOWN.format(path=path)
+    else:
+        shown = [f"  {shorten_line(line)}" for line in lines[:MAX_SHOWN_INCLUDE_LINES]]
+        hidden = len(lines) - MAX_SHOWN_INCLUDE_LINES
+        more = [INCLUDE_LINES_MORE.format(count=hidden)] if hidden > 0 else []
+
+        return "\n".join([f"{path}:", *shown, *more])
+
+
+def shorten_line(line: str) -> str:
+    if len(line) > MAX_SHOWN_LINE_LENGTH:
+        return line[:MAX_SHOWN_LINE_LENGTH] + "…"
+    else:
+        return line
+
+
+def read_unproven_lines(cwd: str | None, path: str, session_id: str | None) -> list[str] | None:
+    """One file's unproven lines, or None outside a Claude session or a repository, or when the record cannot be read."""
+    scope = find_repository_paths(cwd, [path]) if cwd else None
+
+    if scope is not None and session_id:
+        return try_list_unproven_lines(session_id, scope[0], scope[1][0])
+    else:
+        return None
+
+
+def try_list_unproven_lines(session_id: str, root: str, path: str) -> list[str] | None:
+    try:
+        return list_unproven_lines(session_id, root, path)
+    except (SessionWritesError, OSError):
+        return None
 
 
 def find_commit_wrapper_files(argv: list[str]) -> list[str]:

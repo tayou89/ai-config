@@ -1801,6 +1801,76 @@ class SessionWritesFixture:
 
         return [json.loads(line) for line in record.read_text().splitlines()]
 
+    def end_without_hook(
+        self,
+        session: str,
+        tool_use: str,
+        started_ago: float,
+        ended_ago: float,
+        folder: str = "",
+        text: str = "PreToolUse:Bash hook error: Direct git commit blocked.",
+    ) -> None:
+        """Move a pending call's start back and give it a result in its transcript, as a call stopped before it ran.
+
+        folder names a subagent transcript of the session to hold the result instead of its own.
+        """
+        pending = self.config_directory / RECORD_DIRECTORY_NAME / session / f"{tool_use}{PENDING_SUFFIX}"
+        payload = json.loads(pending.read_text())
+        project = self.config_directory / "projects" / TRANSCRIPT_PROJECT
+        transcript = project / session / "subagents" / f"{folder}.jsonl" if folder else project / f"{session}.jsonl"
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(time.time() - ended_ago))
+        block = {"type": "tool_result", "tool_use_id": tool_use, "is_error": True, "content": text}
+        result = {"type": "user", "timestamp": stamp, "message": {"content": [block]}}
+
+        payload["start"] = time.time() - started_ago
+        pending.write_text(json.dumps(payload))
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        with transcript.open("a") as file:
+            file.write(json.dumps(result) + "\n")
+
+    def run_approved_wrapper(self, session: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        """A wrapper call the user approved in the shell guard's dialog, after the record hook saw it start."""
+        self.tool_uses += 1
+        self.run_record_hook(session, PRE_TOOL_USE, f"call-{self.tool_uses}", {"command": "claude-commit.py"})
+
+        return self.run_wrapper(*arguments, session=session)
+
+    def run_guard(self, session: str, event: str, command: str) -> subprocess.CompletedProcess[str]:
+        payload = {
+            "session_id": session,
+            "hook_event_name": event,
+            "tool_name": BASH_TOOL,
+            "tool_input": {"command": command},
+            "cwd": str(self.repository),
+        }
+
+        return subprocess.run(
+            [sys.executable, str(HOOK_SCRIPT)],
+            input=json.dumps(payload),
+            env=self.environment(None),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def count_approvals(self, session: str) -> int:
+        approvals = self.config_directory / RECORD_DIRECTORY_NAME / session / "approved-includes.jsonl"
+
+        return len(approvals.read_text().splitlines()) if approvals.exists() else 0
+
+    def age_approvals(self, session: str, seconds: float) -> None:
+        """Move every kept approval of the session back in time."""
+        path = self.config_directory / RECORD_DIRECTORY_NAME / session / "approved-includes.jsonl"
+        approvals = [json.loads(line) for line in path.read_text().splitlines()]
+        aged = [{**approval, "time": approval["time"] - seconds} for approval in approvals]
+
+        path.write_text("".join(json.dumps(approval) + "\n" for approval in aged))
+
+    def has_events(self, session: str) -> bool:
+        record = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}.jsonl"
+
+        return record.exists() and bool(record.read_text().strip())
+
     def list_pending_files(self) -> list[str]:
         return sorted(
             pending.name for pending in (self.config_directory / RECORD_DIRECTORY_NAME).glob(f"*/*{PENDING_SUFFIX}")
@@ -2414,6 +2484,313 @@ class SessionWritesTest(unittest.TestCase):
 
         self.assertEqual(both.returncode, USAGE_EXIT, both.stderr)
         self.assertEqual(unlisted.returncode, USAGE_EXIT, unlisted.stderr)
+
+
+shell_command = importlib.import_module("shell_command")
+FILE_WRITING_COMMANDS = (
+    "echo a > f",
+    "echo a >> f",
+    "> f",
+    "(echo a) > f",
+    "{ echo a; } > f",
+    "echo a &> f",
+    "cat <> f",
+)
+FILE_KEEPING_COMMANDS = ("cat f 2>&1 | head", "cat f 2>/dev/null", "echo a >&2", "git status --short")
+
+
+class CommandScopeTest(unittest.TestCase):
+    """Commands that leave working trees alone take no snapshot, and calls that ended without their end hook stop covering."""
+
+    fixture: SessionWritesFixture
+
+    def setUp(self) -> None:
+        self.fixture = SessionWritesFixture()
+        self.fixture.create()
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def test_file_redirections_mark_the_call_as_writing(self) -> None:
+        for command in FILE_WRITING_COMMANDS:
+            calls = shell_command.expand_shell_command(
+                command, str(self.fixture.repository), self.fixture.config_directory
+            )
+
+            self.assertTrue(any(call.writes_file for call in calls), command)
+        for command in FILE_KEEPING_COMMANDS:
+            calls = shell_command.expand_shell_command(
+                command, str(self.fixture.repository), self.fixture.config_directory
+            )
+
+            self.assertFalse(any(call.writes_file for call in calls), command)
+
+    def test_reading_command_of_another_session_holds_up_no_one(self) -> None:
+        command = {"command": f"git status --short && cat {LOG_FILE} | head -1"}
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "read-1", command)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "read-1", command, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.fixture.has_events(OTHER_SESSION))
+
+    def test_command_writing_a_file_still_covers_the_repository(self) -> None:
+        command = {"command": f"cat {LOG_FILE} > copy.md"}
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "copy-1", command)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_commit_waiting_for_approval_holds_up_no_one(self) -> None:
+        command = {"command": self.make_commit_command()}
+
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "commit-1", command)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_commit_in_a_repository_with_commit_hooks_still_covers_it(self) -> None:
+        hook = self.fixture.repository / ".git" / "hooks" / "pre-commit"
+        command = {"command": self.make_commit_command()}
+
+        hook.write_text("#!/bin/sh\nexit 0\n")
+        hook.chmod(0o755)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "commit-1", command)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_call_stopped_before_it_ran_holds_up_no_one_after_its_result(self) -> None:
+        self.check_stopped_call_holds_up_no_one("")
+
+    def test_subagent_call_stopped_before_it_ran_holds_up_no_one_after_its_result(self) -> None:
+        self.check_stopped_call_holds_up_no_one("agent-1")
+
+    def test_call_stopped_before_it_ran_still_covers_until_its_result(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.end_without_hook(OTHER_SESSION, started[1], started_ago=30, ended_ago=0)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_private_index_option_commits_own_lines_and_cleans_up(self) -> None:
+        temporary = self.fixture.root / "tmp"
+        base = self.fixture.run_git("rev-parse", "HEAD")
+        environment = {**self.fixture.environment(OWN_SESSION), "TMPDIR": str(temporary)}
+
+        temporary.mkdir()
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.append(LOG_FILE, MINE_2)
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(COMMIT_WRAPPER),
+                "--private-index",
+                "--expect-head",
+                base,
+                "--own-lines",
+                HEAD_COMMIT_MESSAGE,
+                LOG_FILE,
+            ],
+            env=environment,
+            cwd=self.fixture.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE + MINE_1)
+        self.assertEqual(list(temporary.iterdir()), [])
+        self.assertEqual(self.fixture.run_git("diff", "--cached", "--name-only"), "")
+
+    def test_ran_call_without_end_hook_keeps_covering(self) -> None:
+        started = self.fixture.start_command(OTHER_SESSION)
+
+        self.fixture.end_without_hook(OTHER_SESSION, started[1], started_ago=30, ended_ago=20, text="Exit code 1")
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_programs_count_only_by_their_bare_names_or_installed_paths(self) -> None:
+        repository = str(self.fixture.repository)
+        recorded = [
+            "./test",
+            "scripts/diff a b",
+            "python3 ./head f",
+            f"{self.fixture.root}/claude-commit.py m f",
+            "/bin/cat f",
+        ]
+        kept = [f"cat {LOG_FILE}", f'{COMMIT_WRAPPER} --own-lines "m" f', f'python3 {COMMIT_WRAPPER} --own-lines "m" f']
+
+        self.assertEqual(
+            {command: self.find_roots(command) for command in recorded}, dict.fromkeys(recorded, [repository])
+        )
+        self.assertEqual({command: self.find_roots(command) for command in kept}, dict.fromkeys(kept, []))
+
+    def test_git_options_that_touch_files_or_run_programs_are_recorded(self) -> None:
+        repository = str(self.fixture.repository)
+        recorded = [
+            "git read-tree -mu HEAD",
+            "git reset --har HEAD~",
+            "git -c core.fsmonitor=x status",
+            "GIT_EXTERNAL_DIFF=x git diff",
+            "git diff --ext-diff",
+            "export GIT_DIR=/x; git status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.fsmonitor GIT_CONFIG_VALUE_0=x git status",
+        ]
+        kept = [
+            "git -c core.quotepath=false status",
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.quotepath GIT_CONFIG_VALUE_0=false git diff",
+            "git reset -q -- a",
+            "git read-tree HEAD",
+        ]
+
+        self.assertEqual(
+            {command: self.find_roots(command) for command in recorded}, dict.fromkeys(recorded, [repository])
+        )
+        self.assertEqual({command: self.find_roots(command) for command in kept}, dict.fromkeys(kept, []))
+
+    def test_private_index_option_cleans_up_when_a_check_fails(self) -> None:
+        temporary = self.fixture.root / "tmp"
+        base = self.fixture.run_git("rev-parse", "HEAD")
+        environment = {**self.fixture.environment(OWN_SESSION), "TMPDIR": str(temporary)}
+        arguments = ["--private-index", "--expect-head", base, "--own-lines", HEAD_COMMIT_MESSAGE, "big.py"]
+
+        temporary.mkdir()
+        self.fixture.write(OWN_SESSION, "big.py", "x = 1\n" * 250)
+        result = subprocess.run(
+            [sys.executable, str(COMMIT_WRAPPER), *arguments],
+            env=environment,
+            cwd=self.fixture.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, REVIEW_MISSING_EXIT, result.stdout + result.stderr)
+        self.assertEqual(list(temporary.iterdir()), [])
+
+    def test_private_index_option_needs_a_base(self) -> None:
+        result = self.fixture.run_wrapper("--private-index", "--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, USAGE_EXIT, result.stdout + result.stderr)
+
+    def check_stopped_call_holds_up_no_one(self, folder: str) -> None:
+        started = self.fixture.start_command(OTHER_SESSION)
+
+        self.fixture.end_without_hook(OTHER_SESSION, started[1], started_ago=30, ended_ago=20, folder=folder)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def find_roots(self, command: str) -> list[str]:
+        with mock.patch.dict(os.environ, {CONFIG_DIRECTORY_VARIABLE: str(self.fixture.config_directory)}):
+            roots: list[str] = session_writes.find_command_roots("unit-session", command, str(self.fixture.repository))
+
+        return roots
+
+    def make_commit_command(self) -> str:
+        return f'cd {self.fixture.repository} && {COMMIT_WRAPPER} --private-index --expect-head abc --own-lines "{HEAD_COMMIT_SUBJECT}" other.md'
+
+
+class IncludeDialogTest(unittest.TestCase):
+    """The shell guard's dialog is the one question about unrecorded lines: it lists them and is not repeated on a retry."""
+
+    fixture: SessionWritesFixture
+
+    def setUp(self) -> None:
+        self.fixture = SessionWritesFixture()
+        self.fixture.create()
+        self.wrapper_arguments = (
+            "--expect-head",
+            "abc",
+            "--include-unrecorded",
+            LOG_FILE,
+            HEAD_COMMIT_MESSAGE,
+            LOG_FILE,
+        )
+        self.command = f'cd {self.fixture.repository} && ~/.claude/scripts/claude-commit.py --expect-head abc --include-unrecorded {LOG_FILE} "{HEAD_COMMIT_SUBJECT}" {LOG_FILE}'
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def test_wrapper_says_not_to_ask_in_chat(self) -> None:
+        self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("without asking in chat first", result.stderr)
+
+    def test_dialog_lists_the_lines_it_commits(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+        decision = json.loads(result.stdout)["hookSpecificOutput"]
+
+        self.assertEqual(decision["permissionDecision"], ASK, result.stderr)
+        self.assertIn("+ ## mine 1", decision["permissionDecisionReason"])
+
+    def test_declined_call_is_asked_again(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
+
+    def test_approved_retry_is_not_asked_again(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(result.stdout, "", result.stderr)
+
+    def test_change_no_record_shows_is_asked_again(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        self.fixture.append(LOG_FILE, MINE_2)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
+
+    def test_retry_keeps_the_first_approval_time(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+
+        self.assertEqual(self.fixture.count_approvals(OWN_SESSION), 1)
+
+    def test_approval_expires_after_half_an_hour(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        self.fixture.age_approvals(OWN_SESSION, 31 * 60)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
+
+    def test_retry_after_a_new_write_is_asked_again(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_2)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
+
+    def test_approval_of_another_session_does_not_count(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OTHER_SESSION, *self.wrapper_arguments)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
 
 
 class CommitWrapperAmendTest(unittest.TestCase):

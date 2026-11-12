@@ -17,8 +17,9 @@ EXPECT_HEAD_OPTION = "--expect-head"
 REVIEWED_OPTION = "--reviewed"
 OWN_LINES_OPTION = "--own-lines"
 INCLUDE_UNRECORDED_OPTION = "--include-unrecorded"
+PRIVATE_INDEX_OPTION = "--private-index"
 OPTION_PREFIX = "--"
-USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION} | {OWN_LINES_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] [{REVIEWED_OPTION}] [{INCLUDE_UNRECORDED_OPTION} <file>]... "<message>" [<file1> ...]'
+USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION} | {OWN_LINES_OPTION}] [{PRIVATE_INDEX_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] [{REVIEWED_OPTION}] [{INCLUDE_UNRECORDED_OPTION} <file>]... "<message>" [<file1> ...]'
 
 
 class CommitArgumentsError(ValueError):
@@ -31,6 +32,7 @@ class CommitArguments:
     no_stage: bool
     own_lines: bool
     reviewed: bool
+    private_index: bool
     expected_head: str | None
     included_paths: tuple[str, ...]
     message: str
@@ -42,6 +44,7 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
     no_stage = False
     own_lines = False
     reviewed = False
+    private_index = False
     expected_head: str | None = None
     included_paths: list[str] = []
     index = 0
@@ -61,6 +64,9 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
         elif option == REVIEWED_OPTION:
             reviewed = True
             index += 1
+        elif option == PRIVATE_INDEX_OPTION:
+            private_index = True
+            index += 1
         elif option == EXPECT_HEAD_OPTION and index + 1 < len(argv):
             expected_head = argv[index + 1]
             index += 2
@@ -75,6 +81,7 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
         no_stage=no_stage,
         own_lines=own_lines,
         reviewed=reviewed,
+        private_index=private_index,
         expected_head=expected_head,
         included_paths=tuple(included_paths),
         message=argv[index],
@@ -82,6 +89,7 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
     )
 
     check_stage_options(arguments)
+    check_private_index_option(arguments)
     check_included_paths(arguments)
     return arguments
 
@@ -97,6 +105,13 @@ def check_stage_options(arguments: CommitArguments) -> None:
     if arguments.no_stage and arguments.own_lines:
         raise CommitArgumentsError(
             f"{NO_STAGE_OPTION} keeps the prepared index, so it cannot stage own lines; drop one"
+        )
+
+
+def check_private_index_option(arguments: CommitArguments) -> None:
+    if arguments.private_index and (arguments.expected_head is None or not arguments.files or arguments.no_stage):
+        raise CommitArgumentsError(
+            f"{PRIVATE_INDEX_OPTION} reads its index from {EXPECT_HEAD_OPTION} <sha> and stages the listed files, so it needs both and cannot take {NO_STAGE_OPTION}"
         )
 
 

@@ -47,6 +47,7 @@ from datetime import datetime
 from pathlib import Path
 
 from own_lines import FileHistory, RecordedWrite, build_own_content, list_foreign_lines
+from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
 
 _SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -56,6 +57,7 @@ _RECORD_SUFFIX = ".jsonl"
 _PENDING_SUFFIX = ".pending.json"
 _STARTED_FILE = "started"
 _PROJECTS_DIRECTORY_NAME = "projects"
+_SUBAGENTS_DIRECTORY_NAME = "subagents"
 _TRANSCRIPT_SUFFIX = ".jsonl"
 _TOOL_USE_MARKER = '"tool_use"'
 _TOOL_RESULT_MARKER = '"tool_result"'
@@ -78,6 +80,10 @@ _EARLIEST_RECORD_FORMAT = 1
 _PENDING_TOOL = "pending"
 _RECORD_LINE_END = "\n"
 _ROOT_FIELD = "root"
+_BLOBS_FIELD = "blobs"
+_TIME_FIELD = "time"
+_APPROVALS_FILE = "approved-includes.jsonl"
+_APPROVAL_LIFETIME_SECONDS = 30 * 60
 _KIND_FIELD = "kind"
 _UNKNOWN_KIND = "unknown"
 _MAX_TRACKED_BYTES = 1024 * 1024
@@ -88,6 +94,74 @@ _HEAD_REVISION = "HEAD"
 _TEXT_ENCODING = "utf-8"
 _LOSSLESS_ERRORS = "surrogateescape"
 _EXIT_USAGE = 4
+_SCRIPTS_DIRECTORY = Path(__file__).resolve().parent
+_COMMIT_WRAPPER_NAME = "claude-commit.py"
+_SESSION_WRITES_NAME = "session_writes.py"
+_PYTHON_NAMES = frozenset({"python", "python3"})
+_NEVER_RAN_RESULT_PATTERN = re.compile(
+    r"PreToolUse:\S+ hook error|The user doesn't want to proceed with this tool use"
+    r"|Tool permission request aborted|The server-side auto mode classifier gave no verdict"
+)
+_TREE_KEEPING_PROGRAMS = frozenset(
+    {
+        "[",
+        "basename",
+        "cat",
+        "cd",
+        "cmp",
+        "cut",
+        "diff",
+        "dirname",
+        "echo",
+        "exit",
+        "export",
+        "false",
+        "for",
+        "grep",
+        "head",
+        "ls",
+        "printf",
+        "pwd",
+        "stat",
+        "tail",
+        "test",
+        "true",
+        "unset",
+        "wc",
+    }
+)
+_TREE_KEEPING_GIT_SUBCOMMANDS = frozenset(
+    {
+        "add",
+        "cat-file",
+        "describe",
+        "diff",
+        "hash-object",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "merge-base",
+        "rev-list",
+        "rev-parse",
+        "show",
+        "status",
+        "update-index",
+        "write-tree",
+    }
+)
+_TREE_KEEPING_GIT_OPTIONS = {
+    "read-tree": frozenset({"--empty"}),
+    "reset": frozenset({"-q", "--quiet", "--mixed", "--soft"}),
+}
+_PATHSPEC_SEPARATOR = "--"
+_PROGRAM_RUNNING_GIT_OPTIONS = ("--output", "--ext-diff", "--textconv")
+_SAFE_GIT_CONFIG_PREFIXES = ("core.quotepath", "color.")
+_GIT_ENVIRONMENT_PREFIX = "GIT_"
+_SAFE_GIT_VARIABLES = frozenset({"GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_NOSYSTEM"})
+_GIT_CONFIG_KEY_PATTERN = re.compile(r"GIT_CONFIG_KEY_\d+")
+_GIT_CONFIG_VALUE_PATTERN = re.compile(r"GIT_CONFIG_VALUE_\d+")
+_HOOKS_DIRECTORY_NAME = "hooks"
+_COMMIT_HOOK_NAMES = ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite")
 _ABSOLUTE_PATH_PATTERN = re.compile(r"""(?:^|(?<=[\s'"=(:]))((?:/|~/)[^\s'"<>|;&()`$]+)""")
 
 
@@ -178,6 +252,15 @@ class PendingCall:
         return any(scope.is_covering(root, path) for scope in scopes)
 
 
+@dataclass(frozen=True)
+class _IncludeApproval:
+    """Files the user let a session commit with their unrecorded lines, each with the content approved."""
+
+    root: str
+    blobs: dict[str, str | None]
+    time: float
+
+
 _EVENT_FIELDS = frozenset(event_field.name for event_field in fields(WriteEvent))
 _UNKNOWN_FIELDS = frozenset(unknown_field.name for unknown_field in fields(UnknownWrite))
 
@@ -217,7 +300,25 @@ def find_repository_root(path: str) -> str | None:
 
 
 def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[str]:
-    """Repositories a command may write: its folder, folders it names, and ones this session wrote before.
+    """Repositories a command may write.
+
+    A command made only of calls that leave working trees as they were, such
+    as reading files and the commit wrapper's git index work, writes none of
+    them, except a repository it commits in whose commit hooks may change
+    files. Like Jujutsu's --ignore-working-copy, such a command takes no
+    snapshot, so another session's write while it ran is not read as its
+    own, and it does not count as running for other sessions.
+    """
+    calls = _expand_known_command(command, cwd)
+
+    if calls is not None and all(map(_is_tree_keeping, calls)):
+        return sorted({root for root in map(_find_hooked_commit_root, calls) if root})
+    else:
+        return _find_possible_roots(session_id, command, cwd)
+
+
+def _find_possible_roots(session_id: str, command: str, cwd: str | None) -> list[str]:
+    """Repositories any command may write: its folder, folders it names, and ones this session wrote before.
 
     A repository this session wrote whose folder is gone is left out: there is
     nothing in it to snapshot, and a call that brings it back creates it as far
@@ -356,6 +457,67 @@ def is_line_tracked(root: str, path: str) -> bool:
         return True
 
 
+def list_unproven_lines(session_id: str, root: str, path: str) -> list[str]:
+    """The file's uncommitted changes this session's record does not show as its own, as `+ text` and `- text`.
+
+    These are what --include-unrecorded commits beyond the session's own
+    lines; every change counts when the session recorded no write to the
+    file. Raises SessionWritesError when the record cannot be read back.
+    """
+    base = _read_blob(root, _read_committed_blob(root, _HEAD_REVISION, path))
+    history = load_file_history(session_id, root, path)
+    working_tree = Path(root, path)
+    working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
+    own = build_own_content(base, history).text if history is not None else base
+
+    return [f"{line.kind.value} {line.text}" for line in list_foreign_lines(base, working_text, own)]
+
+
+def find_repository_paths(cwd: str, paths: Sequence[str]) -> tuple[str, list[str]] | None:
+    """The repository holding paths given relative to cwd, as the commit wrapper takes them, and the paths in it."""
+    root = find_repository_root(cwd)
+    real_root = os.path.realpath(root) if root else ""
+
+    if root:
+        return root, [os.path.relpath(os.path.realpath(os.path.join(cwd, path)), real_root) for path in paths]
+    else:
+        return None
+
+
+def add_include_approval(session_id: str, root: str, paths: Sequence[str]) -> None:
+    """Keep that the user let this session commit these files' unrecorded lines, as the files are now.
+
+    The commit wrapper calls it as it starts with --include-unrecorded: the
+    shell guard asks before every such call, and a call the user declines
+    never runs, so the wrapper running is the approval. An approval that
+    already covers the files as they are keeps its time, so a chain of
+    retries does not stretch it. A session without a record folder keeps
+    nothing, so its next such call is asked again.
+    """
+    directory = get_record_directory() / session_id
+    blobs = _store_files(root, paths)
+    entry = {_ROOT_FIELD: root, _BLOBS_FIELD: blobs, _TIME_FIELD: time.time()}
+
+    if directory.is_dir() and _find_include_approval(session_id, root, blobs) is None:
+        with (directory / _APPROVALS_FILE).open("a", encoding=_TEXT_ENCODING) as file:
+            file.write(json.dumps(entry, ensure_ascii=False) + _RECORD_LINE_END)
+
+
+def is_include_approved(session_id: str, root: str, paths: Sequence[str]) -> bool:
+    """Whether the user let this session commit these files, exactly as they are now, in the last half hour.
+
+    Like sudo's timestamp, an approval covers a retry of the same commit,
+    such as one after HEAD moved. Comparing contents also catches changes
+    no record shows (an editor, another tool), and another session's call
+    still running over a file could change it any moment, so either one
+    asks again. Raises SessionWritesError when a file cannot be read.
+    """
+    blobs = _store_files(root, paths)
+    running = [call for path in paths for call in _read_running_calls(session_id, root, path)]
+
+    return _find_include_approval(session_id, root, blobs) is not None and not running
+
+
 def decode_content(content: bytes) -> str:
     """Decode file content so that encode_content() gives back the same bytes."""
     return content.decode(_TEXT_ENCODING, _LOSSLESS_ERRORS)
@@ -404,6 +566,35 @@ def _describe_file(session_id: str, absolute_path: str) -> str:
         )
 
         return summary + entangled + contested
+
+
+def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | None]) -> _IncludeApproval | None:
+    """The session's approval in the last half hour that holds every one of these files with this content."""
+    record = get_record_directory() / session_id / _APPROVALS_FILE
+    limit = time.time() - _APPROVAL_LIFETIME_SECONDS
+    approvals = [_parse_approval(line) for line in _read_record_text(record).split(_RECORD_LINE_END) if line.strip()]
+    covering = [
+        approval
+        for approval in approvals
+        if approval is not None
+        and approval.root == root
+        and approval.time >= limit
+        and all(path in approval.blobs and approval.blobs[path] == blob for path, blob in blobs.items())
+    ]
+
+    return covering[0] if covering else None
+
+
+def _parse_approval(line: str) -> _IncludeApproval | None:
+    """A kept approval, or None for a line that does not read as one."""
+    try:
+        entry = json.loads(line)
+        blobs = {str(path): None if blob is None else str(blob) for path, blob in dict(entry[_BLOBS_FIELD]).items()}
+        approval = _IncludeApproval(str(entry[_ROOT_FIELD]), blobs, float(entry[_TIME_FIELD]))
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    else:
+        return approval
 
 
 def _get_config_directory() -> Path:
@@ -596,13 +787,91 @@ def _read_running_calls(session_id: str, root: str, path: str) -> list[UnknownWr
         for pending in get_record_directory().glob(f"*/*{_PENDING_SUFFIX}")
         if pending.parent.name != session_id and (_read_modified_time(pending) or 0.0) >= limit
     ]
-    starts = [_read_pending_start(pending, root, path) for pending in pendings]
+    calls = [_read_running_call(pending, root, path) for pending in pendings]
 
-    return [
-        UnknownWrite(root, path, start, math.inf, _PENDING_TOOL, _EARLIEST_RECORD_FORMAT)
-        for start in starts
-        if start is not None
+    return [call for call in calls if call is not None]
+
+
+def _read_running_call(pending: Path, root: str, path: str) -> UnknownWrite | None:
+    """A pending call covering the file, as an unknown write that has not ended, or ended when the call never ran.
+
+    A call a hook denied, or one the user declined or stopped at its
+    permission prompt, gets no end hook, so its pending file stays; its
+    result in the transcript says it never ran. Any other result keeps it
+    covering, since a call that ran may have left processes still writing.
+    """
+    start = _read_pending_start(pending, root, path)
+
+    if start is not None:
+        never_ran_at = _find_never_ran_time(pending.parent.name, pending.name[: -len(_PENDING_SUFFIX)])
+        end = math.inf if never_ran_at is None else max(start, never_ran_at)
+
+        return UnknownWrite(root, path, start, end, _PENDING_TOOL, _EARLIEST_RECORD_FORMAT)
+    else:
+        return None
+
+
+@functools.cache
+def _find_never_ran_time(session_id: str, tool_use_id: str) -> float | None:
+    """When a result saying the call never ran reached its session's transcript or a subagent's, or None.
+
+    A result whose time cannot be read, or whose text is not one of the
+    known refusals, counts as none, so the call keeps covering.
+    """
+    projects = _get_config_directory() / _PROJECTS_DIRECTORY_NAME
+    transcripts = [
+        *projects.glob(f"*/{session_id}{_TRANSCRIPT_SUFFIX}"),
+        *projects.glob(f"*/{session_id}/{_SUBAGENTS_DIRECTORY_NAME}/*{_TRANSCRIPT_SUFFIX}"),
     ]
+    result_times = [_read_never_ran_time(transcript, tool_use_id) for transcript in transcripts]
+    known = [result_time for result_time in result_times if result_time is not None]
+
+    return min(known) if known else None
+
+
+def _read_never_ran_time(transcript: Path, tool_use_id: str) -> float | None:
+    try:
+        content = transcript.read_bytes()
+    except OSError:
+        return None
+    else:
+        return _find_never_ran_line_time(content, tool_use_id)
+
+
+def _find_never_ran_line_time(content: bytes, tool_use_id: str) -> float | None:
+    marker = tool_use_id.encode(_TEXT_ENCODING)
+    lines = [line.decode(_TEXT_ENCODING, errors="replace") for line in content.splitlines() if marker in line]
+    times = [_parse_entry_time(line) for line in lines if _is_never_ran_line(line, tool_use_id)]
+    known = [entry_time for entry_time in times if entry_time != _UNKNOWN_TIME]
+
+    return min(known) if known else None
+
+
+def _is_never_ran_line(line: str, tool_use_id: str) -> bool:
+    blocks = _read_content_blocks(line) if _TOOL_RESULT_MARKER in line else []
+
+    return any(_is_never_ran_result(block, tool_use_id) for block in blocks)
+
+
+def _is_never_ran_result(block: dict[str, object], tool_use_id: str) -> bool:
+    is_error_result = (
+        block.get("type") == _TOOL_RESULT_TYPE
+        and block.get("tool_use_id") == tool_use_id
+        and block.get("is_error") is True
+    )
+
+    return is_error_result and _NEVER_RAN_RESULT_PATTERN.match(_read_block_text(block).lstrip()) is not None
+
+
+def _read_block_text(block: dict[str, object]) -> str:
+    content = block.get("content")
+
+    if isinstance(content, str):
+        return content
+    elif isinstance(content, list):
+        return "".join(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    else:
+        return ""
 
 
 def _read_pending_start(pending: Path, root: str, path: str) -> float | None:
@@ -724,6 +993,122 @@ def _read_snapshot_blob(snapshot: RepositorySnapshot, path: str) -> str | None:
         return snapshot.blobs[path]
     else:
         return _read_committed_blob(snapshot.root, snapshot.head, path)
+
+
+def _expand_known_command(command: str, cwd: str | None) -> list[CommandCall] | None:
+    """The calls a command line runs, or None when it cannot be followed, so it is taken as one that may write.
+
+    Any failure of the expansion counts, since leaving a command unexpanded
+    only keeps today's snapshots.
+    """
+    try:
+        calls = expand_shell_command(command, cwd, _get_config_directory())
+    except Exception:
+        return None
+    else:
+        return calls
+
+
+def _is_tree_keeping(call: CommandCall) -> bool:
+    """Whether a call leaves every working tree as it was, judged only from programs whose effect is known."""
+    if call.writes_file or call.dynamic_name or not _is_git_environment_safe(call):
+        return False
+    elif call.argv:
+        return _is_tree_keeping_program(call.argv, call.cwd)
+    else:
+        return True
+
+
+def _is_tree_keeping_program(argv: list[str], cwd: str | None) -> bool:
+    """A local script can carry a reading program's name, so a program counts by its bare name, and the
+    commit wrapper and the report only as the installed scripts beside this module."""
+    git_command = parse_git_command(argv, cwd)
+    script, script_arguments = _read_installed_script(argv, cwd)
+
+    if git_command is not None:
+        return _is_tree_keeping_git(git_command) and os.sep not in argv[0]
+    elif script == _COMMIT_WRAPPER_NAME:
+        return cwd is not None
+    elif script == _SESSION_WRITES_NAME:
+        return script_arguments[:1] == [_REPORT_COMMAND]
+    else:
+        return os.sep not in argv[0] and argv[0] in _TREE_KEEPING_PROGRAMS
+
+
+def _is_tree_keeping_git(git_command: GitCommand) -> bool:
+    """Read and index subcommands, with only options that cannot touch the working tree or run another program."""
+    subcommand = git_command.subcommand
+    arguments = git_command.arguments
+    is_safe_config = all(key.startswith(_SAFE_GIT_CONFIG_PREFIXES) for key in git_command.config_values)
+    runs_program = any(argument.startswith(_PROGRAM_RUNNING_GIT_OPTIONS) for argument in arguments)
+
+    if subcommand in _TREE_KEEPING_GIT_OPTIONS:
+        return is_safe_config and _has_only_options(arguments, _TREE_KEEPING_GIT_OPTIONS[subcommand])
+    else:
+        return is_safe_config and not runs_program and subcommand in _TREE_KEEPING_GIT_SUBCOMMANDS
+
+
+def _has_only_options(arguments: list[str], allowed: frozenset[str]) -> bool:
+    """Whether every option before the pathspec separator is one of allowed; abbreviated and bundled options are not."""
+    options = arguments[: arguments.index(_PATHSPEC_SEPARATOR)] if _PATHSPEC_SEPARATOR in arguments else arguments
+
+    return all(option in allowed for option in options if option.startswith("-"))
+
+
+def _is_git_environment_safe(call: CommandCall) -> bool:
+    """Whether the git variables a call sets, or exports, only pick an index or a display setting."""
+    exported = [_split_variable(argument) for argument in call.argv[1:]] if call.argv[:1] == ["export"] else []
+    variables = [*call.assignments, *exported]
+    config_keys = [value for name, value in variables if _GIT_CONFIG_KEY_PATTERN.fullmatch(name)]
+    unsafe = [
+        name
+        for name, _ in variables
+        if name.startswith(_GIT_ENVIRONMENT_PREFIX)
+        and name not in _SAFE_GIT_VARIABLES
+        and not _GIT_CONFIG_KEY_PATTERN.fullmatch(name)
+        and not _GIT_CONFIG_VALUE_PATTERN.fullmatch(name)
+    ]
+
+    return not unsafe and all(key.startswith(_SAFE_GIT_CONFIG_PREFIXES) for key in config_keys)
+
+
+def _split_variable(argument: str) -> tuple[str, str]:
+    name, _, value = argument.partition("=")
+
+    return name, value
+
+
+def _read_installed_script(argv: list[str], cwd: str | None) -> tuple[str, list[str]]:
+    """The installed script beside this module that a call runs, directly or as `python3 <script>`, and its arguments.
+
+    Any other program, or a relative path from an unknown folder, gives an empty name.
+    """
+    is_interpreted = argv[0] in _PYTHON_NAMES and len(argv) > 1
+    script = os.path.expanduser(argv[1] if is_interpreted else argv[0])
+    arguments = argv[2:] if is_interpreted else argv[1:]
+    is_located = os.sep in script and (os.path.isabs(script) or cwd is not None)
+    location = Path(cwd or "", script).resolve().parent if is_located else None
+
+    if location == _SCRIPTS_DIRECTORY:
+        return os.path.basename(script), arguments
+    else:
+        return "", arguments
+
+
+def _find_hooked_commit_root(call: CommandCall) -> str | None:
+    """The repository a commit-wrapper call commits in, when git commit runs hooks there that may change files."""
+    is_commit = bool(call.argv) and _read_installed_script(call.argv, call.cwd)[0] == _COMMIT_WRAPPER_NAME
+    root = find_repository_root(call.cwd) if is_commit and call.cwd else None
+
+    return root if root and _has_commit_hooks(root) else None
+
+
+def _has_commit_hooks(root: str) -> bool:
+    """Whether git commit may run a hook in the repository; a hooks folder git does not name counts as having one."""
+    output = _try_git(root, "rev-parse", "--git-path", _HOOKS_DIRECTORY_NAME)
+    hooks = Path(root, decode_content(output).strip()) if output is not None else None
+
+    return hooks is None or any(os.access(hooks / name, os.X_OK) for name in _COMMIT_HOOK_NAMES)
 
 
 def _find_existing_directory(path: str) -> str:

@@ -40,6 +40,10 @@ OPERATORS = (";;&", ";;", ";&", "&&", "||", "|&", "|", "&", ";")
 PIPE_OPERATORS = frozenset({"|", "|&"})
 REDIRECTION_PATTERN = re.compile(r"&>>|&>|\d*(?:<<<|<<-|<<|<>|<&|>&|>>|>\||<|>)")
 HEREDOC_OPERATORS = frozenset({"<<", "<<-"})
+FILE_WRITE_OPERATORS = frozenset({">", ">>", ">|", "&>", "&>>", "<>", ">&"})
+DUPLICATION_OPERATOR = ">&"
+DUPLICATION_TARGET_PATTERN = re.compile(r"\d+-?|-")
+NULL_DEVICE_TARGETS = frozenset({"/dev/null", "/dev/stdout", "/dev/stderr"})
 HERE_STRING_OPERATOR = "<<<"
 NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 SPECIAL_PARAMETER_CHARACTERS = frozenset("0123456789@*#?$!-")
@@ -178,6 +182,7 @@ class SimpleCommand:
     words: list[Word] = field(default_factory=list)
     stdin_texts: list[str] = field(default_factory=list)
     piped_from: SimpleCommand | None = None
+    writes_file: bool = False
 
 
 @dataclass
@@ -188,6 +193,7 @@ class CommandCall:
     dynamic_name: bool
     unknown_arguments: bool
     origin: str
+    writes_file: bool = False
 
 
 @dataclass
@@ -316,7 +322,7 @@ class _Lexer:
             return current
 
     def _finish(self, command: SimpleCommand) -> None:
-        if command.words or command.stdin_texts:
+        if command.words or command.stdin_texts or command.writes_file:
             self._commands.append(command)
 
     def _read_operator(self, current: SimpleCommand) -> SimpleCommand:
@@ -343,6 +349,8 @@ class _Lexer:
             self._pending_heredocs.append(pending)
         elif operator == HERE_STRING_OPERATOR:
             current.stdin_texts.append(restore_marks(target.text))
+        elif _is_file_write(operator, restore_marks(target.text)):
+            current.writes_file = True
 
     def _read_heredoc_bodies(self) -> None:
         for pending in self._pending_heredocs:
@@ -633,8 +641,12 @@ class CommandExpander:
     def _expand_command(self, command: SimpleCommand, state: _ExpansionState) -> list[CommandCall]:
         arguments = [self._resolve_word(word, state) for word in command.words]
         stdin_texts = self._collect_stdin_texts(command, state)
+        calls = self._expand_arguments(arguments, [], stdin_texts, state)
 
-        return self._expand_arguments(arguments, [], stdin_texts, state)
+        if command.writes_file:
+            return [dataclasses.replace(call, writes_file=True) for call in calls or [self._make_call([], [], state)]]
+        else:
+            return calls
 
     def _expand_arguments(
         self,
@@ -1113,6 +1125,20 @@ def _parse_git_options(argv: list[str], cwd: str | None) -> GitCommand | None:
         return GitCommand(argv[index], argv[index + 1:], global_options, config_values, work_dir, index)
     else:
         return None
+
+
+def expand_shell_command(command: str, cwd: str | None, config_directory: Path) -> list[CommandCall]:
+    """The calls a command line may run, with the user's shell aliases and functions and git aliases followed."""
+    expander = CommandExpander(load_shell_definitions(config_directory), read_git_alias, read_text_file)
+
+    return expander.expand(command, cwd)
+
+
+def _is_file_write(operator: str, target: str) -> bool:
+    """Whether a redirection can create or change a file: an output to a target other than a null device or descriptor."""
+    is_duplication = operator == DUPLICATION_OPERATOR and DUPLICATION_TARGET_PATTERN.fullmatch(target) is not None
+
+    return operator in FILE_WRITE_OPERATORS and target not in NULL_DEVICE_TARGETS and not is_duplication
 
 
 def load_shell_definitions(config_directory: Path) -> ShellDefinitions:

@@ -76,13 +76,15 @@ Exit codes:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import os
 import re
 import secrets
 import subprocess
 import sys
-from collections.abc import Sequence
+import tempfile
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from typing import NoReturn
 
@@ -90,6 +92,7 @@ from commit_arguments import (
     EXPECT_HEAD_OPTION,
     INCLUDE_UNRECORDED_OPTION,
     OWN_LINES_OPTION,
+    PRIVATE_INDEX_OPTION,
     CommitArguments,
     CommitArgumentsError,
     parse_commit_arguments,
@@ -99,7 +102,9 @@ from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_cr
 from session_commits import add_session_commit, is_session_commit
 from session_writes import (
     SessionWritesError,
+    add_include_approval,
     decode_content,
+    find_repository_paths,
     has_record,
     is_line_tracked,
     is_record_complete,
@@ -110,6 +115,7 @@ from session_writes import (
 )
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
+PRIVATE_INDEX_PREFIX = "claude-commit-index-"
 HEAD_REVISION = "HEAD"
 UNDO_REFLOG_MESSAGE = "claude-commit: undo a commit built on a moved HEAD"
 REFLOG_ACTION_VARIABLE = "GIT_REFLOG_ACTION"
@@ -398,6 +404,75 @@ def check_private_index_arguments(expected_head_argument: str | None, files: Seq
         fail("\n".join(usage_lines), EXIT_USAGE)
 
 
+def keep_include_approval(included_paths: Sequence[str]) -> None:
+    """The shell guard asks before every --include-unrecorded call, so this run is the user's approval.
+
+    One that cannot be kept only means a retry is asked again.
+    """
+    session_id = read_session_id()
+    scope = find_repository_paths(os.getcwd(), included_paths) if session_id and included_paths else None
+
+    if session_id and scope is not None:
+        try_add_include_approval(session_id, *scope)
+
+
+def try_add_include_approval(session_id: str, root: str, paths: Sequence[str]) -> None:
+    try:
+        add_include_approval(session_id, root, paths)
+    except (SessionWritesError, OSError) as error:
+        print(f"Note: the approval could not be kept ({error}), so a retry is asked again.", file=sys.stderr)
+
+
+def check_private_index_environment(private_index: bool) -> None:
+    if private_index and PRIVATE_INDEX_VARIABLE in os.environ:
+        fail(
+            f"FAIL: {PRIVATE_INDEX_OPTION} makes an index of its own, so run it without {PRIVATE_INDEX_VARIABLE}",
+            EXIT_USAGE,
+        )
+
+
+@contextlib.contextmanager
+def use_private_index(base: str | None, files: Sequence[str]) -> Iterator[None]:
+    """Stage in an index of the wrapper's own, read from base, then remove it and refresh the shared index.
+
+    It does what the shared-checkout recipe did by hand with mktemp,
+    read-tree, rm and `git reset`, so a commit is one wrapper call that
+    leaves working trees alone, which the write record then does not
+    snapshot. The shared index is refreshed on every exit, as the recipe
+    did: a commit may exist even when a later check fails.
+    """
+    descriptor, path = tempfile.mkstemp(prefix=PRIVATE_INDEX_PREFIX)
+
+    os.close(descriptor)
+    os.environ[PRIVATE_INDEX_VARIABLE] = path
+    try:
+        read_index_base(base)
+        yield
+    finally:
+        del os.environ[PRIVATE_INDEX_VARIABLE]
+        with contextlib.suppress(FileNotFoundError):
+            os.unlink(path)
+        refresh_shared_index(files)
+
+
+def read_index_base(base: str | None) -> None:
+    read_tree_proc = run_git(["read-tree", base] if base else ["read-tree", "--empty"], capture_output=True)
+
+    if read_tree_proc.returncode != 0:
+        fail(f"FAIL: git read-tree could not build the private index from {shorten(base)}", EXIT_GIT_ERROR)
+
+
+def refresh_shared_index(files: Sequence[str]) -> None:
+    """A shared index left at the old commit makes the next commit from it revert these files."""
+    reset_proc = run_git(["reset", "-q", "--", *files], capture_output=True)
+
+    if reset_proc.returncode != 0:
+        print(
+            f"Warning: the shared index could not be refreshed; run `git reset -q -- {' '.join(files)}`.",
+            file=sys.stderr,
+        )
+
+
 def check_head_unchanged(expected_head: str | None, files: Sequence[str]) -> None:
     current_head = read_revision(HEAD_REVISION)
 
@@ -601,7 +676,7 @@ def read_file_history(session_id: str, root: str, path: str) -> FileHistory | No
     except SessionWritesError as error:
         fail(
             f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart.\n"
-            f"Resolve: leave it out, or, if the user confirms its changes belong in this commit, add {INCLUDE_UNRECORDED_OPTION} {path}.",
+            f"Resolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there.",
             EXIT_FOREIGN_LINES,
         )
 
@@ -693,7 +768,7 @@ def check_staged_lines(included: Sequence[str], expected_head: str | None) -> No
     shown = [problem for problem in problems if problem]
 
     if shown:
-        resolve = f"Resolve: rerun with {OWN_LINES_OPTION} to stage only your lines, or, if the user confirms the listed lines belong in this commit, add {INCLUDE_UNRECORDED_OPTION} <file>."
+        resolve = f"Resolve: rerun with {OWN_LINES_OPTION} to stage only your lines, or rerun with {INCLUDE_UNRECORDED_OPTION} <file> without asking in chat first: the shell guard shows the user these lines and asks there."
         fail("\n".join([*shown, resolve]), EXIT_FOREIGN_LINES)
 
 
@@ -729,7 +804,7 @@ def describe_whole_file(session_id: str, root: str, path: str, expected_head: st
 
 
 def make_unrecorded_message(path: str) -> str:
-    return f"FAIL: this session has no recorded writes to {path}, so none of its changes are known to be yours.\nResolve: leave it out, or, if the user confirms its changes belong in this commit, add {INCLUDE_UNRECORDED_OPTION} {path}."
+    return f"FAIL: this session has no recorded writes to {path}, so none of its changes are known to be yours.\nResolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there."
 
 
 def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
@@ -737,7 +812,7 @@ def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
     lines = [
         f"FAIL: in {path}, {len(entangled)} of your changes are tangled with lines another session has not committed (your line changes or splits theirs, or they changed your replacement), so they cannot be committed apart:",
         *shown,
-        f"Resolve: ask the user; the other session can commit first, or, if the user agrees, commit both with {INCLUDE_UNRECORDED_OPTION} {path}.",
+        f"Resolve: if the other session can commit first, message it and wait; otherwise rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
     ]
 
     return "\n".join(lines)
@@ -748,7 +823,7 @@ def make_contested_message(path: str, contested: Sequence[ContestedLine]) -> str
     lines = [
         f"FAIL: in {path}, {len(contested)} changes were written while another session also wrote this file, so the record cannot tell whether they are yours:",
         *shown,
-        f"Resolve: ask the user; if they are yours, add {INCLUDE_UNRECORDED_OPTION} {path} after the user confirms.",
+        f"Resolve: rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
     ]
 
     return "\n".join(lines)
@@ -866,16 +941,30 @@ def main(argv: list[str]) -> None:
     files = arguments.files
 
     print_header()
+    keep_include_approval(arguments.included_paths)
     metrics = validate_message(arguments.message)
+    check_private_index_environment(arguments.private_index)
     check_private_index_arguments(arguments.expected_head, files)
     expected_head = resolve_expected_head(arguments.expected_head)
     check_head_unchanged(expected_head, files)
     check_amend_target(arguments.amend, expected_head)
     print("=== Recent commits ===")
     run_git(["log", "--oneline", "-3"])
+    if arguments.private_index:
+        with use_private_index(expected_head, files):
+            made = stage_and_commit(arguments, expected_head, metrics)
+    else:
+        made = stage_and_commit(arguments, expected_head, metrics)
+    print("=== Done ===")
+    run_git(["log", "--oneline", "-1", made.commit])
+
+
+def stage_and_commit(
+    arguments: CommitArguments, expected_head: str | None, metrics: tuple[int, int, int, int]
+) -> MadeCommit:
     stage_changes(arguments, expected_head)
-    if files:
-        verify_staging(files)
+    if arguments.files:
+        verify_staging(arguments.files)
     check_credential_files()
     check_secret_tokens()
     own_lines_skip_reason = find_own_lines_skip_reason()
@@ -886,10 +975,9 @@ def main(argv: list[str]) -> None:
     print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK", arguments.amend)
     print("=== Committing ===")
     made = do_commit(arguments.message, arguments.amend)
-    check_commit_base(made, expected_head, arguments.amend, files)
+    check_commit_base(made, expected_head, arguments.amend, arguments.files)
     record_session_commit(made.commit)
-    print("=== Done ===")
-    run_git(["log", "--oneline", "-1", made.commit])
+    return made
 
 
 if __name__ == "__main__":
