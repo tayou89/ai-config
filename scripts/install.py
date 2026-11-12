@@ -3,10 +3,16 @@
 
 Usage:
     install.py [--apply | --check] [--prune] [--allow-dirty] [--first-merge {keep-local,use-repository}]
+               [--from-upstream] [--checkout PATH]
 
 Without --apply nothing is written: the script prints what it would change.
 With --apply it first copies every file it replaces into a backups folder,
 then writes. Running it again changes nothing.
+
+With --from-upstream it installs the commit this checkout's upstream branch
+points at instead of the files here: it clones that commit into a temporary
+folder, runs the clone's own install.py with the same options, and removes
+the clone, so work here that is not pushed stays out.
 
 Files the repository owns (rules, skills, scripts, mods) are copied as they
 are. settings.json is merged key by key so lines only this computer has are
@@ -25,8 +31,12 @@ config-sync-hook.py runs it.
 Plugins named in settings.json and codex/settings.json are installed with
 the claude and codex commands. Sign-ins stay manual and are listed at the end.
 
-It also points this checkout's core.hooksPath at .githooks, so every commit
-here runs scripts/check-commit.py on the content being committed.
+It records the working checkout in .ai-config-install/checkout inside the
+Claude folder, where the session-start hook runs --check, and points that
+checkout's core.hooksPath at .githooks, so every commit there runs
+scripts/check-commit.py on the content being committed. A run from another
+copy of the repository keeps a recorded checkout that still has
+scripts/install.py; --checkout names the one to record instead.
 
 Exit codes:
     0  done, or nothing to change
@@ -52,6 +62,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -60,6 +71,7 @@ from typing import Any, Callable, Dict, FrozenSet, Iterator, List, Mapping, Sequ
 
 
 Runner = Callable[[Sequence[str]], "subprocess.CompletedProcess[str]"]
+Executor = Callable[[Sequence[str]], int]
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 CODEX_SOURCE_DIRECTORY = REPOSITORY_ROOT / "codex"
@@ -125,6 +137,13 @@ TOML_TOP_LEVEL_KEY = re.compile(r"^\s*([A-Za-z0-9_-]+)\s*=")
 DIFF_PREVIEW_LINES = 40
 CODEX_RULES_DIRECTORY = "rules"
 CHECKOUT_RECORD = Path(STATE_DIRECTORY) / "checkout"
+INSTALL_SCRIPT = Path(SCRIPTS_DIRECTORY) / "install.py"
+UPSTREAM = "@{upstream}"
+UPSTREAM_COPY_PREFIX = "ai-config-upstream-"
+APPLY_FLAG = "--apply"
+PRUNE_FLAG = "--prune"
+FIRST_MERGE_FLAG = "--first-merge"
+CHECKOUT_FLAG = "--checkout"
 FETCH_HEAD_FILE = "FETCH_HEAD"
 FETCH_INTERVAL_SECONDS = 3600
 PER_COMPUTER_SETTINGS = ("enabledPlugins.discord@claude-plugins-official",)
@@ -212,6 +231,8 @@ class Options:
     allow_dirty: bool
     first_merge: str
     check: bool = False
+    from_upstream: bool = False
+    checkout: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +248,22 @@ class KeyOwnership:
 
 def run_command(arguments: Sequence[str]) -> "subprocess.CompletedProcess[str]":
     return subprocess.run(list(arguments), capture_output=True, text=True, encoding="utf-8")
+
+
+def execute_command(arguments: Sequence[str]) -> int:
+    """Run a command whose output goes straight to this script's own output."""
+    return subprocess.run(list(arguments), check=False).returncode
+
+
+def run_required(run: Runner, arguments: Sequence[str]) -> str:
+    """Run a command that must succeed and return what it printed."""
+    result = run(arguments)
+
+    if result.returncode == 0:
+        return result.stdout.strip()
+    else:
+        output = (result.stderr or result.stdout).strip()
+        raise InstallError(EXIT_COMMAND_FAILED, f"`{' '.join(arguments)}` failed: {output}")
 
 
 def detect_platform(environment: Mapping[str, str], system_name: str) -> Platform:
@@ -556,6 +593,66 @@ def list_unsynchronized_commits(run: Runner, repository: str) -> List[str]:
         return messages
 
 
+def read_checkout_record(claude_home: Path) -> Path | None:
+    record = claude_home / CHECKOUT_RECORD
+    text = record.read_text(encoding="utf-8").strip() if record.is_file() else ""
+
+    if text:
+        return Path(text)
+    else:
+        return None
+
+
+def resolve_checkout(named: Path | None, recorded: Path | None, current: Path) -> Path:
+    """The working checkout: the one --checkout names, else the recorded one while it has install.py, else this one.
+
+    So a run from another copy of the repository, such as a temporary clone, leaves the record alone.
+    """
+    if named is not None:
+        return named
+    elif recorded is not None and has_install_script(recorded):
+        return recorded
+    else:
+        return current
+
+
+def has_install_script(path: Path) -> bool:
+    return (path / INSTALL_SCRIPT).is_file()
+
+
+def read_upstream(run: Runner, repository: str) -> tuple[str, str]:
+    """Name the upstream branch and the commit it pointed at when last fetched."""
+    name = run(["git", "-C", repository, "rev-parse", "--abbrev-ref", "--symbolic-full-name", UPSTREAM])
+    commit = run(["git", "-C", repository, "rev-parse", "--verify", "--quiet", f"{UPSTREAM}^{{commit}}"])
+
+    if name.returncode == 0 and commit.returncode == 0:
+        return name.stdout.strip(), commit.stdout.strip()
+    else:
+        raise InstallError(
+            EXIT_COMMAND_FAILED,
+            f"{repository} has no upstream branch to install from. Run this from a checkout whose branch tracks a remote branch.",
+        )
+
+
+def clone_commit(run: Runner, repository: str, commit: str, copy: Path) -> None:
+    """Clone the checkout and check out one commit; a local clone holds every object, the fetched upstream's too."""
+    run_required(run, ["git", "clone", "--quiet", "--no-checkout", repository, str(copy)])
+    run_required(run, ["git", "-C", str(copy), "checkout", "--quiet", "--detach", commit])
+
+
+def make_copy_arguments(options: Options, checkout: Path) -> list[str]:
+    """The options for the copy's own install.py; --checkout keeps the record on the working checkout."""
+    arguments = [CHECKOUT_FLAG, str(checkout)]
+
+    if options.apply:
+        arguments.append(APPLY_FLAG)
+    if options.prune:
+        arguments.append(PRUNE_FLAG)
+    if options.first_merge:
+        arguments.extend([FIRST_MERGE_FLAG, options.first_merge])
+    return arguments
+
+
 def list_entry_names(directory: Path) -> Set[str]:
     return {entry.name for entry in list_entries(directory)}
 
@@ -692,6 +789,8 @@ class Installer:
         self._conflicts: List[str] = []
         self._local_only: List[str] = []
         self._mods = find_mods(REPOSITORY_ROOT)
+        self._recorded_checkout = read_checkout_record(platform_paths.claude_home)
+        self._checkout = resolve_checkout(options.checkout, self._recorded_checkout, REPOSITORY_ROOT)
 
     def install(self) -> None:
         self._report_prerequisites()
@@ -756,19 +855,20 @@ class Installer:
             self._notes.append("GitHub CLI is not signed in (`gh auth login`).")
 
     def _set_commit_hooks_path(self) -> None:
-        repository = str(REPOSITORY_ROOT)
+        repository = str(self._checkout)
         current = self._run(["git", "-C", repository, "config", "--get", HOOKS_PATH_KEY]).stdout.strip()
 
         if current != COMMIT_HOOKS_DIRECTORY:
             self._run_action(["git", "-C", repository, "config", HOOKS_PATH_KEY, COMMIT_HOOKS_DIRECTORY])
 
     def _record_checkout(self) -> None:
-        """Write where this checkout is, so the session-start hook can run its --check."""
-        record = self._platform.claude_home / CHECKOUT_RECORD
-        recorded = record.read_text(encoding="utf-8").strip() if record.exists() else ""
-
-        if recorded != str(REPOSITORY_ROOT):
-            self._write(record, f"{REPOSITORY_ROOT}\n", self._platform.claude_home)
+        """Write where the working checkout is, so the session-start hook runs its --check there."""
+        if self._recorded_checkout != self._checkout:
+            self._write(self._platform.claude_home / CHECKOUT_RECORD, f"{self._checkout}\n", self._platform.claude_home)
+        elif self._options.checkout is None and self._checkout != REPOSITORY_ROOT:
+            self._notes.append(
+                f"Kept the recorded checkout {self._checkout}; this run read the repository from {REPOSITORY_ROOT}. Pass --checkout to record another one.",
+            )
 
     def _install_instruction_files(self) -> None:
         for source, destination, root in self._list_instruction_files():
@@ -1012,12 +1112,7 @@ class Installer:
         return merge_settings({}, repository, make_machine_settings(self._platform.claude_home, self._mods))
 
     def _read_json_command(self, arguments: Sequence[str]) -> list:
-        result = self._run(arguments)
-
-        if result.returncode == 0:
-            return json.loads(result.stdout or "[]")
-        else:
-            raise InstallError(EXIT_COMMAND_FAILED, f"`{' '.join(arguments)}` failed: {result.stderr.strip()}")
+        return json.loads(run_required(self._run, arguments) or "[]")
 
     def _read_codex_plugin_statuses(self) -> Dict[str, str]:
         result = self._run(["codex", "plugin", "list"])
@@ -1032,10 +1127,7 @@ class Installer:
     def _run_action(self, arguments: Sequence[str]) -> None:
         self._changes.append(f"run {' '.join(arguments)}")
         if self._options.apply:
-            result = self._run(arguments)
-            if result.returncode != 0:
-                output = (result.stderr or result.stdout).strip()
-                raise InstallError(EXIT_COMMAND_FAILED, f"`{' '.join(arguments)}` failed: {output}")
+            run_required(self._run, arguments)
 
     def _find_marketplace_source(self, marketplace: str, settings: dict) -> str:
         entry = settings.get(MARKETPLACES_KEY, {}).get(marketplace)
@@ -1083,35 +1175,93 @@ def parse_options(arguments: Sequence[str]) -> Options:
 
     mode = parser.add_mutually_exclusive_group()
 
-    mode.add_argument("--apply", action="store_true", help="write the changes (default: only show them)")
+    mode.add_argument(APPLY_FLAG, action="store_true", help="write the changes (default: only show them)")
     mode.add_argument(
         "--check",
         action="store_true",
         help="list differences in both directions quickly, write nothing, and exit 7 when there are any",
     )
     parser.add_argument(
-        "--prune",
+        PRUNE_FLAG,
         action="store_true",
         help="move installed files the repository no longer has to backups",
     )
     parser.add_argument("--allow-dirty", action="store_true", help="install even with uncommitted or unpulled changes")
     parser.add_argument(
-        "--first-merge",
+        FIRST_MERGE_FLAG,
         choices=[FIRST_MERGE_KEEP_LOCAL, FIRST_MERGE_USE_REPOSITORY],
         help="how to treat differences in CLAUDE.md or AGENTS.md when no earlier install is recorded",
     )
+    parser.add_argument(
+        "--from-upstream",
+        action="store_true",
+        help="install the commit this checkout's upstream branch points at, from a temporary clone, leaving out work here that is not pushed",
+    )
+    parser.add_argument(
+        CHECKOUT_FLAG,
+        type=parse_checkout,
+        help="the working checkout to record for the session-start check and to set core.hooksPath in (default: the recorded one while it has scripts/install.py, else this one)",
+    )
     parsed = parser.parse_args(arguments)
 
+    check_mode_options(parser, parsed)
     return Options(
         apply=parsed.apply,
         prune=parsed.prune,
         allow_dirty=parsed.allow_dirty,
         first_merge=parsed.first_merge or "",
         check=parsed.check,
+        from_upstream=parsed.from_upstream,
+        checkout=parsed.checkout,
     )
 
 
+def parse_checkout(text: str) -> Path:
+    path = Path(text).expanduser().resolve()
+
+    if has_install_script(path):
+        return path
+    else:
+        raise argparse.ArgumentTypeError(
+            f"{text} is not a checkout of this repository: it has no {INSTALL_SCRIPT.as_posix()}",
+        )
+
+
+def check_mode_options(parser: argparse.ArgumentParser, parsed: argparse.Namespace) -> None:
+    if parsed.check and (parsed.from_upstream or parsed.checkout is not None):
+        parser.error(
+            "--check compares this checkout with this computer, so it takes neither --from-upstream nor --checkout",
+        )
+
+
+def run_from_upstream(
+    repository_root: Path,
+    platform_paths: Platform,
+    options: Options,
+    run: Runner,
+    execute: Executor,
+) -> int:
+    """Install through the clone's own install.py, so the files and the code that installs them come from one commit."""
+    repository = str(repository_root)
+    fetch = run(["git", "-C", repository, "fetch", "--quiet"])
+    name, commit = read_upstream(run, repository)
+    checkout = resolve_checkout(options.checkout, read_checkout_record(platform_paths.claude_home), repository_root)
+
+    print(
+        f"Installing {name} at {commit[:12]} from a temporary clone; work in {repository} that is not pushed stays out.",
+    )
+    if fetch.returncode != 0:
+        print(f"Could not fetch, so this is {name} as fetched last.")
+    sys.stdout.flush()
+    with tempfile.TemporaryDirectory(prefix=UPSTREAM_COPY_PREFIX) as directory:
+        copy = Path(directory) / repository_root.name
+
+        clone_commit(run, repository, commit, copy)
+        return execute([sys.executable, "-I", str(copy / INSTALL_SCRIPT), *make_copy_arguments(options, checkout)])
+
+
 def run_install(platform_paths: Platform, options: Options) -> int:
+    check_registered_entries(REPOSITORY_ROOT)
     if not options.allow_dirty:
         run_command(["git", "-C", str(REPOSITORY_ROOT), "fetch", "--quiet"])
         check_repository_clean(run_command, REPOSITORY_ROOT)
@@ -1125,6 +1275,7 @@ def run_install(platform_paths: Platform, options: Options) -> int:
 
 
 def run_check(platform_paths: Platform, options: Options) -> int:
+    check_registered_entries(REPOSITORY_ROOT)
     checkout = find_checkout_differences(run_command, REPOSITORY_ROOT, time.time())
     installer = Installer(platform_paths, options, run_command, shutil.which)
     sections = {CHECKOUT_SECTION: checkout, **installer.check()}
@@ -1149,9 +1300,10 @@ def main(arguments: Sequence[str]) -> int:
         options = parse_options(arguments)
         platform_paths = detect_platform(os.environ, platform.system())
 
-        check_registered_entries(REPOSITORY_ROOT)
         if options.check:
             return run_check(platform_paths, options)
+        elif options.from_upstream:
+            return run_from_upstream(REPOSITORY_ROOT, platform_paths, options, run_command, execute_command)
         else:
             return run_install(platform_paths, options)
     except InstallError as error:

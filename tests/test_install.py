@@ -12,14 +12,16 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import os
 import re
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import List, Sequence
+from unittest import mock
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
@@ -85,6 +87,22 @@ class StubCommands:
 
 def find_any_command(command: str) -> str:
     return f"/usr/bin/{command}"
+
+
+def make_checkout(parent: Path, name: str) -> Path:
+    checkout = parent / name
+
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "scripts" / "install.py").write_text("", encoding="utf-8")
+    return checkout
+
+
+def write_checkout_record(claude_home: Path, checkout: Path) -> Path:
+    record = claude_home / install.CHECKOUT_RECORD
+
+    record.parent.mkdir(parents=True)
+    record.write_text(f"{checkout}\n", encoding="utf-8")
+    return record
 
 
 class DetectPlatformTest(unittest.TestCase):
@@ -460,6 +478,37 @@ class InstallerTest(unittest.TestCase):
 
         self.assertEqual(record.read_text(encoding="utf-8").strip(), str(REPOSITORY_ROOT))
 
+    def test_install_from_another_copy_keeps_the_recorded_checkout(self):
+        checkout = make_checkout(Path(self._directory.name), "checkout")
+        record = write_checkout_record(self._platform.claude_home, checkout)
+        installer = self._run_installer(apply=True)
+
+        self.assertEqual(record.read_text(encoding="utf-8"), f"{checkout}\n")
+        self.assertIn(["git", "-C", str(checkout), "config", "core.hooksPath", ".githooks"], self._commands.calls)
+        self.assertTrue(any("Kept the recorded checkout" in note for note in installer._notes))
+        self.assertEqual(self._check(), {install.NOT_INSTALLED_SECTION: [], install.LOCAL_ONLY_SECTION: []})
+
+    def test_dry_run_from_another_copy_lists_no_record_change(self):
+        checkout = make_checkout(Path(self._directory.name), "checkout")
+        record = write_checkout_record(self._platform.claude_home, checkout)
+        installer = self._run_installer(apply=False)
+
+        self.assertFalse(any(str(record) in change for change in installer._changes))
+
+    def test_install_replaces_a_recorded_checkout_that_is_gone(self):
+        record = write_checkout_record(self._platform.claude_home, Path(self._directory.name) / "moved-away")
+
+        self._run_installer(apply=True)
+        self.assertEqual(record.read_text(encoding="utf-8"), f"{REPOSITORY_ROOT}\n")
+
+    def test_named_checkout_replaces_the_record(self):
+        record = write_checkout_record(self._platform.claude_home, make_checkout(Path(self._directory.name), "old"))
+        named = make_checkout(Path(self._directory.name), "new")
+        installer = self._run_installer(apply=True, checkout=named)
+
+        self.assertEqual(record.read_text(encoding="utf-8"), f"{named}\n")
+        self.assertFalse(any("Kept the recorded checkout" in note for note in installer._notes))
+
     def test_check_reports_codex_skills_but_not_the_app_skills(self):
         self._run_installer(apply=True)
         for name in ("made-here", ".system"):
@@ -504,13 +553,216 @@ class InstallerTest(unittest.TestCase):
 
         return installer.check()
 
-    def _run_installer(self, apply: bool, prune: bool = False, first_merge: str = "") -> "install.Installer":
-        options = install.Options(apply=apply, prune=prune, allow_dirty=True, first_merge=first_merge)
+    def _run_installer(
+        self,
+        apply: bool,
+        prune: bool = False,
+        first_merge: str = "",
+        checkout: Path | None = None,
+    ) -> "install.Installer":
+        options = install.Options(
+            apply=apply,
+            prune=prune,
+            allow_dirty=True,
+            first_merge=first_merge,
+            checkout=checkout,
+        )
         installer = install.Installer(self._platform, options, self._commands.run, find_any_command)
 
         with redirect_stdout(io.StringIO()):
             installer.install()
         return installer
+
+
+class ParseOptionsTest(unittest.TestCase):
+    def test_from_upstream_keeps_the_install_options(self):
+        options = install.parse_options(["--from-upstream", "--apply", "--prune"])
+
+        self.assertTrue(options.from_upstream)
+        self.assertTrue(options.apply)
+        self.assertTrue(options.prune)
+
+    def test_checkout_is_resolved(self):
+        options = install.parse_options(["--checkout", str(REPOSITORY_ROOT / "scripts" / "..")])
+
+        self.assertEqual(options.checkout, REPOSITORY_ROOT)
+
+    def test_checkout_needs_the_install_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self._assert_refused(["--checkout", directory])
+
+    def test_check_takes_neither_from_upstream_nor_checkout(self):
+        self._assert_refused(["--check", "--from-upstream"])
+        self._assert_refused(["--check", "--checkout", str(REPOSITORY_ROOT)])
+
+    def _assert_refused(self, arguments: list[str]) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            install.parse_options(arguments)
+
+
+class ResolveCheckoutTest(unittest.TestCase):
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self._root = Path(self._directory.name)
+
+    def tearDown(self):
+        self._directory.cleanup()
+
+    def test_named_checkout_comes_first(self):
+        named = self._root / "named"
+        recorded = make_checkout(self._root, "recorded")
+
+        self.assertEqual(install.resolve_checkout(named, recorded, self._root), named)
+
+    def test_recorded_checkout_stays_while_it_has_the_install_script(self):
+        recorded = make_checkout(self._root, "recorded")
+
+        self.assertEqual(install.resolve_checkout(None, recorded, self._root), recorded)
+
+    def test_this_checkout_is_used_without_a_usable_record(self):
+        self.assertEqual(install.resolve_checkout(None, self._root / "gone", self._root), self._root)
+        self.assertEqual(install.resolve_checkout(None, None, self._root), self._root)
+
+
+class FromUpstreamTest(unittest.TestCase):
+    """Runs real git in temporary repositories, with this computer's git settings left out."""
+
+    def setUp(self):
+        self._directory = tempfile.TemporaryDirectory()
+        self._root = Path(self._directory.name)
+        self._platform = install.Platform(
+            system_name="Darwin",
+            home=self._root,
+            claude_home=self._root / ".claude",
+            codex_home=self._root / ".codex",
+            application_paths=(),
+            hook_commands=("python3",),
+            links_ego_skill=False,
+        )
+        self._options = install.Options(apply=True, prune=False, allow_dirty=False, first_merge="", from_upstream=True)
+        self._executed: list[list[str]] = []
+        self._copies: list[Path] = []
+        self._copy_files: list[list[str]] = []
+        self._copy_contents: list[str] = []
+        self._output = io.StringIO()
+        git_settings = {"GIT_CONFIG_GLOBAL": str(self._root / "gitconfig"), "GIT_CONFIG_NOSYSTEM": "1"}
+        environment = mock.patch.dict(os.environ, git_settings)
+
+        environment.start()
+        self.addCleanup(environment.stop)
+
+    def tearDown(self):
+        self._directory.cleanup()
+
+    def test_installs_the_pushed_commit_and_leaves_out_the_work_here(self):
+        checkout = self._make_checkout_behind_its_upstream()
+        code = self._install_from_upstream(checkout)
+
+        self.assertEqual(code, 7)
+        self.assertEqual(self._copy_contents, ["second\n"])
+        self.assertEqual(self._copy_files, [["pushed.txt", "scripts"]])
+        self.assertFalse(self._copies[0].exists())
+        self.assertEqual(self._executed[0][:2], [sys.executable, "-I"])
+        self.assertEqual(self._executed[0][3:], ["--checkout", str(checkout), "--apply"])
+
+    def test_the_copy_keeps_the_recorded_checkout(self):
+        recorded = make_checkout(self._root, "recorded")
+
+        write_checkout_record(self._platform.claude_home, recorded)
+        self._install_from_upstream(self._make_checkout_behind_its_upstream())
+        self.assertEqual(self._executed[0][3:5], ["--checkout", str(recorded)])
+
+    def test_a_failed_fetch_installs_the_upstream_as_fetched_last(self):
+        checkout = self._make_checkout_behind_its_upstream()
+
+        self._git(checkout, "remote", "set-url", "origin", str(self._root / "missing.git"))
+        code = self._install_from_upstream(checkout)
+
+        self.assertEqual(code, 7)
+        self.assertIn("Could not fetch", self._output.getvalue())
+        self.assertEqual(self._copy_contents, ["second\n"])
+
+    def test_a_checkout_without_upstream_stops(self):
+        checkout = self._root / "alone"
+
+        self._git(self._root, "init", "-q", "-b", "main", str(checkout))
+        with self.assertRaises(install.InstallError) as raised:
+            self._install_from_upstream(checkout)
+        self.assertEqual(raised.exception.exit_code, install.EXIT_COMMAND_FAILED)
+        self.assertEqual(self._executed, [])
+
+    def test_a_failed_clone_leaves_no_copy(self):
+        calls: list[list[str]] = []
+
+        def run(arguments: Sequence[str]) -> subprocess.CompletedProcess[str]:
+            is_clone = list(arguments[:2]) == ["git", "clone"]
+
+            calls.append(list(arguments))
+            return subprocess.CompletedProcess(arguments, 128 if is_clone else 0, stdout="origin/main\n", stderr="")
+
+        with redirect_stdout(io.StringIO()), self.assertRaises(install.InstallError):
+            install.run_from_upstream(self._root, self._platform, self._options, run, self._execute)
+        self.assertFalse(Path(calls[-1][-1]).parent.exists())
+        self.assertEqual(self._executed, [])
+
+    def test_copy_arguments_carry_the_install_options(self):
+        every_option = install.Options(apply=True, prune=True, allow_dirty=True, first_merge="keep-local")
+        dry_run = install.Options(apply=False, prune=False, allow_dirty=False, first_merge="")
+        checkout = Path("/checkout")
+
+        self.assertEqual(
+            install.make_copy_arguments(every_option, checkout),
+            ["--checkout", str(checkout), "--apply", "--prune", "--first-merge", "keep-local"],
+        )
+        self.assertEqual(install.make_copy_arguments(dry_run, checkout), ["--checkout", str(checkout)])
+
+    def _install_from_upstream(self, checkout: Path) -> int:
+        with redirect_stdout(self._output):
+            return install.run_from_upstream(
+                checkout,
+                self._platform,
+                self._options,
+                install.run_command,
+                self._execute,
+            )
+
+    def _execute(self, arguments: Sequence[str]) -> int:
+        copy = Path(arguments[2]).parent.parent
+
+        self._executed.append(list(arguments))
+        self._copies.append(copy)
+        self._copy_files.append(sorted(path.name for path in copy.iterdir() if path.name != ".git"))
+        self._copy_contents.append((copy / "pushed.txt").read_text(encoding="utf-8"))
+        return 7
+
+    def _make_checkout_behind_its_upstream(self) -> Path:
+        """A checkout one commit behind its upstream, with an unpushed commit and an uncommitted file of its own."""
+        remote = self._root / "remote.git"
+        other = self._root / "other"
+        checkout = self._root / "checkout"
+
+        self._git(self._root, "init", "-q", "--bare", "-b", "main", str(remote))
+        self._git(self._root, "clone", "-q", str(remote), str(other))
+        make_checkout(self._root, other.name)
+        self._commit(other, "first")
+        self._git(other, "push", "-q", "origin", "main")
+        self._git(self._root, "clone", "-q", str(remote), str(checkout))
+        self._commit(other, "second")
+        self._git(other, "push", "-q", "origin", "main")
+        self._commit(checkout, "unpushed")
+        self._git(checkout, "fetch", "-q")
+        (checkout / "uncommitted.txt").write_text("not committed\n", encoding="utf-8")
+        return checkout
+
+    def _commit(self, repository: Path, text: str) -> None:
+        (repository / "pushed.txt").write_text(f"{text}\n", encoding="utf-8")
+        self._git(repository, "add", ".")
+        self._git(repository, "commit", "-q", "-m", text)
+
+    def _git(self, directory: Path, *arguments: str) -> None:
+        identity = ["-c", "user.name=Test", "-c", "user.email=test@example.com"]
+
+        subprocess.run(["git", *identity, "-C", str(directory), *arguments], check=True, capture_output=True)
 
 
 if __name__ == "__main__":
