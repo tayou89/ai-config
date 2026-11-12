@@ -4,8 +4,9 @@
 It denies a new session or proposal that names no model or effort, since a
 session started without them inherits the starting session's level instead
 of the work-type table's. When a session would start now while the computer
-is overloaded, it asks the user first, using the load threshold the batch(1)
-command uses: a 1-minute load average above 1.5 times the CPU count.
+is overloaded, it lets the start through without asking the user and adds the
+load to the session's context, using the load threshold the batch(1) command
+uses: a 1-minute load average above 1.5 times the CPU count.
 """
 
 from __future__ import annotations
@@ -21,8 +22,10 @@ _EVENT_KEY = "hook_event_name"
 _TOOL_NAME_KEY = "tool_name"
 _TOOL_INPUT_KEY = "tool_input"
 _HOOK_OUTPUT_KEY = "hookSpecificOutput"
+_DECISION_KEY = "permissionDecision"
+_DECISION_REASON_KEY = "permissionDecisionReason"
+_CONTEXT_KEY = "additionalContext"
 _DECISION_DENY = "deny"
-_DECISION_ASK = "ask"
 _PROPOSAL_KEY = "proposal_id"
 _TITLE_KEY = "title"
 _INITIATION_KEY = "initiation"
@@ -34,9 +37,9 @@ _LEVEL_REASON = (
     "(\"Model and effort for runs you start\"), using the highest row any part of the work needs. "
     "A session started without them inherits this session's level."
 )
-_LOAD_REASON = (
-    "이 컴퓨터가 지금 과부하입니다(1분 부하 평균 {load:.0f}, CPU {cpus}개, 기준 {limit:.0f}). "
-    "지금 세션을 더 열면 모든 세션이 느려집니다. 그래도 열려면 허용하고, 기다리려면 거부해 주세요."
+_LOAD_NOTICE = (
+    "The 1-minute load average is {load:.0f}, above {limit:.0f} (1.5 times {cpus} CPUs). "
+    "The session starts without asking the user."
 )
 
 
@@ -60,33 +63,28 @@ def _read_load() -> tuple[float, int] | None:
 
 def make_output(hook_input: dict[str, Any], load: tuple[float, int] | None) -> dict[str, Any] | None:
     tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
-    decision = None
+    specific_output = None
 
     if hook_input.get(_EVENT_KEY) == _PRE_TOOL_USE and hook_input.get(_TOOL_NAME_KEY) == _START_TOOL:
-        decision = decide(tool_input, load)
-    if decision:
-        verdict, reason = decision
-
-        return {
-            _HOOK_OUTPUT_KEY: {
-                "hookEventName": _PRE_TOOL_USE,
-                "permissionDecision": verdict,
-                "permissionDecisionReason": reason,
-            }
-        }
+        specific_output = decide(tool_input, load)
+    if specific_output:
+        return {_HOOK_OUTPUT_KEY: {"hookEventName": _PRE_TOOL_USE, **specific_output}}
     else:
         return None
 
 
-def decide(tool_input: dict[str, Any], load: tuple[float, int] | None) -> tuple[str, str] | None:
+def decide(tool_input: dict[str, Any], load: tuple[float, int] | None) -> dict[str, str] | None:
     missing = _list_missing_levels(tool_input)
 
     if missing:
-        return _DECISION_DENY, _LEVEL_REASON.format(missing=" and ".join(f"`{key}`" for key in missing))
+        return {
+            _DECISION_KEY: _DECISION_DENY,
+            _DECISION_REASON_KEY: _LEVEL_REASON.format(missing=" and ".join(f"`{key}`" for key in missing)),
+        }
     elif load is not None and _is_starting_now(tool_input) and _is_overloaded(*load):
         current, cpus = load
 
-        return _DECISION_ASK, _LOAD_REASON.format(load=current, cpus=cpus, limit=_LOAD_FACTOR * cpus)
+        return {_CONTEXT_KEY: _LOAD_NOTICE.format(load=current, cpus=cpus, limit=_LOAD_FACTOR * cpus)}
     else:
         return None
 

@@ -18,7 +18,9 @@ HOOK_SPECIFICATION.loader.exec_module(start_session_hook)
 START_TOOL = "mcp__ccd_session__start_session"
 PRE_TOOL_USE = "PreToolUse"
 DENY = "deny"
-ASK = "ask"
+DECISION_KEY = "permissionDecision"
+REASON_KEY = "permissionDecisionReason"
+CONTEXT_KEY = "additionalContext"
 CPUS = 10
 CALM = (4.0, CPUS)
 OVERLOADED = (137.0, CPUS)
@@ -35,46 +37,55 @@ FULL_START = {
 class StartSessionHookTest(unittest.TestCase):
     def test_denies_start_without_effort(self) -> None:
         tool_input = {key: value for key, value in FULL_START.items() if key != "effort"}
-        verdict, reason = start_session_hook.decide(tool_input, CALM)
+        decision = start_session_hook.decide(tool_input, CALM)
 
-        self.assertEqual(verdict, DENY)
-        self.assertIn("`effort`", reason)
-        self.assertNotIn("`model`", reason)
+        self.assertEqual(decision[DECISION_KEY], DENY)
+        self.assertIn("`effort`", decision[REASON_KEY])
+        self.assertNotIn("`model`", decision[REASON_KEY])
 
     def test_denies_card_without_model_and_effort(self) -> None:
         tool_input = {"initiation": "own_initiative", "title": "조사", "prompt": "brief"}
-        verdict, reason = start_session_hook.decide(tool_input, CALM)
+        decision = start_session_hook.decide(tool_input, CALM)
 
-        self.assertEqual(verdict, DENY)
-        self.assertIn("`model` and `effort`", reason)
+        self.assertEqual(decision[DECISION_KEY], DENY)
+        self.assertIn("`model` and `effort`", decision[REASON_KEY])
+
+    def test_denies_missing_levels_even_when_overloaded(self) -> None:
+        tool_input = {key: value for key, value in FULL_START.items() if key != "model"}
+
+        self.assertEqual(start_session_hook.decide(tool_input, OVERLOADED)[DECISION_KEY], DENY)
 
     def test_passes_full_start_when_calm(self) -> None:
         self.assertIsNone(start_session_hook.decide(FULL_START, CALM))
 
-    def test_asks_before_start_when_overloaded(self) -> None:
-        verdict, reason = start_session_hook.decide(FULL_START, OVERLOADED)
+    def test_notes_load_without_asking_when_overloaded(self) -> None:
+        decision = start_session_hook.decide(FULL_START, OVERLOADED)
 
-        self.assertEqual(verdict, ASK)
-        self.assertIn("137", reason)
+        self.assertNotIn(DECISION_KEY, decision)
+        self.assertIn("137", decision[CONTEXT_KEY])
+        self.assertIn("without asking", decision[CONTEXT_KEY])
 
     def test_passes_at_the_limit(self) -> None:
         self.assertIsNone(start_session_hook.decide(FULL_START, AT_LIMIT))
 
-    def test_card_does_not_ask_when_overloaded(self) -> None:
+    def test_card_gets_no_load_note_when_overloaded(self) -> None:
         tool_input = dict(FULL_START, initiation="own_initiative")
 
         self.assertIsNone(start_session_hook.decide(tool_input, OVERLOADED))
 
-    def test_offer_asks_when_overloaded(self) -> None:
+    def test_offer_gets_load_note_when_overloaded(self) -> None:
         tool_input = dict(FULL_START, initiation="offer")
 
-        self.assertEqual(start_session_hook.decide(tool_input, OVERLOADED)[0], ASK)
+        self.assertIn(CONTEXT_KEY, start_session_hook.decide(tool_input, OVERLOADED))
 
     def test_proposal_start_needs_no_levels(self) -> None:
         self.assertIsNone(start_session_hook.decide({"proposal_id": "task_1"}, CALM))
 
-    def test_proposal_start_asks_when_overloaded(self) -> None:
-        self.assertEqual(start_session_hook.decide({"proposal_id": "task_1"}, OVERLOADED)[0], ASK)
+    def test_proposal_start_gets_load_note_when_overloaded(self) -> None:
+        decision = start_session_hook.decide({"proposal_id": "task_1"}, OVERLOADED)
+
+        self.assertNotIn(DECISION_KEY, decision)
+        self.assertIn(CONTEXT_KEY, decision)
 
     def test_unknown_load_only_checks_levels(self) -> None:
         self.assertIsNone(start_session_hook.decide(FULL_START, None))
@@ -88,7 +99,16 @@ class StartSessionHookTest(unittest.TestCase):
         hook_input = {"hook_event_name": PRE_TOOL_USE, "tool_name": START_TOOL, "tool_input": {"title": "조사"}}
         output = self._run(hook_input)
 
-        self.assertEqual(output["hookSpecificOutput"]["permissionDecision"], DENY)
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], PRE_TOOL_USE)
+        self.assertEqual(output["hookSpecificOutput"][DECISION_KEY], DENY)
+
+    def test_make_output_wraps_load_note(self) -> None:
+        hook_input = {"hook_event_name": PRE_TOOL_USE, "tool_name": START_TOOL, "tool_input": FULL_START}
+        output = start_session_hook.make_output(hook_input, OVERLOADED)
+
+        self.assertEqual(output["hookSpecificOutput"]["hookEventName"], PRE_TOOL_USE)
+        self.assertIn(CONTEXT_KEY, output["hookSpecificOutput"])
+        self.assertNotIn(DECISION_KEY, output["hookSpecificOutput"])
 
     def test_main_fails_open_on_malformed_input(self) -> None:
         completed = subprocess.run(
