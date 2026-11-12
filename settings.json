@@ -2,7 +2,8 @@
   "env": {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
     "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1",
-    "REPLY_LANGUAGE": "ko"
+    "REPLY_LANGUAGE": "ko",
+    "SKILL_GATE": "on"
   },
   "permissions": {
     "allow": [
@@ -94,11 +95,12 @@
         ]
       },
       {
-        "matcher": "Edit|Write",
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal|mcp__.*__(use_figma|upload_assets|create_new_file|send_code_to_figma)",
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); ext = os.path.splitext(f)[1]; code_exts = {\".ts\", \".js\", \".tsx\", \".jsx\", \".py\", \".go\", \".rs\", \".java\", \".c\", \".cpp\", \".h\"}; ts_note = \" (2) typescript skill rules (type safety, no any, explicit return types).\" if ext in {\".ts\", \".tsx\"} else \"\"; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[CODE-STYLE REMINDER] Editing \" + ext + \" file. Verify: (1) code-style skill rules. (2) typescript skill if .ts or .js, python skill if .py (it overrides code-style where they conflict).\" +\" (3) Verify-then-write: check how consumers parse the data you produce. Read skill files if not yet loaded.\"}})) if ext in code_exts else None' "
+            "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
+            "timeout": 30
           }
         ]
       },
@@ -108,15 +110,6 @@
           {
             "type": "command",
             "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code must follow code-style and the language skill (typescript for .ts or .js, python for .py) identically to implementation code. Open those skill files and verify rule-by-rule before writing diff blocks. Common violations to check: Type/Interface section blank lines, check vs is naming, Initial State pattern, named export (vs `export =`), nullish truthy preference, inline type extraction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
-          }
-        ]
-      },
-      {
-        "matcher": "Edit|Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); ext = os.path.splitext(f)[1].lower(); ui_exts = {\".html\", \".htm\", \".css\", \".scss\", \".sass\", \".less\", \".svg\", \".vue\", \".svelte\", \".astro\", \".jsx\", \".tsx\"}; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[DESIGN REMINDER] Editing \" + ext + \" file. If this changes visual design or UI copy: (1) read ux-design and frontend-design skills if not yet loaded. (2) Follow frontend-design: plan palette, type, layout, and principles; check the plan against generic defaults; build; critique captures. Decisions the user or the project already made win over its list of generic defaults. (3) For motion and interaction, read emil-design-eng (apple-design for gesture-driven UI). (4) Use design:design-critique, design:ux-copy, and design:accessibility-review for critique, copy, and accessibility. Skill roles and the conflict order are in ux-design.\"}})) if ext in ui_exts else None'"
           }
         ]
       },
@@ -153,11 +146,45 @@
         ]
       },
       {
+        "matcher": "Skill",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "*",
         "hooks": [
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
             "timeout": 10
           }
         ]

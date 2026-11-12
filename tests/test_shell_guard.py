@@ -2507,6 +2507,58 @@ FILE_WRITING_COMMANDS = (
     "cat <> f",
 )
 FILE_KEEPING_COMMANDS = ("cat f 2>&1 | head", "cat f 2>/dev/null", "echo a >&2", "git status --short")
+WRITE_TARGET_CASES = (
+    ("echo a > f.py", [["f.py"]]),
+    ("cat > /tmp/a.ts <<'EOF'\nx\nEOF", [["/tmp/a.ts"]]),
+    ("ls > out.txt 2>&1", [["out.txt"]]),
+    ("echo a > f 2>/dev/null >> g", [["f", "g"]]),
+    ("cat f 2>/dev/null", [[]]),
+    ("cd /tmp && echo a > b", [[], ["b"]]),
+    ("bash -c 'echo x > a.py' > out.log", [["out.log"], ["a.py", "out.log"]]),
+)
+STDIN_TEXT_CASES = (
+    ("python3 - <<'EOF'\nimport os\nEOF", ["python3", "-"], ["import os"]),
+    ("timeout 60 python3 <<EOF\nx = 1\nEOF", ["python3"], ["x = 1"]),
+    ("env A=1 nohup python3 - <<< 'print(1)'", ["python3", "-"], ["print(1)"]),
+    ("echo 'print(1)' | python3", ["python3"], ["print(1)"]),
+    ("python3 tool.py", ["python3", "tool.py"], []),
+)
+
+
+class CommandCallContentTest(unittest.TestCase):
+    """A call carries the files its redirections write and the text that reaches its standard input."""
+
+    def setUp(self) -> None:
+        self.directory = tempfile.TemporaryDirectory()
+
+    def tearDown(self) -> None:
+        self.directory.cleanup()
+
+    def test_redirections_list_their_targets(self) -> None:
+        for command, expected in WRITE_TARGET_CASES:
+            calls = shell_command.expand_shell_command(command, "/tmp", Path(self.directory.name))
+
+            self.assertEqual([call.write_targets for call in calls], expected, command)
+
+    def test_input_text_reaches_the_program_through_wrappers(self) -> None:
+        for command, argv, expected in STDIN_TEXT_CASES:
+            calls = shell_command.expand_shell_command(command, "/tmp", Path(self.directory.name))
+            program_calls = [call for call in calls if call.argv == argv]
+
+            self.assertEqual([call.stdin_texts for call in program_calls], [expected], command)
+
+    def test_calls_read_from_a_script_file_are_marked(self) -> None:
+        script = Path(self.directory.name) / "run.sh"
+        commands = (f"bash {script}", f"source {script}", f"sh -c 'bash {script}'")
+
+        script.write_text("cat > gen.ts <<'EOF'\nx\nEOF\n")
+        for command in commands:
+            calls = shell_command.expand_shell_command(command, "/tmp", Path(self.directory.name))
+
+            self.assertEqual([call.is_from_script_file for call in calls if call.write_targets], [True], command)
+        inline = shell_command.expand_shell_command("sh -c 'echo > a.py'", "/tmp", Path(self.directory.name))
+
+        self.assertEqual([call.is_from_script_file for call in inline], [False, False])
 
 
 class CommandScopeTest(unittest.TestCase):

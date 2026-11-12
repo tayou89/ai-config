@@ -105,6 +105,7 @@ RUNTIME_SCRIPTS = (
     "session_writes.py",
     "session_commits.py",
     "session-writes-hook.py",
+    "skill-gate-hook.py",
     "start-session-hook.py",
 )
 MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py", "check-rule-size.py")

@@ -17,6 +17,7 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
@@ -164,6 +165,8 @@ PIPE_TEXT_COMMANDS = frozenset({"echo", "printf"})
 PIPE_FILE_COMMANDS = frozenset({"cat"})
 SHEBANG = "#!"
 ENV_NAME = "env"
+ORIGIN_SEPARATOR = " > "
+SCRIPT_ORIGIN_PREFIX = "script "
 
 
 class ExpansionLimitError(Exception):
@@ -182,18 +185,35 @@ class SimpleCommand:
     words: list[Word] = field(default_factory=list)
     stdin_texts: list[str] = field(default_factory=list)
     piped_from: SimpleCommand | None = None
-    writes_file: bool = False
+    write_targets: list[str] = field(default_factory=list)
 
 
 @dataclass
 class CommandCall:
+    """One simple command a line may run, with the files its redirections write and the text fed to its input.
+
+    `stdin_texts` holds the here-documents, here-strings, and text piped
+    from echo, printf, or cat that reach the program itself through any
+    wrappers; a redirection target is "" when the line gives none.
+    """
+
     argv: list[str]
     assignments: list[tuple[str, str]]
     cwd: str | None
     dynamic_name: bool
     unknown_arguments: bool
     origin: str
-    writes_file: bool = False
+    write_targets: list[str] = field(default_factory=list)
+    stdin_texts: list[str] = field(default_factory=list)
+
+    @property
+    def writes_file(self) -> bool:
+        return bool(self.write_targets)
+
+    @property
+    def is_from_script_file(self) -> bool:
+        """Whether the call comes from a script file on disk that the line runs or sources, not from the line itself."""
+        return any(part.startswith(SCRIPT_ORIGIN_PREFIX) for part in self.origin.split(ORIGIN_SEPARATOR))
 
 
 @dataclass
@@ -242,7 +262,7 @@ class _ExpansionState:
         if self.depth >= MAX_EXPANSION_DEPTH:
             raise ExpansionLimitError(f"expansion deeper than {MAX_EXPANSION_DEPTH} levels at {origin}")
         else:
-            combined_origin = f"{self.origin} > {origin}" if self.origin else origin
+            combined_origin = f"{self.origin}{ORIGIN_SEPARATOR}{origin}" if self.origin else origin
             return dataclasses.replace(
                 self,
                 active_names=self.active_names | {name},
@@ -322,7 +342,7 @@ class _Lexer:
             return current
 
     def _finish(self, command: SimpleCommand) -> None:
-        if command.words or command.stdin_texts or command.writes_file:
+        if command.words or command.stdin_texts or command.write_targets:
             self._commands.append(command)
 
     def _read_operator(self, current: SimpleCommand) -> SimpleCommand:
@@ -350,7 +370,7 @@ class _Lexer:
         elif operator == HERE_STRING_OPERATOR:
             current.stdin_texts.append(restore_marks(target.text))
         elif _is_file_write(operator, restore_marks(target.text)):
-            current.writes_file = True
+            current.write_targets.append(restore_marks(target.text))
 
     def _read_heredoc_bodies(self) -> None:
         for pending in self._pending_heredocs:
@@ -643,8 +663,11 @@ class CommandExpander:
         stdin_texts = self._collect_stdin_texts(command, state)
         calls = self._expand_arguments(arguments, [], stdin_texts, state)
 
-        if command.writes_file:
-            return [dataclasses.replace(call, writes_file=True) for call in calls or [self._make_call([], [], state)]]
+        if command.write_targets:
+            return [
+                dataclasses.replace(call, write_targets=[*call.write_targets, *command.write_targets])
+                for call in calls or [self._make_call([], [], state)]
+            ]
         else:
             return calls
 
@@ -691,9 +714,11 @@ class CommandExpander:
         elif handler and not name.dynamic:
             return handler(arguments, assignments, stdin_texts, state)
         elif "/" in name.text and not name.dynamic:
-            return self._expand_script_file(name.text, state, True) + [self._make_call(arguments, assignments, state)]
+            script_calls = self._expand_script_file(name.text, state, True)
+
+            return [*script_calls, self._make_call(arguments, assignments, state, stdin_texts)]
         else:
-            return [self._make_call(arguments, assignments, state)]
+            return [self._make_call(arguments, assignments, state, stdin_texts)]
 
     def _expand_alias(
         self,
@@ -1007,7 +1032,7 @@ class CommandExpander:
         is_text = bool(content) and "\x00" not in content
 
         if is_text and (not executed_directly or not content.startswith(SHEBANG) or _has_shell_shebang(content)):
-            return self._expand_text(content, state.enter(f"script {path}", f"script:{full_path}"))
+            return self._expand_text(content, state.enter(f"{SCRIPT_ORIGIN_PREFIX}{path}", f"script:{full_path}"))
         else:
             return []
 
@@ -1068,6 +1093,7 @@ class CommandExpander:
         arguments: list[_Argument],
         assignments: list[tuple[str, str]],
         state: _ExpansionState,
+        stdin_texts: Sequence[str] = (),
     ) -> CommandCall:
         return CommandCall(
             argv=[argument.text for argument in arguments],
@@ -1076,6 +1102,7 @@ class CommandExpander:
             dynamic_name=bool(arguments) and arguments[0].dynamic,
             unknown_arguments=state.unknown_arguments,
             origin=state.origin,
+            stdin_texts=list(stdin_texts),
         )
 
     def _check_expansion_budget(self) -> None:
