@@ -98,7 +98,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); ext = os.path.splitext(f)[1]; code_exts = {\".ts\", \".js\", \".tsx\", \".jsx\", \".py\", \".go\", \".rs\", \".java\", \".c\", \".cpp\", \".h\"}; ts_note = \" (2) typescript skill rules (type safety, no any, explicit return types).\" if ext in {\".ts\", \".tsx\"} else \"\"; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[CODE-STYLE REMINDER] Editing \" + ext + \" file. Verify: (1) code-style skill rules. (2) typescript skill if .ts, python skill if .py (it overrides code-style where they conflict).\" +\" (3) Verify-then-write: check how consumers parse the data you produce. Read skill files if not yet loaded.\"}})) if ext in code_exts else None' "
+            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); ext = os.path.splitext(f)[1]; code_exts = {\".ts\", \".js\", \".tsx\", \".jsx\", \".py\", \".go\", \".rs\", \".java\", \".c\", \".cpp\", \".h\"}; ts_note = \" (2) typescript skill rules (type safety, no any, explicit return types).\" if ext in {\".ts\", \".tsx\"} else \"\"; print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[CODE-STYLE REMINDER] Editing \" + ext + \" file. Verify: (1) code-style skill rules. (2) typescript skill if .ts or .js, python skill if .py (it overrides code-style where they conflict).\" +\" (3) Verify-then-write: check how consumers parse the data you produce. Read skill files if not yet loaded.\"}})) if ext in code_exts else None' "
           }
         ]
       },
@@ -107,7 +107,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code must follow code-style and the language skill (typescript for .ts, python for .py) identically to implementation code. Open those skill files and verify rule-by-rule before writing diff blocks. Common violations to check: Type/Interface section blank lines, check vs is naming, Initial State pattern, named export (vs `export =`), nullish truthy preference, inline type extraction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
+            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code must follow code-style and the language skill (typescript for .ts or .js, python for .py) identically to implementation code. Open those skill files and verify rule-by-rule before writing diff blocks. Common violations to check: Type/Interface section blank lines, check vs is naming, Initial State pattern, named export (vs `export =`), nullish truthy preference, inline type extraction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
           }
         ]
       },

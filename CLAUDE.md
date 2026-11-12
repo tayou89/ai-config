@@ -22,7 +22,7 @@ Hooks enforce these rules and say why when they stop or ask; follow their messag
 Load each skill below with the Skill tool before the first action of its task type rather than by reading its file, since only Skill-tool loads are restored after a compaction; read the file only for a skill the Skill tool cannot load (user-invoked only) (user decision, 2026-11-11).
 
 - **JS to TS conversion**: Read `typescript-migration` skill before starting. Grep for external `this.xxx` property access and verify callback values are preserved.
-- **Code writing/editing**: Read `code-style` before writing or proposing any code change, one-off scripts included (it also holds the design and standards rules), plus `typescript` for `.ts`/`.tsx` files and `python` for `.py` files.
+- **Code writing/editing**: Read `code-style` before writing or proposing any code change, one-off scripts included (it also holds the design and standards rules), plus `typescript` for `.ts`/`.tsx`/`.js`/`.jsx` files and `python` for `.py` files.
 - **Non-trivial implementation**: Use `/code-plan` skill to write a plan and wait for explicit approval before coding. Simple Q&A, explanations, or minor fixes (typos, 1-2 line changes) skip this. In a project that adopts `milestone-delivery`, that skill sets which steps need approval.
 - **Knowledge vault**: Read `knowledge-vault` before planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report.
 - **Milestone delivery**: Read `milestone-delivery` in a project whose rules adopt it.

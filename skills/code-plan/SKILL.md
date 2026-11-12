@@ -23,7 +23,7 @@ Ensure `claude-plans/` exists in the project root. Verify `claude-plans/` is in 
 Plans must apply the same skill rules as implementation code. Before drafting diff blocks or step descriptions, read every skill whose trigger condition matches the plan's content. Common cases:
 
 - **code-style**: any code change
-- **typescript**: `.ts` file changes — includes type-system reasoning needed at planning time (e.g. structural-compat check before declaring an index signature dead)
+- **typescript**: `.ts` file changes, and `.js` changes for its "JavaScript and TypeScript" section — includes type-system reasoning needed at planning time (e.g. structural-compat check before declaring an index signature dead)
 - **typescript-migration**: JS→TS conversion
 - **python**: `.py` file changes — includes the formatter-owned layout and tool order the plan's sample code must pass
 - **integration-testing**: live/simulator runtime test

@@ -6,7 +6,7 @@ user-invocable: false
 
 # Python Rules
 
-Apply these rules together with `code-style` when writing or modifying Python code, including plans and example code. For `.py` files this skill overrides `code-style` where they conflict: naming, operator placement in wrapped lines, braces, and the other layout rules in "Overrides of code-style".
+Apply these rules together with `code-style` when writing or modifying Python code, including plans and example code. For `.py` files this skill overrides `code-style` where they conflict: naming, operator placement in wrapped lines, braces, and the other layout rules in "Overrides of code-style and the JavaScript rules".
 
 ## Tooling
 
@@ -52,14 +52,14 @@ Python has no access modifiers, so `code-style` "Minimum Access Exposure" is exp
 ## Control Flow and Comparisons
 
 - **Explicit else** ("Always Write Explicit else") and **no void return or guard raise** ("No Early Void Return / Guard Throw") apply unchanged. A project that follows this skill turns off ruff's RET505–RET508 (superfluous `else` after `return`, `raise`, `continue`, or `break`), because they require the opposite.
-- **Returning `None`:** a function annotated `-> T | None` ends every path with a return, so write `else: return None` where "No Unnecessary `return undefined`" would omit the branch. Otherwise mypy reports a missing return statement and ruff RET503 flags it.
-- **Comparisons:** compare values with `==` and `!=`, and `None` with `is None` and `is not None` (PEP 8), in place of "Strict Equality Only".
-- **Truthiness** ("Nullish Checks"): use `if value:` when `0`, `""`, and empty collections are not valid values, and `is None` when they are.
+- **Returning `None`:** a function annotated `-> T | None` ends every path with a return, so write `else: return None` where the JavaScript rule `typescript` "No Unnecessary `return undefined`" would omit the branch. Otherwise mypy reports a missing return statement and ruff RET503 flags it.
+- **Comparisons:** compare values with `==` and `!=`, and `None` with `is None` and `is not None` (PEP 8), in place of `typescript` "Strict Equality Only".
+- **Truthiness** (`typescript` "Nullish Checks"): use `if value:` when `0`, `""`, and empty collections are not valid values, and `is None` when they are.
 - **Braces** ("Control Flow Braces") do not apply. Indentation delimits blocks, and each body stays on its own line; the formatter splits `if x: y` anyway.
 
 ## Imports
 
-Put every import at the top of the file (PEP 8). Order them as standard library, third-party packages, then first-party modules, with one blank line between groups, as ruff's isort rules (`I`) enforce. This replaces `code-style` "Import Ordering", which puts no blank lines between groups.
+Put every import at the top of the file (PEP 8). Order them as standard library, third-party packages, then first-party modules, with one blank line between groups, as ruff's isort rules (`I`) enforce. This replaces `typescript` "Import Ordering", which puts no blank lines between groups.
 
 ## Constants and Enums
 
@@ -71,7 +71,7 @@ Express a fixed set of string values as a `StrEnum` and a single value as a modu
 
 ## asyncio
 
-These are the Python forms of the `code-style` async rules ("Remove Unnecessary async", "Sync Return When Signature Allows", "await Over Promise Chains", "Floating Promises in Fan-out Callbacks", "Await Only Thenables", and "throw Over Promise.reject"):
+These are the Python forms of the JavaScript async rules in `typescript` ("Remove Unnecessary async", "Sync Return When Signature Allows", "await Over Promise Chains", "Floating Promises in Fan-out Callbacks", "Await Only Thenables", and "throw Over Promise.reject"):
 
 - **No `async` without `await`:** declare `async def` only when the body uses `await`, `async for`, or `async with`; otherwise write `def`. When a callback type accepts both a plain and an awaitable return, write the plain function.
 - **No floating coroutines or tasks:** await every coroutine, since calling a coroutine function without `await` never runs it (mypy reports `unused-coroutine`). Keep every `asyncio.create_task()` result in its owner and await or cancel it before the owner stops: the event loop holds tasks only weakly, so an unreferenced task can be garbage-collected mid-run and its exception is never seen (ruff RUF006 flags a discarded task).
@@ -97,18 +97,18 @@ async def load_pages(urls: list[str]) -> list[str]:
     return pages
 ```
 
-## Overrides of code-style
+## Overrides of code-style and the JavaScript rules
 
-| `code-style` rule | Python rule |
+| `code-style` or `typescript` rule | Python rule |
 | --- | --- |
-| "Method Naming Convention" (camelCase) | `snake_case`, with `PascalCase` classes and `UPPER_SNAKE_CASE` constants |
-| "Line Wrapping Style" (trailing `&&`/`\|\|`) | Formatter output: leading `and`/`or`, and a magic trailing comma for one item per line |
-| "Control Flow Braces" | Not applicable |
-| "Strict Equality Only" | `==` for values, `is None` for `None` |
-| "Import Ordering" (no blank lines between groups) | ruff `I` groups with one blank line between them |
-| "Blank Line Between Method/Function Definitions" and "Type/Interface Section — No Blank Lines Between" | Two blank lines around top-level functions and classes, one between methods |
-| "No Unnecessary `return undefined`" | `return None` on every path of a `-> T \| None` function |
-| "Minimum Access Exposure" (access modifiers) | A single `_` prefix for every non-public name |
+| `code-style` "Method Naming Convention" (camelCase) | `snake_case`, with `PascalCase` classes and `UPPER_SNAKE_CASE` constants |
+| `code-style` "Line Wrapping Style" (trailing `&&`/`\|\|`) | Formatter output: leading `and`/`or`, and a magic trailing comma for one item per line |
+| `code-style` "Control Flow Braces" | Not applicable |
+| `typescript` "Strict Equality Only" | `==` for values, `is None` for `None` |
+| `typescript` "Import Ordering" (no blank lines between groups) | ruff `I` groups with one blank line between them |
+| `code-style` "Blank Line Between Method/Function Definitions" and `typescript` "Type/Interface Section — No Blank Lines Between" | Two blank lines around top-level functions and classes, one between methods |
+| `typescript` "No Unnecessary `return undefined`" | `return None` on every path of a `-> T \| None` function |
+| `code-style` "Minimum Access Exposure" (access modifiers) | A single `_` prefix for every non-public name |
 
 ## Sources
 
