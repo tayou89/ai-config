@@ -109,7 +109,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code must follow code-style and the language skill (typescript for .ts or .js, python for .py) identically to implementation code. Open those skill files and verify rule-by-rule before writing diff blocks. Common violations to check: Type/Interface section blank lines, check vs is naming, Initial State pattern, named export (vs `export =`), nullish truthy preference, inline type extraction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
+            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code must follow code-style and the language skill (typescript for .ts or .js, python for .py) identically to implementation code. Load those skills with the Skill tool (only those loads survive a compaction) and verify rule-by-rule before writing diff blocks. Common violations to check: Type/Interface section blank lines, check vs is naming, Initial State pattern, named export (vs `export =`), nullish truthy preference, inline type extraction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
           }
         ]
       },

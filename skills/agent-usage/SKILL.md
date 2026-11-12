@@ -46,7 +46,7 @@ A reviewer covers the **full change scope**, not a file range. File-range splitt
 
 ## 10. Rule-Based Checklist Review
 
-Review agents must **read all applicable skill files** (code-style, typescript, etc.) and project CLAUDE.md, then check each rule against the changed code systematically. Never review from memory or general impression — always open the rule files and verify rule-by-rule.
+Review agents must **load all applicable skills** (code-style, typescript, etc.) with the Skill tool and read the project CLAUDE.md, then check each rule against the changed code systematically. Never review from memory or general impression — always verify rule-by-rule against the loaded text.
 
 ## 11. Verification Depth
 
