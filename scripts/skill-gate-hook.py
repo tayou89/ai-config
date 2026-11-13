@@ -105,9 +105,6 @@ _COMMAND_KEY = "command"
 _MCP_PREFIX = "mcp__"
 _MCP_SEPARATOR = "__"
 _DESIGN_TOOL_NAMES = frozenset({"use_figma", "upload_assets", "create_new_file", "send_code_to_figma"})
-_TEE = "tee"
-_IN_PLACE_EDITORS = frozenset({"sed", "gsed", "perl"})
-_IN_PLACE_OPTION = re.compile(r"-(?![MmI])[A-Za-z]*i|--in-place")
 _SHORT_OPTION_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
 _OPTION_PREFIX = "-"
 _STANDARD_INPUT = "-"
@@ -228,7 +225,7 @@ def _find_command_requirement(command: str, cwd: str | None) -> Requirement | No
         return None
     else:
         calls = [call for call in expanded if not call.is_from_script_file]
-        written = [path for call in calls for path in _list_written_files(call) if list_file_skills(path)]
+        written = [path for call in calls for path in call.list_written_files() if list_file_skills(path)]
         skills = [skill for call in calls for skill in _list_call_skills(call)]
         target = f"`{os.path.basename(written[0])}`" if written else _INLINE_PROGRAM_TARGET
 
@@ -236,20 +233,9 @@ def _find_command_requirement(command: str, cwd: str | None) -> Requirement | No
 
 
 def _list_call_skills(call: CommandCall) -> list[str]:
-    written = [skill for path in _list_written_files(call) for skill in list_file_skills(path)]
+    written = [skill for path in call.list_written_files() for skill in list_file_skills(path)]
 
     return [*written, *_list_program_skills(call)]
-
-
-def _list_written_files(call: CommandCall) -> list[str]:
-    """The files a call writes: its redirections, and the operands of `tee` and in-place editors."""
-    program = os.path.basename(call.argv[0]) if call.argv else ""
-    operands = [argument for argument in call.argv[1:] if not argument.startswith(_OPTION_PREFIX)]
-
-    if program == _TEE or (program in _IN_PLACE_EDITORS and _has_in_place_option(call.argv)):
-        return [*call.write_targets, *operands]
-    else:
-        return list(call.write_targets)
 
 
 def _list_program_skills(call: CommandCall) -> list[str]:
@@ -569,11 +555,6 @@ def _is_design_tool(tool_name: str) -> bool:
 
 def _is_multi_line(text: str) -> bool:
     return _LINE_END in text.strip()
-
-
-def _has_in_place_option(argv: Sequence[str]) -> bool:
-    """`-i` alone, with a suffix (`-i.bak`), or in a cluster (`perl -pi`), but not perl's `-M` or `-I` arguments."""
-    return any(_IN_PLACE_OPTION.match(argument) for argument in argv[1:])
 
 
 if __name__ == "__main__":

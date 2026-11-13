@@ -167,6 +167,10 @@ SHEBANG = "#!"
 ENV_NAME = "env"
 ORIGIN_SEPARATOR = " > "
 SCRIPT_ORIGIN_PREFIX = "script "
+TEE_PROGRAM = "tee"
+IN_PLACE_EDITORS = frozenset({"sed", "gsed", "perl"})
+IN_PLACE_OPTION_PATTERN = re.compile(r"-(?![MmI])[A-Za-z]*i|--in-place")
+OPTION_PREFIX = "-"
 
 
 class ExpansionLimitError(Exception):
@@ -214,6 +218,20 @@ class CommandCall:
     def is_from_script_file(self) -> bool:
         """Whether the call comes from a script file on disk that the line runs or sources, not from the line itself."""
         return any(part.startswith(SCRIPT_ORIGIN_PREFIX) for part in self.origin.split(ORIGIN_SEPARATOR))
+
+    def list_written_files(self) -> list[str]:
+        """The files the call writes: its redirections, and the operands of `tee` and in-place editors."""
+        program = os.path.basename(self.argv[0]) if self.argv else ""
+        operands = [argument for argument in self.argv[1:] if not argument.startswith(OPTION_PREFIX)]
+
+        if program == TEE_PROGRAM or (program in IN_PLACE_EDITORS and self._has_in_place_option()):
+            return [*self.write_targets, *operands]
+        else:
+            return list(self.write_targets)
+
+    def _has_in_place_option(self) -> bool:
+        """`-i` alone, with a suffix (`-i.bak`), or in a cluster (`perl -pi`), but not perl's `-M` or `-I` arguments."""
+        return any(IN_PLACE_OPTION_PATTERN.match(argument) for argument in self.argv[1:])
 
 
 @dataclass

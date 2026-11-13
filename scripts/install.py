@@ -9,10 +9,13 @@ Without --apply nothing is written: the script prints what it would change.
 With --apply it first copies every file it replaces into a backups folder,
 then writes. Running it again changes nothing.
 
-With --from-upstream it installs the commit this checkout's upstream branch
-points at instead of the files here: it clones that commit into a temporary
-folder, runs the clone's own install.py with the same options, and removes
-the clone, so work here that is not pushed stays out.
+With --from-upstream it installs the commit the default branch of origin
+points at, as last fetched, instead of the files here: it clones that commit
+into a temporary folder, runs the clone's own install.py with the same
+options, and removes the clone, so work here that is not merged and pushed
+stays out. It reads the remote's default branch, not this checkout's own
+upstream, so a run from a task branch or its worktree never installs work
+that is not merged (user decision, 2026-11-13).
 
 Files the repository owns (rules, skills, scripts, mods) are copied as they
 are. settings.json is merged key by key so lines only this computer has are
@@ -112,6 +115,13 @@ RUNTIME_SCRIPTS = (
     "session-writes-hook.py",
     "skill-gate-hook.py",
     "start-session-hook.py",
+    "workflow_policy.py",
+    "integration_lock.py",
+    "integration_commands.py",
+    "pr-merge.py",
+    "local-integrate.py",
+    "worktree-cleanup.py",
+    "worktree-guard-hook.py",
 )
 MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py", "check-rule-size.py")
 HOOKS_PATH_KEY = "core.hooksPath"
@@ -145,7 +155,10 @@ DIFF_PREVIEW_LINES = 40
 CODEX_RULES_DIRECTORY = "rules"
 CHECKOUT_RECORD = Path(STATE_DIRECTORY) / "checkout"
 INSTALL_SCRIPT = Path(SCRIPTS_DIRECTORY) / "install.py"
-UPSTREAM = "@{upstream}"
+DEFAULT_REMOTE = "origin"
+REMOTE_HEAD_REF = "refs/remotes/origin/HEAD"
+REMOTE_BRANCH_PREFIX = "refs/remotes/origin/"
+SYMBOLIC_REF_PREFIX = "ref: refs/heads/"
 UPSTREAM_COPY_PREFIX = "ai-config-upstream-"
 APPLY_FLAG = "--apply"
 PRUNE_FLAG = "--prune"
@@ -627,22 +640,38 @@ def has_install_script(path: Path) -> bool:
     return (path / INSTALL_SCRIPT).is_file()
 
 
-def read_upstream(run: Runner, repository: str) -> tuple[str, str]:
-    """Name the upstream branch and the commit it pointed at when last fetched."""
-    name = run(["git", "-C", repository, "rev-parse", "--abbrev-ref", "--symbolic-full-name", UPSTREAM])
-    commit = run(["git", "-C", repository, "rev-parse", "--verify", "--quiet", f"{UPSTREAM}^{{commit}}"])
+def read_default_branch(run: Runner, repository: str) -> tuple[str, str]:
+    """Name origin's default branch and the commit it pointed at when last fetched, whatever branch is checked out."""
+    branch = read_remote_head_branch(run, repository)
+    ref = f"{REMOTE_BRANCH_PREFIX}{branch}^{{commit}}"
+    commit = run(["git", "-C", repository, "rev-parse", "--verify", "--quiet", ref])
 
-    if name.returncode == 0 and commit.returncode == 0:
-        return name.stdout.strip(), commit.stdout.strip()
+    if branch and commit.returncode == 0:
+        return f"{DEFAULT_REMOTE}/{branch}", commit.stdout.strip()
     else:
         raise InstallError(
             EXIT_COMMAND_FAILED,
-            f"{repository} has no upstream branch to install from. Run this from a checkout whose branch tracks a remote branch.",
+            f"{repository} has no fetched default branch of {DEFAULT_REMOTE} to install from. Run this from a clone of the repository.",
         )
 
 
+def read_remote_head_branch(run: Runner, repository: str) -> str:
+    """Ask the remote first, since its default branch can change; else use the remote HEAD recorded at clone time."""
+    asked = run(["git", "-C", repository, "ls-remote", "--symref", DEFAULT_REMOTE, "HEAD"])
+    recorded = run(["git", "-C", repository, "symbolic-ref", "--quiet", REMOTE_HEAD_REF])
+    lines = [line for line in asked.stdout.splitlines() if line.startswith(SYMBOLIC_REF_PREFIX)]
+    named = [line[len(SYMBOLIC_REF_PREFIX) :].split()[0] for line in lines]
+
+    if asked.returncode == 0 and named:
+        return named[0]
+    elif recorded.returncode == 0 and recorded.stdout.strip().startswith(REMOTE_BRANCH_PREFIX):
+        return recorded.stdout.strip()[len(REMOTE_BRANCH_PREFIX) :]
+    else:
+        return ""
+
+
 def clone_commit(run: Runner, repository: str, commit: str, copy: Path) -> None:
-    """Clone the checkout and check out one commit; a local clone holds every object, the fetched upstream's too."""
+    """Clone the checkout and check out one commit; a local clone holds every object, the fetched remote's too."""
     run_required(run, ["git", "clone", "--quiet", "--no-checkout", repository, str(copy)])
     run_required(run, ["git", "-C", str(copy), "checkout", "--quiet", "--detach", commit])
 
@@ -1202,7 +1231,7 @@ def parse_options(arguments: Sequence[str]) -> Options:
     parser.add_argument(
         "--from-upstream",
         action="store_true",
-        help="install the commit this checkout's upstream branch points at, from a temporary clone, leaving out work here that is not pushed",
+        help="install the commit origin's default branch points at, from a temporary clone, leaving out work that is not merged and pushed",
     )
     parser.add_argument(
         CHECKOUT_FLAG,
@@ -1250,8 +1279,8 @@ def run_from_upstream(
 ) -> int:
     """Install through the clone's own install.py, so the files and the code that installs them come from one commit."""
     repository = str(repository_root)
-    fetch = run(["git", "-C", repository, "fetch", "--quiet"])
-    name, commit = read_upstream(run, repository)
+    fetch = run(["git", "-C", repository, "fetch", "--quiet", DEFAULT_REMOTE])
+    name, commit = read_default_branch(run, repository)
     checkout = resolve_checkout(options.checkout, read_checkout_record(platform_paths.claude_home), repository_root)
 
     print(

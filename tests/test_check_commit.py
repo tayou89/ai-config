@@ -161,5 +161,61 @@ class CheckCommitTest(unittest.TestCase):
         self.assertEqual(self.fixture.read_head(), base)
 
 
+class CheckAgainstTest(unittest.TestCase):
+    """The --against form the GitHub Actions job runs on a checked-out pull request."""
+
+    fixture: CheckCommitFixture
+
+    def setUp(self) -> None:
+        self.fixture = CheckCommitFixture()
+        self.fixture.create()
+        self.base = self.fixture.read_head()
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def run_check(self) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["python3", "scripts/check-commit.py", "--against", self.base],
+            env=self.fixture.environment(),
+            cwd=self.fixture.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def commit(self, path: str, text: str) -> None:
+        self.fixture.write(path, text)
+        self.fixture.run_git("add", path)
+        self.fixture.run_git("-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "Fix: change something")
+
+    def test_passing_tree_passes(self) -> None:
+        self.commit("other.txt", "fine\n")
+        result = self.run_check()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_checks_run_on_the_checked_out_tree(self) -> None:
+        self.commit("value.txt", BAD_VALUE)
+        result = self.run_check()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("tests", result.stderr)
+
+    def test_token_added_since_the_base_fails(self) -> None:
+        self.commit("notes.txt", f"token {FAKE_GITHUB_TOKEN}\n")
+        result = self.run_check()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("notes.txt: GitHub token", result.stderr)
+
+    def test_unknown_base_fails_instead_of_skipping_the_scan(self) -> None:
+        self.base = "0" * 40
+        result = self.run_check()
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("token scan", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

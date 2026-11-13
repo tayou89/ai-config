@@ -1,0 +1,35 @@
+# The one check a pull request here must pass before scripts/pr-merge.py merges it.
+# It runs the pre-commit checks (generated rule copies, rule size budgets, every test,
+# and a token scan of the added lines) on every pull request and push, whatever paths
+# change, because a merge made on GitHub skips the local pre-commit hook. The job runs
+# on macOS with the system Python 3.9, the same as the computers that install this setup.
+name: checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Run the commit checks
+        env:
+          PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          git config --global user.name "checks"
+          git config --global user.email "checks@users.noreply.github.com"
+          base="${PULL_REQUEST_BASE:-$PUSH_BEFORE}"
+          if ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            base="$(git rev-parse HEAD~1)"
+          fi
+          /usr/bin/python3 scripts/check-commit.py --against "$base"

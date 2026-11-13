@@ -13,6 +13,12 @@ sh -c, eval, scripts, cd and git -C) and applies these checks:
         all branches, another remote or ref, unknown options, or a
         repository that sets shellGuard.askBeforePush
   ask   starting an application in production, staging, or live mode
+  deny  merging a pull request with `gh pr merge` or the merge API in a
+        repository whose .agent-workflow.json names the pull-request
+        mode; scripts/pr-merge.py merges there, one at a time and only on
+        fresh checks (user decision, 2026-11-13)
+  ask   merging a pull request in any other repository, such as a team's
+  ask   pushing the base branch of a pull-request repository
 
 Routine commits and pushes need no approval (user decision, 2026-11-09):
 a push of the current branch to its own remote passes without a prompt.
@@ -51,6 +57,7 @@ from shell_command import (
     parse_git_command,
 )
 from session_writes import SessionWritesError, find_repository_paths, is_include_approved, list_unproven_lines
+from workflow_policy import WorkflowMode, find_repository_root, read_checkout_policy, read_original_checkout
 
 
 TERMINAL_TOOL = "mcp__terminal__run_in_terminal"
@@ -98,6 +105,16 @@ PRODUCTION_REASON = (
     "({trigger}): {command}{origin}. Approve only after checking which "
     "config and endpoints it loads."
 )
+MERGE_TOOL_REASON = (
+    "This repository merges pull requests through ~/.claude/scripts/pr-merge.py "
+    "(its .agent-workflow.json names the pull-request mode): run that in the task's "
+    "worktree instead, which merges one pull request at a time and only when its head "
+    "contains the current base branch and its required checks passed: {command}{origin}."
+)
+MERGE_APPROVAL_REASON = (
+    "This merges a pull request in a repository that records no guarded pull-request "
+    "workflow, so it needs your approval: {command}{origin}."
+)
 ANALYSIS_FAILURE_REASON = (
     "The shell guard hook could not analyze this command ({error}). Approve "
     "only if it does not rewrite or delete remote history, commit credential "
@@ -120,6 +137,17 @@ OTHER_UPSTREAM_PUSH_RISK = "pushes to the upstream branch {merge}, not one named
 PUSH_DEFAULT_RISK = "relies on push.default={value}, which pushes more than the current branch"
 CONFIGURED_REFSPEC_PUSH_RISK = "follows the refs set in remote.{remote}.push"
 REPOSITORY_ASKS_PUSH_RISK = "is in a repository that asks before every push (shellGuard.askBeforePush)"
+BASE_BRANCH_PUSH_RISK = "pushes the base branch of a pull-request repository, which only merged pull requests change"
+GH_PROGRAM = "gh"
+GH_PULL_REQUEST_MERGE = ["pr", "merge"]
+GH_API_COMMAND = "api"
+GH_REPOSITORY_OPTIONS = frozenset({"-R", "--repo"})
+SHORT_METHOD_OPTION = "-X"
+GH_METHOD_OPTIONS = frozenset({SHORT_METHOD_OPTION, "--method"})
+MERGE_METHOD = "PUT"
+MERGE_API_PATH = re.compile(r"(?:^|/)repos/[^/]+/[^/]+/pulls/\d+/merge/?$")
+GRAPHQL_PATH = "graphql"
+GRAPHQL_MERGE = "mergePullRequest"
 RISK_SEPARATOR = "; "
 MAX_SHOWN_COMMAND_LENGTH = 160
 COMMIT_WRAPPER_NAME = "claude-commit.py"
@@ -299,13 +327,20 @@ def decide(command: str, cwd: str | None, session_id: str | None = None) -> dict
     try:
         calls = expand_command(command, cwd)
         git_commands = find_git_commands(calls)
+        merge_calls = [call for call in calls if is_pull_request_merge(call)]
         deny_reasons = (
             find_commit_reasons(git_commands)
             + find_dynamic_file_reasons(calls)
             + find_credential_reasons(calls, git_commands)
+            + [describe_call(MERGE_TOOL_REASON, call) for call in merge_calls if is_guarded_merge(call)]
         )
         push_reasons = find_push_reasons(git_commands, find_git_environment_names(calls))
-        ask_reasons = push_reasons + find_unrecorded_include_reasons(calls, session_id) + find_production_reasons(calls)
+        ask_reasons = (
+            push_reasons
+            + find_unrecorded_include_reasons(calls, session_id)
+            + find_production_reasons(calls)
+            + [describe_call(MERGE_APPROVAL_REASON, call) for call in merge_calls if not is_guarded_merge(call)]
+        )
     except Exception as error:
         deny_reasons = []
         ask_reasons = [ANALYSIS_FAILURE_REASON.format(error=f"{type(error).__name__}: {error}")]
@@ -727,6 +762,7 @@ def find_branch_push_risks(git_command: GitCommand, work_dir: str, branch: str, 
         (is_config_true(read_config_value(config, REMOTE_MIRROR_KEY.format(remote=target))), MIRROR_PUSH_RISK),
         (is_config_true(read_config_value(config, PUSH_FOLLOW_TAGS_KEY)), FOLLOW_TAGS_PUSH_RISK),
         (is_config_true(read_config_value(config, ASK_BEFORE_PUSH_KEY)), REPOSITORY_ASKS_PUSH_RISK),
+        (is_guarded_base_branch(work_dir, branch), BASE_BRANCH_PUSH_RISK),
     ]
 
     return [risk for applies, risk in risks if applies]
@@ -781,6 +817,25 @@ def find_production_reasons(calls: list[CommandCall]) -> list[str]:
             reason = PRODUCTION_REASON.format(trigger=trigger, command=show_command(call), origin=show_origin(call))
             reasons.append(reason)
     return reasons
+
+
+def describe_call(template: str, call: CommandCall) -> str:
+    return template.format(command=show_command(call), origin=show_origin(call))
+
+
+def read_pull_request_base(directory: str | None) -> str | None:
+    """The base branch when the folder's repository records the pull-request workflow, else None.
+
+    It reads the original checkout's copy, so a task branch that drops the file does not turn a refusal into a question.
+    """
+    root = find_repository_root(Path(directory)) if directory else None
+    original = read_original_checkout(root) if root else None
+    policy = read_checkout_policy(original) if original else None
+
+    if policy is not None and policy.mode == WorkflowMode.PULL_REQUEST:
+        return policy.base
+    else:
+        return None
 
 
 def find_production_trigger(call: CommandCall) -> str | None:
@@ -999,6 +1054,43 @@ def is_branch_refspec(refspec: str, branch: str) -> bool:
     names = {HEAD_REF, branch, f"{BRANCH_REF_PREFIX}{branch}"}
 
     return source in names and (not separator or destination in names - {HEAD_REF})
+
+
+def is_pull_request_merge(call: CommandCall) -> bool:
+    """`gh pr merge`, `gh api` sending PUT to a pull request's merge endpoint, or the GraphQL merge mutation."""
+    name = os.path.basename(call.argv[0]) if call.argv else ""
+    arguments = call.argv[1:]
+
+    if name == GH_PROGRAM and arguments[:2] == GH_PULL_REQUEST_MERGE:
+        return True
+    elif name == GH_PROGRAM and arguments[:1] == [GH_API_COMMAND]:
+        return is_merge_api_call(arguments[1:])
+    else:
+        return False
+
+
+def is_merge_api_call(arguments: list[str]) -> bool:
+    attached = [
+        argument[len(SHORT_METHOD_OPTION) :]
+        for argument in arguments
+        if argument.startswith(SHORT_METHOD_OPTION) and len(argument) > len(SHORT_METHOD_OPTION)
+    ]
+    methods = [*find_option_values(arguments, GH_METHOD_OPTIONS), *attached]
+    has_merge_path = any(MERGE_API_PATH.search(argument) for argument in arguments)
+    is_graphql_merge = arguments[:1] == [GRAPHQL_PATH] and any(GRAPHQL_MERGE in argument for argument in arguments)
+
+    return is_graphql_merge or (has_merge_path and any(method.upper() == MERGE_METHOD for method in methods))
+
+
+def is_guarded_merge(call: CommandCall) -> bool:
+    """Whether the merge runs in a pull-request repository; one that names a repository with --repo is not known to."""
+    names_repository = bool(find_option_values(call.argv[1:], GH_REPOSITORY_OPTIONS))
+
+    return not names_repository and not call.dynamic_name and read_pull_request_base(call.cwd) is not None
+
+
+def is_guarded_base_branch(work_dir: str, branch: str) -> bool:
+    return read_pull_request_base(work_dir) == branch
 
 
 def is_config_true(value: str) -> bool:

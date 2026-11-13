@@ -107,6 +107,16 @@
         ]
       },
       {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/worktree-guard-hook.py\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write",
         "hooks": [
           {

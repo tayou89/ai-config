@@ -730,6 +730,18 @@ class FromUpstreamTest(unittest.TestCase):
         self.assertEqual(self._executed[0][:2], [sys.executable, "-I"])
         self.assertEqual(self._executed[0][3:], ["--checkout", str(checkout), "--apply"])
 
+    def test_a_task_branch_installs_the_remote_default_branch_not_its_own_upstream(self):
+        checkout = self._make_checkout_behind_its_upstream()
+
+        self._git(checkout, "checkout", "-q", "-b", "task")
+        self._commit(checkout, "task work")
+        self._git(checkout, "push", "-q", "-u", "origin", "task")
+        code = self._install_from_upstream(checkout)
+
+        self.assertEqual(code, 7)
+        self.assertEqual(self._copy_contents, ["second\n"])
+        self.assertIn("Installing origin/main", self._output.getvalue())
+
     def test_the_copy_keeps_the_recorded_checkout(self):
         recorded = make_checkout(self._root, "recorded")
 

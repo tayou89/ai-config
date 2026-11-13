@@ -79,6 +79,7 @@ DEEP_NESTING = "echo " + "$(" * 400 + "x" + ")" * 400
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 PUSH_BRANCH = "main"
 PUSH_LOCATIONS = ("pushing", "matching", "guarded", "detached")
+WORKFLOW_POLICY_TEXT = '{"mode": "pull-request", "base": "main", "requiredChecks": ["checks"]}'
 SEED_FILES = ("a.txt", "b.txt", "shared.txt")
 OTHER_SESSION_SUBJECT = "Feat: land the other session's change"
 HEAD_COMMIT_SUBJECT = "Feat: commit this session's change"
@@ -369,6 +370,22 @@ CASES = [
     GuardCase("production", "npm test", PASS),
     GuardCase("combined", "git add .env && git push", DENY, "secrets"),
     GuardCase("combined", DEEP_NESTING, ASK),
+    GuardCase("merge", "gh pr merge 3 --squash", DENY, "workflow"),
+    GuardCase("merge", "gh pr merge --admin --squash", DENY, "workflow"),
+    GuardCase("merge", "sh -c 'gh pr merge 3'", DENY, "workflow"),
+    GuardCase("merge", "gh api -X PUT repos/o/r/pulls/3/merge", DENY, "workflow"),
+    GuardCase("merge", "gh api --method=put /repos/o/r/pulls/3/merge", DENY, "workflow"),
+    GuardCase("merge", "gh api -XPUT repos/o/r/pulls/3/merge -f merge_method=squash", DENY, "workflow"),
+    GuardCase("merge", "gh api repos/o/r/pulls/3/merge", PASS, "workflow"),
+    GuardCase("merge", "gh api graphql -f query='mutation { mergePullRequest(input: {}) { clientMutationId } }'", DENY, "workflow"),
+    GuardCase("merge", "gh api graphql -f query='{ viewer { login } }'", PASS, "workflow"),
+    GuardCase("merge", "gh pr merge 3 -R someone/else", ASK, "workflow"),
+    GuardCase("merge", "gh pr view 3 --json state", PASS, "workflow"),
+    GuardCase("merge", "python3 ~/.claude/scripts/pr-merge.py 3", PASS, "workflow"),
+    GuardCase("merge", "gh pr merge 3 --squash", ASK, "pushing"),
+    GuardCase("merge", "gh pr merge 3 --squash", ASK, "plain"),
+    GuardCase("merge", "git push", ASK, "workflow"),
+    GuardCase("merge", "git push origin HEAD", ASK, "workflow"),
 ]
 
 
@@ -386,6 +403,7 @@ class GuardFixture:
             "matching": self.root / "matching",
             "guarded": self.root / "guarded",
             "detached": self.root / "detached",
+            "workflow": self.root / "workflow",
         }
 
     def create(self) -> None:
@@ -402,6 +420,8 @@ class GuardFixture:
             self.create_push_repository(self.locations[name])
         self.run_git(self.locations["matching"], "config", "push.default", "matching")
         self.run_git(self.locations["guarded"], "config", "shellGuard.askBeforePush", "true")
+        self.create_push_repository(self.locations["workflow"])
+        (self.locations["workflow"] / ".agent-workflow.json").write_text(WORKFLOW_POLICY_TEXT)
         self.run_git(self.locations["detached"], "add", "a.txt")
         self.run_git(self.locations["detached"], "commit", "-q", "-m", "Chore: seed")
         self.run_git(self.locations["detached"], "checkout", "-q", "--detach")
