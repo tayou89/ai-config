@@ -34,7 +34,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 - When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn; when it broke a rule that applied, find why the rule was not followed and propose the fix that cause calls for, as `rule-writing` "When a rule is not followed" describes, never only a promise to be more careful (user decision, 2026-11-13).
 - When a recorded fact turns out wrong or records disagree, check the authoritative source and correct every record that holds the wrong value instead of marking it unverified or unreconciled; mark it unverified only when no check is possible.
-- Record a user correction or decision at once in the narrowest place that fits, updating the rule that already covers it rather than adding another, tell the user in one line where it went, and follow the `rule-writing` skill whenever you add, change, or remove a rule: it sets what the narrowest place is, when a rule may go into an always-loaded global file, and what to remove alongside it (user decision, 2026-11-12).
+- Record a user correction or decision at once in the narrowest place that fits, updating the rule that already covers it rather than adding another, tell the user in one line where it went, and follow the `rule-writing` skill whenever you record one or add, change, or remove a rule: it sets what the narrowest place is, how an approved way of working reaches other projects, when a rule may go into an always-loaded global file, and what to remove alongside it (user decisions, 2026-11-12 and 2026-11-13).
 
 ## Shared files and sessions
 

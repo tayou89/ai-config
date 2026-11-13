@@ -35,7 +35,7 @@ Each time the user approves the project's planning scope (the first scope or a c
 
 ## Milestone report
 
-At the milestone end, write the report from the vault template: how to try the demo, the acceptance check run, the feature table, the decisions made without asking, the always-ask items and how they were settled, "what to learn this time" when the project keeps a learning goal, lessons for the vault (each one general sentence with its original scope, its limits, and a commit-pinned link to its evidence), and the next milestone. Then ask for the demo check.
+At the milestone end, write the report from the vault template: how to try the demo, the acceptance check run, the feature table, the decisions made without asking, the always-ask items and how they were settled, "what to learn this time" when the project keeps a learning goal, lessons for the vault (written as `knowledge-vault` "Writing" describes), and the next milestone. Then ask for the demo check.
 
 ## Quality bar
 

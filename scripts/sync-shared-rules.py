@@ -60,7 +60,7 @@ SKILL_RULES = {
     ),
     "rule-writing.md": (
         "rule-writing",
-        "Decide where a rule, skill, hook, or memory goes and how to write it, keep always-loaded rules within budget, and change the shared configuration. Apply before adding, changing, moving, or removing one, or changing a shared setting.",
+        "Decide where a rule, skill, hook, or memory goes and how to write it, keep always-loaded rules within budget, and change the shared configuration. Apply when recording a user correction or decision and before adding, changing, moving, or removing one, or changing a shared setting.",
     ),
 }
 

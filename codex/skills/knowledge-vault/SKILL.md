@@ -10,7 +10,8 @@ The vault is the folder in the `KNOWLEDGE_VAULT_DIR` environment variable, a per
 ## Read only
 
 - Codex only reads the vault: never create, edit, move, or delete anything in it, by hand or through its tools, since only the vault's own session and its scheduled run write there (user decision, 2026-11-13). When asked to write there, say so and use the report route below instead.
-- A project hands lessons to the vault through the "lessons for the vault" section of its planning and milestone reports, never by copying its documents into the vault.
+- A project hands lessons to the vault through the "lessons for the vault" section of its planning and milestone reports or, in a project without such reports, through a know-how file at its root (such as `KNOWHOW.md`) that the vault registers; never copy its documents into the vault (user decision, 2026-11-13).
+- Write each lesson when the user approves or adopts the way of working it describes, not only when a report is due: one general sentence with its original scope, its limits, and its evidence, which gives the claim's status (user decision, checked fact, or agent recommendation) with its date and, for a user decision, the user's words, plus a commit-pinned link in a report or the file path and date (and commit when one exists) in a know-how file. In a report's lessons table, put the status in the evidence column. When you create a project's first know-how file, tell the user in one line so the vault's session registers the file.
 
 ## Reading
 
