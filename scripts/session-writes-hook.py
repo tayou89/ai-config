@@ -7,7 +7,8 @@ unrecorded, which the commit wrapper then treats as someone else's.
 For Edit and Write it also records whether the tool's own reported change
 turns the before snapshot into the after snapshot exactly: only then is the
 change surely the session's, since the snapshots also catch whatever other
-sessions write meanwhile.
+sessions write meanwhile. An Edit is judged first by the strings it reports
+replacing and then by its structured patch, which shows tabs as spaces.
 
 A snapshot that cannot be taken, before or after the call, such as one of a
 folder the call moved away, turns what it would have covered into an unknown
@@ -17,11 +18,12 @@ call stops counting as running once it has ended.
 
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from session_writes import (
@@ -55,6 +57,11 @@ _EDIT_TOOL = "Edit"
 _WRITE_TOOL = "Write"
 _FILE_PATH_KEYS = {_EDIT_TOOL: "file_path", _WRITE_TOOL: "file_path", "NotebookEdit": "notebook_path"}
 _PATCH_KEY = "structuredPatch"
+_OLD_STRING_KEY = "oldString"
+_NEW_STRING_KEY = "newString"
+_REPLACE_ALL_KEY = "replaceAll"
+_FIRST_OCCURRENCE = 1
+_EVERY_OCCURRENCE = -1
 _CONTENT_KEY = "content"
 _HUNK_LINES_KEY = "lines"
 _HUNK_OLD_START_KEY = "oldStart"
@@ -205,24 +212,68 @@ def _is_change_explained(
         return False
     else:
         is_edit = payload.get(_TOOL_NAME_KEY) == _EDIT_TOOL
-        expected = _expect_edit(response, before) if is_edit else _expect_write(payload, response)
+        expected = _list_expected_files(response, before) if is_edit else [_expect_write(payload, response)]
 
-        return expected is not None and expected == after
+        return after is not None and after in expected
 
 
-def _expect_edit(response: dict[str, Any], before: str | None) -> str | None:
-    """The file an Edit should leave: its structured patch applied to the file before it, in that file's line endings.
+def _list_expected_files(response: dict[str, Any], before: str | None) -> list[str | None]:
+    """The files an Edit may have left by what it reports: its replaced strings, then its structured patch.
 
-    Claude Code reports the patch with line endings turned into LF and writes
+    Claude Code reports the strings as the file has them, but its structured
+    patch shows each tab as two spaces (seen in 2.1.317), so for a file
+    indented with tabs only the strings account for the change. Either one
+    must give the whole after snapshot, so a write by anyone else meanwhile
+    still fails both.
+    """
+    return [_expect_replacement(response, before), _expect_patch(response, before)]
+
+
+def _expect_replacement(response: dict[str, Any], before: str | None) -> str | None:
+    """The file an Edit should leave by its reported strings."""
+    return _change_lf_text(before, functools.partial(_replace_reported_strings, response=response))
+
+
+def _replace_reported_strings(text: str, response: dict[str, Any]) -> str | None:
+    """LF text with an Edit's oldString replaced as Claude Code does, or None when the strings do not fit it.
+
+    It replaces the first oldString, or every one with replaceAll, and when
+    newString is empty it takes along the LF right after oldString if one
+    follows, as 36 recorded deletions show.
+    """
+    old = response.get(_OLD_STRING_KEY)
+    new = response.get(_NEW_STRING_KEY)
+    count = _EVERY_OCCURRENCE if response.get(_REPLACE_ALL_KEY) is True else _FIRST_OCCURRENCE
+
+    if isinstance(old, str) and isinstance(new, str) and old and old in text:
+        is_line_removed = not new and not old.endswith(_LF) and f"{old}{_LF}" in text
+        target = f"{old}{_LF}" if is_line_removed else old
+
+        return text.replace(target, new, count)
+    else:
+        return None
+
+
+def _expect_patch(response: dict[str, Any], before: str | None) -> str | None:
+    """The file an Edit should leave by its structured patch."""
+    hunks = response.get(_PATCH_KEY)
+
+    if isinstance(hunks, list):
+        return _change_lf_text(before, functools.partial(_apply_hunks, hunks=hunks))
+    else:
+        return None
+
+
+def _change_lf_text(before: str | None, change: Callable[[str], str | None]) -> str | None:
+    """A change made to the file's text with LF endings, back in the file's own endings, or None when it does not fit.
+
+    Claude Code reports an Edit with line endings turned into LF and writes
     the result back in the file's own endings.
     """
-    hunks = response.get(_PATCH_KEY)
-    applied = (
-        _apply_hunks(before.replace(_CRLF, _LF), hunks) if before is not None and isinstance(hunks, list) else None
-    )
+    changed = change(before.replace(_CRLF, _LF)) if before is not None else None
 
-    if applied is not None and before is not None:
-        return _restore_line_endings(applied, before)
+    if changed is not None and before is not None:
+        return _restore_line_endings(changed, before)
     else:
         return None
 

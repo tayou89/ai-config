@@ -166,6 +166,12 @@ PATCH_CONTEXT_LINES = 3
 PERSON_TEXT = "typed by a person\n"
 CREATE_TYPE = "create"
 NO_NEWLINE_MARKER = "\\ No newline at end of file"
+TAB = "\t"
+PATCH_TAB_TEXT = "  "
+TAB_FILE = "tokens.json"
+TAB_TEXT = '{\n\t"color": {\n\t\t"$type": "color",\n\t\t"$value": "#000000"\n\t}\n}\n'
+TAB_TYPE_LINE = '\t\t"$type": "color",'
+KOREAN_FILE = "결정기록.md"
 RANDOM_SEED = 20261110
 RANDOM_TRIALS = 1500
 RANDOM_BASE_LINES = 6
@@ -707,6 +713,25 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_head(), other)
         self.assertIn("also commit: shared.txt", result.stderr)
+
+    def test_stale_private_index_names_a_korean_file(self) -> None:
+        self.fixture.edit(KOREAN_FILE, "mine\n")
+        base = self.fixture.build_private_index(KOREAN_FILE)
+        self.fixture.commit_other_session(KOREAN_FILE)
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, KOREAN_FILE)
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertIn(f"also commit: {KOREAN_FILE}", result.stderr)
+
+    def test_korean_file_is_committed_and_shown_by_its_name(self) -> None:
+        self.fixture.edit(KOREAN_FILE, "mine\n")
+        base = self.fixture.build_private_index(KOREAN_FILE)
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, KOREAN_FILE)
+        committed = self.fixture.run_git("diff", "--name-only", "-z", "HEAD^", "HEAD")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(KOREAN_FILE, result.stdout)
+        self.assertEqual(committed.rstrip("\0"), KOREAN_FILE)
 
     def test_current_private_index_commits_listed_files(self) -> None:
         self.fixture.edit("b.txt", "mine\n")
@@ -1509,7 +1534,40 @@ class RecordHookExactnessTest(unittest.TestCase):
         for name, hunks, before, expected in cases:
             with self.subTest(case=name):
                 response = {} if hunks is None else {"structuredPatch": hunks}
-                self.assertEqual(record_hook._expect_edit(response, before), expected)
+                self.assertEqual(record_hook._expect_patch(response, before), expected)
+
+    def test_edit_strings(self) -> None:
+        tab_after = TAB_TEXT.replace("#000000", "#ffffff")
+        cases = (
+            ("tab-indented file", TAB_TEXT, "#000000", "#ffffff", False, tab_after),
+            ("every occurrence with replaceAll", "a\nb\na\n", "a", "c", True, "c\nb\nc\n"),
+            ("first occurrence without replaceAll", "a b a\n", "a", "c", False, "c b a\n"),
+            ("an empty replacement takes the line end along", "a\nb\nc\n", "b", "", False, "a\nc\n"),
+            ("a removal that ends its own line", "a\nb\nc\n", "b\n", "", False, "a\nc\n"),
+            ("every removal takes its line end along", "a\nb\nb\nc\n", "b", "", True, "a\nc\n"),
+            ("CRLF file keeps its endings", "one\r\ntwo\r\n", "two", "TWO", False, "one\r\nTWO\r\n"),
+            ("a CRLF removal takes its line end", "one\r\ntwo\r\nthree\r\n", "two", "", False, "one\r\nthree\r\n"),
+            ("several lines of a CRLF file", "one\r\ntwo\r\nthree\r\n", "one\ntwo", "X", False, "X\r\nthree\r\n"),
+            ("a file that mixes endings", "one\r\ntwo\nthree\r\n", "two", "TWO", False, None),
+            ("strings the file does not hold", "one\n", "two", "TWO", False, None),
+            ("an empty oldString", "one\n", "", "TWO", False, None),
+        )
+
+        for name, before, old, new, replace_all, expected in cases:
+            with self.subTest(case=name):
+                response = {"oldString": old, "newString": new, "replaceAll": replace_all}
+                self.assertEqual(record_hook._expect_replacement(response, before), expected)
+
+    def test_edit_without_strings_is_left_to_its_patch(self) -> None:
+        self.assertIsNone(record_hook._expect_replacement({"structuredPatch": CRLF_PATCH}, "one\ntwo\nthree\n"))
+
+    def test_tab_file_edit_is_explained_by_its_strings_not_its_patch(self) -> None:
+        after = TAB_TEXT.replace("#000000", "#ffffff")
+        response = make_edit_response(TAB_TEXT, after, "#000000", "#ffffff")
+
+        self.assertIsNone(record_hook._expect_patch(response, TAB_TEXT))
+        self.assertIn(after, record_hook._list_expected_files(response, TAB_TEXT))
+        self.assertNotIn(after + PERSON_TEXT, record_hook._list_expected_files(response, TAB_TEXT))
 
     def test_write_results(self) -> None:
         requested = {"tool_input": {"content": "new\n"}}
@@ -1534,14 +1592,21 @@ class RecordHookExactnessTest(unittest.TestCase):
         self.assertIs(record_hook._judge_exactness(edit, MISSING_ROOT, MISSING_BLOB, MISSING_BLOB), False)
 
 
-def make_edit_response(original: str, edited: str) -> dict:
-    """The Edit tool's response: the file it read and a jsdiff structured patch, both with line endings in LF."""
+def make_edit_response(
+    original: str, edited: str, old: str | None = None, new: str = "", replace_all: bool = False
+) -> dict:
+    """The Edit tool's response as Claude Code 2.1.317 gives it, with line endings in LF.
+
+    It holds the file it read, the strings it replaced when old is given, and
+    a jsdiff structured patch that shows each tab as two spaces.
+    """
     old_lines = split_keeping_ends(original.replace("\r\n", "\n"))
     new_lines = split_keeping_ends(edited.replace("\r\n", "\n"))
     matcher = difflib.SequenceMatcher(None, old_lines, new_lines, autojunk=False)
     hunks = [make_hunk(group, old_lines, new_lines) for group in matcher.get_grouped_opcodes(PATCH_CONTEXT_LINES)]
+    strings = {"oldString": old, "newString": new, "replaceAll": replace_all} if old is not None else {}
 
-    return {"originalFile": "".join(old_lines), "structuredPatch": hunks}
+    return {"originalFile": "".join(old_lines), "structuredPatch": hunks, **strings}
 
 
 def split_keeping_ends(text: str) -> list[str]:
@@ -1562,7 +1627,7 @@ def make_hunk(group: list[tuple[str, int, int, int, int]], old_lines: list[str],
         )
     ]
     lines = [
-        entry
+        entry.replace(TAB, PATCH_TAB_TEXT)
         for sign, line in signed
         for entry in ([f"{sign}{line[:-1]}"] if line.endswith("\n") else [f"{sign}{line}", NO_NEWLINE_MARKER])
     ]
@@ -1692,9 +1757,19 @@ class SessionWritesFixture:
             file.write(text)
         self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
 
-    def edit(self, session: str, path: str, old: str, new: str, reported: bool = True, during: str = "") -> None:
-        """Replace text as the Edit tool does, which reports the file it started from and its patch with LF endings.
+    def edit(
+        self,
+        session: str,
+        path: str,
+        old: str,
+        new: str,
+        reported: bool = True,
+        during: str = "",
+        replace_all: bool = False,
+    ) -> None:
+        """Replace text as the Edit tool does, which reports the file it started from, its strings, and its patch.
 
+        Like the tool, an empty replacement also removes the line end right after old.
         reported=False sends only the file it started from, as records made before patches were kept.
         during is text someone else appends to the file before the hook looks at it again.
         """
@@ -1705,11 +1780,16 @@ class SessionWritesFixture:
 
         self.run_record_hook(session, PRE_TOOL_USE, tool_use, edit_input)
         original = file.read_bytes().decode()
-        edited = original.replace(old, new, 1)
+        is_line_removed = not new and not old.endswith("\n") and f"{old}\n" in original
+        target = f"{old}\n" if is_line_removed else old
+        edited = original.replace(target, new) if replace_all else original.replace(target, new, 1)
 
         file.write_bytes(edited.encode())
         self.append(path, during)
-        response = make_edit_response(original, edited) if reported else {"originalFile": original}
+        if reported:
+            response = make_edit_response(original, edited, old, new, replace_all)
+        else:
+            response = {"originalFile": original}
 
         self.run_record_hook(session, POST_TOOL_USE, tool_use, edit_input, response)
 
@@ -2228,6 +2308,70 @@ class SessionWritesTest(unittest.TestCase):
 
         self.assertEqual((command["exact"], exact["exact"], mixed["exact"]), (None, True, False))
         self.assertEqual({event["record_format"] for event in (command, exact, mixed)}, {RECORD_FORMAT})
+
+    def commit_tab_file(self) -> None:
+        (self.fixture.repository / TAB_FILE).write_text(TAB_TEXT)
+        self.fixture.run_git("add", TAB_FILE)
+        self.fixture.run_git("commit", "-q", "-m", "Chore: add tokens")
+
+    def assert_tab_edit_committed(self, old: str, new: str, replace_all: bool, expected: str) -> None:
+        self.commit_tab_file()
+        self.fixture.edit(OWN_SESSION, TAB_FILE, old, new, replace_all=replace_all)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, TAB_FILE)
+
+        self.assertIs(self.fixture.read_events(OWN_SESSION)[-1]["exact"], True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(TAB_FILE).decode(), expected)
+
+    def test_tab_indented_edit_is_mine(self) -> None:
+        self.assert_tab_edit_committed("#000000", "#ffffff", False, TAB_TEXT.replace("#000000", "#ffffff"))
+
+    def test_tab_indented_replace_all_edit_is_mine(self) -> None:
+        self.assert_tab_edit_committed('"color"', '"colour"', True, TAB_TEXT.replace('"color"', '"colour"'))
+
+    def test_tab_indented_line_removal_is_mine(self) -> None:
+        self.assert_tab_edit_committed(TAB_TYPE_LINE, "", False, TAB_TEXT.replace(f"{TAB_TYPE_LINE}\n", ""))
+
+    def test_tab_edit_with_a_line_typed_meanwhile_is_asked_without_naming_a_session(self) -> None:
+        self.commit_tab_file()
+        self.fixture.edit(OWN_SESSION, TAB_FILE, "#000000", "#ffffff", during=PERSON_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, TAB_FILE)
+        report = self.fixture.report(OWN_SESSION, TAB_FILE)
+
+        self.assertIs(self.fixture.read_events(OWN_SESSION)[-1]["exact"], False)
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("the record could not prove", result.stderr)
+        self.assertNotIn("another session also wrote", result.stderr)
+        self.assertIn("could not be proven by the record", report)
+        self.assertNotIn("another session also wrote", report)
+
+    def test_other_sessions_write_counts_from_just_before_my_first_write(self) -> None:
+        """Only another session's write from about when this session began on the file is named in the message."""
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+        root = str(self.fixture.repository)
+        cases = (
+            ("ended long before", 100.0, False),
+            ("ended within the overlap margin", 1.0, True),
+            ("ran after", -5.0, True),
+        )
+
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        own = self.fixture.read_events(OWN_SESSION)[0]
+
+        for name, ended_before, expected in cases:
+            with self.subTest(case=name), mock.patch.dict(os.environ, self.fixture.environment(None)):
+                other = {**own, "start": own["start"] - ended_before - 1, "end": own["start"] - ended_before}
+
+                record.write_text(json.dumps(other) + "\n")
+                self.assertIs(session_writes.is_written_by_others(OWN_SESSION, root, LOG_FILE), expected)
+
+    def test_running_call_of_another_session_counts_as_writing(self) -> None:
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.start_command(OTHER_SESSION)
+        with mock.patch.dict(os.environ, self.fixture.environment(None)):
+            written = session_writes.is_written_by_others(OWN_SESSION, str(self.fixture.repository), LOG_FILE)
+
+        self.assertIs(written, True)
 
     def test_edit_inside_another_sessions_command_stays_mine(self) -> None:
         started = self.fixture.start_command(OTHER_SESSION)

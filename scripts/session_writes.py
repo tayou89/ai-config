@@ -46,7 +46,7 @@ from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from pathlib import Path
 
-from own_lines import FileHistory, RecordedWrite, build_own_content, list_foreign_lines
+from own_lines import ContestedLine, FileHistory, RecordedWrite, build_own_content, list_foreign_lines
 from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
 
 _SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
@@ -426,6 +426,23 @@ def load_file_history(session_id: str, root: str, path: str) -> FileHistory | No
         return None
 
 
+def is_written_by_others(session_id: str, root: str, path: str) -> bool:
+    """Whether another session's write, unknown write, or running call covers the file since this session wrote it.
+
+    Only then can lines the record does not prove be put down to another
+    session; otherwise a person, an editor, or a hook the record does not see
+    made them. Ends are widened by the overlap margin, as for records whose
+    times do not enclose their snapshots, so a doubtful case names the other
+    session rather than deny it. Raises SessionWritesError when a record
+    cannot be read back.
+    """
+    events = _read_file_events(root, path)
+    first_start = min((event.start for event in _list_own_writes(session_id, events)), default=math.inf)
+    foreign = _list_foreign_writes(session_id, root, path, events)
+
+    return any(other.end + _OVERLAP_MARGIN_SECONDS >= first_start for other in foreign)
+
+
 def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | None) -> bool:
     """Whether every change from base to the working tree came from this session's uncontested writes.
 
@@ -556,16 +573,23 @@ def _describe_file(session_id: str, absolute_path: str) -> str:
         foreign = list_foreign_lines(base, history.working_tree, own.text)
         shown = "".join(f"\n  {line.kind.value} {line.line_number}: {line.text}" for line in foreign)
         tangled = "".join(f"\n  ! {line.rstrip()}" for line in own.entangled)
-        unsure = "".join(f"\n  ? {line.kind.value} {line.text.rstrip()}" for line in own.contested)
         summary = f"{path}: {len(foreign)} changed lines are not this session's and would be left out{shown}"
         entangled = f"\n{len(own.entangled)} own lines cannot be separated from them:{tangled}" if own.entangled else ""
-        contested = (
-            f"\n{len(own.contested)} of them changed while another session also wrote this file, so they may be this session's:{unsure}"
-            if own.contested
-            else ""
-        )
+        contested = _describe_contested_lines(session_id, root, path, own.contested) if own.contested else ""
 
         return summary + entangled + contested
+
+
+def _describe_contested_lines(session_id: str, root: str, path: str, contested: Sequence[ContestedLine]) -> str:
+    """Name another session only when the record holds one's write to the file."""
+    unsure = "".join(f"\n  ? {line.kind.value} {line.text.rstrip()}" for line in contested)
+    reason = (
+        "could not be proven by the record, and another session also wrote this file since this session did"
+        if is_written_by_others(session_id, root, path)
+        else "could not be proven by the record, and no other session's write to this file is recorded"
+    )
+
+    return f"\n{len(contested)} changes {reason}, so they may be this session's:{unsure}"
 
 
 def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | None]) -> _IncludeApproval | None:

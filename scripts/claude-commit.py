@@ -109,6 +109,7 @@ from session_writes import (
     is_line_tracked,
     is_record_complete,
     is_whole_file_own,
+    is_written_by_others,
     load_file_history,
     read_session_id,
     store_text,
@@ -139,7 +140,9 @@ LARGE_COMMIT_LINES = 200
 UNCOUNTED_SUFFIXES = (".md", ".txt", ".lock")
 UNCOUNTED_NAMES = frozenset({"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "go.sum"})
 BINARY_NUMSTAT = "-"
-NUMSTAT_SEPARATOR = "\0"
+PATH_LIST_SEPARATOR = "\0"
+NUMSTAT_SEPARATOR = PATH_LIST_SEPARATOR
+READABLE_PATHS_OPTIONS = ("-c", "core.quotepath=false")
 NUMSTAT_COLUMN_SEPARATOR = "\t"
 
 EXIT_GIT_ERROR = 1
@@ -270,15 +273,20 @@ def stage_file(path: str) -> None:
     print(f"  + {path}")
 
 
+def split_path_list(output: str) -> list[str]:
+    """Paths from a `-z` listing, which names each path as it is instead of quoting non-ASCII bytes in octal."""
+    return [path for path in output.split(PATH_LIST_SEPARATOR) if path]
+
+
 def verify_staging(expected_files: Sequence[str]) -> None:
     actual_proc = run_git(
-        ["diff", "--cached", "--name-only"],
+        ["diff", "--cached", "--name-only", "-z"],
         capture_output=True,
     )
     if actual_proc.returncode != 0:
         fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
     expected = set(expected_files)
-    actual = {line for line in actual_proc.stdout.splitlines() if line}
+    actual = set(split_path_list(actual_proc.stdout))
     extra = actual - expected
     if extra:
         sys.stderr.write("FAIL: files staged but not in argv:\n")
@@ -326,9 +334,10 @@ def make_commit_range(expected_head: str | None, moved_head: str) -> str:
 
 def list_changed_files(commit_range: str, files: Sequence[str]) -> list[str]:
     if files:
-        changed_proc = run_git(["log", "--format=", "--name-only", commit_range, "--", *files], capture_output=True)
+        log_arguments = ["log", "-z", "--format=", "--name-only", commit_range, "--", *files]
+        changed_proc = run_git(log_arguments, capture_output=True)
 
-        return sorted({line for line in changed_proc.stdout.splitlines() if line})
+        return sorted(set(split_path_list(changed_proc.stdout)))
     else:
         return []
 
@@ -571,8 +580,8 @@ def check_credential_files() -> None:
     if staged_proc.returncode != 0:
         fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
     offenders = []
-    for path in staged_proc.stdout.split("\0"):
-        reason = get_credential_reason(path, functools.partial(read_staged_content, path)) if path else None
+    for path in split_path_list(staged_proc.stdout):
+        reason = get_credential_reason(path, functools.partial(read_staged_content, path))
         if reason:
             offenders.append(f"  {path} ({reason})")
     if offenders:
@@ -674,11 +683,23 @@ def read_file_history(session_id: str, root: str, path: str) -> FileHistory | No
     try:
         return load_file_history(session_id, root, path)
     except SessionWritesError as error:
-        fail(
-            f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart.\n"
-            f"Resolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there.",
-            EXIT_FOREIGN_LINES,
-        )
+        fail(make_unreadable_record_message(path, error), EXIT_FOREIGN_LINES)
+
+
+def read_written_by_others(session_id: str, root: str, path: str) -> bool:
+    try:
+        return is_written_by_others(session_id, root, path)
+    except SessionWritesError as error:
+        fail(make_unreadable_record_message(path, error), EXIT_FOREIGN_LINES)
+
+
+def make_unreadable_record_message(path: str, error: SessionWritesError) -> str:
+    lines = [
+        f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart.",
+        f"Resolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there.",
+    ]
+
+    return "\n".join(lines)
 
 
 def read_index_mode(root: str, path: str) -> str:
@@ -706,7 +727,7 @@ def stage_changes(arguments: CommitArguments, expected_head: str | None) -> None
     else:
         stage_files(arguments.files)
     print("=== Staged changes ===")
-    run_git(["diff", "--cached", "--stat"])
+    run_git([*READABLE_PATHS_OPTIONS, "diff", "--cached", "--stat"])
 
 
 def stage_own_lines(session_id: str, files: Sequence[str], included: Sequence[str], expected_head: str | None) -> None:
@@ -728,7 +749,9 @@ def stage_own_content(session_id: str, root: str, path: str, base: str) -> None:
     elif own.entangled:
         fail(make_entangled_message(path, own.entangled), EXIT_FOREIGN_LINES)
     elif own.contested:
-        fail(make_contested_message(path, own.contested), EXIT_FOREIGN_LINES)
+        written_by_others = read_written_by_others(session_id, root, path)
+
+        fail(make_contested_message(path, own.contested, written_by_others), EXIT_FOREIGN_LINES)
     elif own.text == "" and not os.path.exists(os.path.join(root, path)):
         run_git(["update-index", "--force-remove", "--", path])
         print(f"  - {path} (removed)")
@@ -763,7 +786,7 @@ def check_staged_lines(included: Sequence[str], expected_head: str | None) -> No
     session_id = read_session_id() or ""
     root = read_repository_root()
     staged_output = run_git(["diff", "--cached", "--name-only", "-z", "--no-renames"], capture_output=True).stdout
-    staged_paths = [path for path in staged_output.split("\0") if path]
+    staged_paths = split_path_list(staged_output)
     problems = [describe_foreign_lines(session_id, root, path, expected_head) for path in staged_paths if path not in included]
     shown = [problem for problem in problems if problem]
 
@@ -791,7 +814,10 @@ def describe_foreign_lines(session_id: str, root: str, path: str, expected_head:
         if entangled:
             return make_entangled_message(path, entangled)
         elif foreign_message and contested:
-            return f"{foreign_message}\n{make_contested_message(path, contested)}"
+            written_by_others = read_written_by_others(session_id, root, path)
+            contested_message = make_contested_message(path, contested, written_by_others)
+
+            return f"{foreign_message}\n{contested_message}"
         else:
             return foreign_message
 
@@ -818,10 +844,16 @@ def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
     return "\n".join(lines)
 
 
-def make_contested_message(path: str, contested: Sequence[ContestedLine]) -> str:
+def make_contested_message(path: str, contested: Sequence[ContestedLine], written_by_others: bool) -> str:
+    """Name another session only when the record holds one's write to the file; otherwise say what the record lacks."""
     shown = [f"  ? {line.kind.value} {line.text.rstrip()}" for line in contested[:MAX_SHOWN_FOREIGN_LINES]]
+    header = (
+        f"FAIL: in {path}, the record could not prove {len(contested)} changes are yours, and another session also wrote this file since you did, so they may be its:"
+        if written_by_others
+        else f"FAIL: in {path}, the record could not prove {len(contested)} changes are yours. No other session's write to this file is recorded, so a person, an editor, a project hook, or a command the record did not see may have changed the file around them:"
+    )
     lines = [
-        f"FAIL: in {path}, {len(contested)} changes were written while another session also wrote this file, so the record cannot tell whether they are yours:",
+        header,
         *shown,
         f"Resolve: rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
     ]
