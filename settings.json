@@ -166,6 +166,18 @@
         ]
       }
     ],
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/bulletin-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "UserPromptExpansion": [
       {
         "matcher": "",
