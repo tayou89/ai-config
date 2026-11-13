@@ -19,14 +19,12 @@ rule missing from its context (2026-11-13). This hook puts the facts back:
   sentence that such work goes to a session of its own.
 
 Hook input carries no session lineage, so the hook reads the desktop app's
-session records (`claude-code-sessions/*/*/local_*.json` in the app's support
-folder): `spawnedFrom` names the session that started a session and
-`lineageDetached` marks one moved to the top level. These records are not a
-documented interface; when they or the app's session variable are missing,
-as in a terminal session, the hook adds nothing. The conversation part is
-estimated from the transcript as the last request's input tokens minus the
-first request's, which matched the app's Messages category within 2.6% on
-2026-11-13, reading high as the fixed part grows after the first request.
+session records through `session_lineage`; when they or the app's session
+variable are missing, as in a terminal session, the hook adds nothing. The
+conversation part is estimated from the transcript as the last request's
+input tokens minus the first request's, which matched the app's Messages
+category within 2.6% on 2026-11-13, reading high as the fixed part grows
+after the first request.
 A subagent's tool calls get nothing, since it cannot start sessions, and an
 unreadable transcript leaves out the size and skill sentences.
 MAIN_SESSION_NOTICE=off in the settings env turns the notices off. The hook
@@ -42,18 +40,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from session_lineage import count_started_sessions
+
 _HOOK_NAME = "main-session-hook"
 _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 _SWITCH_OFF = "off"
-_HOST_SESSION_VARIABLE = "CLAUDE_CODE_HOST_SESSION_ID"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
-_SESSION_RECORDS_PATH = Path("Library") / "Application Support" / "Claude" / "claude-code-sessions"
-_SESSION_RECORD_PATTERN = "*/*/local_*.json"
-_SESSION_RECORD_SUFFIX = ".json"
-_SPAWNED_FROM_KEY = "spawnedFrom"
-_SESSION_ID_KEY = "sessionId"
-_DETACHED_KEY = "lineageDetached"
 _LEAD_SKILL = "decisions-and-collaboration"
 _SKILL_FILE = Path("skills") / _LEAD_SKILL / "SKILL.md"
 _SKILL_TOOL = "Skill"
@@ -82,7 +75,6 @@ _INPUT_KEY = "input"
 _INPUT_TOKEN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 _UTC_SUFFIX = "Z"
 _UTC_OFFSET = "+00:00"
-_ENCODING = "utf-8"
 _REPLACEMENT_THRESHOLD = 200_000
 _THOUSAND = 1_000
 _NOTICE_TAG = "[MAIN SESSION]"
@@ -136,7 +128,7 @@ def _make_notice(hook_input: dict[str, Any]) -> str | None:
     elif event == _USER_PROMPT_SUBMIT:
         return _make_turn_notice(hook_input)
     elif event == _PRE_TOOL_USE and _is_writing_call(hook_input):
-        return _TOOL_NOTICE if _count_started_sessions() else None
+        return _TOOL_NOTICE if count_started_sessions() else None
     else:
         return None
 
@@ -149,7 +141,7 @@ def _read_hook_input() -> dict[str, Any]:
 
 
 def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
-    count = _count_started_sessions()
+    count = count_started_sessions()
 
     if count:
         transcript = _read_transcript_records(hook_input.get(_TRANSCRIPT_PATH_KEY))
@@ -162,17 +154,6 @@ def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
         return None
 
 
-def _count_started_sessions() -> int:
-    """How many sessions this session started, or 0 when it is under another session or not an app session."""
-    host_session = os.environ.get(_HOST_SESSION_VARIABLE, "")
-    records = Path.home() / _SESSION_RECORDS_PATH
-
-    if host_session and records.is_dir() and _is_top_level(records, host_session):
-        return sum(1 for path in records.glob(_SESSION_RECORD_PATTERN) if _is_started_by(path, host_session))
-    else:
-        return 0
-
-
 def _is_writing_call(hook_input: dict[str, Any]) -> bool:
     tool_name = hook_input.get(_TOOL_NAME_KEY)
     tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
@@ -181,38 +162,6 @@ def _is_writing_call(hook_input: dict[str, Any]) -> bool:
         return isinstance(tool_input, dict) and tool_input.get(_BACKGROUND_KEY) is True
     else:
         return tool_name in _WRITING_TOOLS
-
-
-def _is_top_level(records: Path, host_session: str) -> bool:
-    """A session whose own record is missing counts as not top level, so an unknown layout adds nothing."""
-    own_records = list(records.glob(f"*/*/{host_session}{_SESSION_RECORD_SUFFIX}"))
-    record = _read_json(own_records[0]) if own_records else None
-
-    if isinstance(record, dict):
-        return not record.get(_SPAWNED_FROM_KEY) or record.get(_DETACHED_KEY) is True
-    else:
-        return False
-
-
-def _is_started_by(path: Path, host_session: str) -> bool:
-    """Search the bytes first, so only the few records that name this session are parsed."""
-    try:
-        if host_session.encode(_ENCODING) in path.read_bytes():
-            record = _read_json(path)
-            spawned_from = record.get(_SPAWNED_FROM_KEY) if isinstance(record, dict) else None
-
-            return isinstance(spawned_from, dict) and spawned_from.get(_SESSION_ID_KEY) == host_session
-        else:
-            return False
-    except OSError:
-        return False
-
-
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding=_ENCODING))
-    except (OSError, ValueError, RecursionError):
-        return None
 
 
 def _read_transcript_records(transcript_path: Any) -> list[dict[str, Any]] | None:

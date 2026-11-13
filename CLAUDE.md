@@ -18,6 +18,7 @@ Hooks enforce these rules and say why when they stop or ask; follow their messag
 - Writing code or screen files, through edits or the shell, inline scripts included, and Figma writes are refused until this session, or this subagent, has loaded the skills their trigger names with the Skill tool (user decision, 2026-11-12).
 - Notices never block: `[CONFIG SYNC]` when this computer and the configuration repository differ, `[PROJECT GOAL]` when the project rules have no goal heading (user decision, 2026-11-12), `[BULLETIN]` at a user turn for session-bulletin lines the session has not seen (user decision, 2026-11-13), `[MAIN SESSION]` at each user turn and before a file change in a main session (user decision, 2026-11-13), `[LANGUAGE REMINDER]` after a progress line in another language, and `[PLAN CODE REMINDER]` before writing a plan file.
 - A question that points elsewhere in the chat instead of showing what it asks about gets a `[BACK-REFERENCE]` notice in the next-step box and is sent back in a question dialog or closing message (user decision, 2026-11-13).
+- A question dialog in a session another session started is sent back to the next-step box (user decision, 2026-11-13).
 
 ## Skill Triggers
 
