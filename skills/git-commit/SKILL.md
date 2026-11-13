@@ -1,6 +1,6 @@
 ---
 name: git-commit
-description: Review changes, write the commit message, and commit and push without asking through the claude-commit.py wrapper, stopping only when a check fails.
+description: Review changes, write the commit message, and commit and push without asking through the claude-commit.py wrapper, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), stopping only when a check fails.
 ---
 
 # Commit Workflow
@@ -9,9 +9,18 @@ All commits MUST go through `~/.claude/scripts/claude-commit.py`. Direct `git co
 
 Routine commits and pushes need no user approval (user decision, 2026-11-09): this skill's self-check, the wrapper, the shell guard, and a repository's pre-commit check stand where that approval was. Changes to rules, skills, hooks, and shared settings still need the user's review before they are applied (section 5).
 
-## 1. Branch Check (First Commit of Session Only)
+## 1. Repository Workflow
 
-Check current branch with `git branch --show-current`. If on `main`, `dev`, or other base branch, ask user if they want a new working branch (e.g. `fix/xxx`, `feat/xxx`). Skip if already on a working branch (`fix/`, `feat/`, `refactor/`). Skip for subsequent commits.
+Follow the workflow the project's rules record; the repository's `.agent-workflow.json` names its mode, base branch, and required checks or check commands for the tools below (user decision, 2026-11-13):
+
+- **Pull request with a guarded merge** (personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request with `pr-create`, and merge it only with `~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. Never push the base branch, merge with administrator rights, or enable auto-merge.
+- **Local integration** (a repository without a remote): commit on the task branch and integrate it with `~/.claude/scripts/local-integrate.py`, which merges it onto the current base in a temporary worktree, runs the check commands there, and moves the base only when they pass.
+- **Direct commits under a lock**: commit to the working branch only while holding the repository's lock for the whole write, check, and commit; do not choose this mode because few sessions are open.
+- **Team workflow**: follow the team's rules; the shell guard asks before every merge.
+
+Where no workflow is recorded, commit to the branch the repository works on as section 6a describes; when a push there starts deploying, set `git config shellGuard.askBeforePush true` in the checkout and say so in the project's rules.
+
+In the first two modes every writing task owns one worktree and one branch named `<prefix>/<topic>`. A session another session starts gets `use_worktree: true`; a session opened in the original checkout calls `EnterWorktree` before its first edit. Check that the worktree starts from the current `origin/<base>` and that no other task uses it. The original checkout stays read-only, and a hook refuses edits and Git commands that change it, except files Git ignores such as `claude-plans/`. Update a pushed task branch by merging the base into it, not by rebasing. Separate worktrees may change copies of the same file; agree overlapping behavior changes with the other task before integrating.
 
 ## 2. Review Changes (informational, before drafting message)
 
@@ -163,11 +172,11 @@ The wrapper enforces this, since sessions in one checkout commit as the same per
 
 ## 8. Push
 
-Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps (user decision, 2026-11-09). A routine push, the current branch to its own remote, runs without asking (user decision, 2026-11-09, replacing the 2026-11-08 push prompt). The shell guard still asks before force pushes, deletions, mirror and tag pushes, pushes to another remote or ref, and every push in a repository where `git config shellGuard.askBeforePush true` is set; if the user rejects it, stop and report. Where the hook is not installed, push routine pushes the same way and ask before the others yourself.
+Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps (user decision, 2026-11-09). A routine push, the current branch to its own remote, runs without asking (user decision, 2026-11-09, replacing the 2026-11-08 push prompt). The shell guard still asks before force pushes, deletions, mirror and tag pushes, pushes to another remote or ref, and every push in a repository where `git config shellGuard.askBeforePush true` is set; if the user rejects it, stop and report. In a pull-request repository the shell guard asks before a push of the base branch. Where the hook is not installed, push routine pushes the same way and ask before the others yourself.
 
-## 9. Pull Requests and Deploying Pushes
+## 9. Cleanup
 
-Commit straight to the branch a repository works on, its default branch for a solo repository, without a pull request unless the project's rules say otherwise: with no reviewer and no deploy on push, a pull request adds a step nobody reads (user decision, 2026-11-09). When a push to that branch starts deploying, set `git config shellGuard.askBeforePush true` in the checkout and say so in the project's rules, or move that repository to pull requests with required checks.
+Remove a task's worktree only with `~/.claude/scripts/worktree-cleanup.py`, after its last change is merged or the user abandons the task. The script refuses while the worktree holds uncommitted, untracked, or unlisted ignored files, while another process works in it, or while the branch has commits the merge did not take; an abandoned task keeps its branch. Closing a pull request is not abandonment. Confirm the merge apart from cleanup, so a failed cleanup never repeats a merge, and keep the app's auto-archive on pull-request close off during the pilot (user decision, 2026-11-13).
 
 ## Rules
 

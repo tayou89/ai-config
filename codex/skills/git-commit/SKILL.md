@@ -1,6 +1,6 @@
 ---
 name: git-commit
-description: Review, create, and push Git commits without asking for routine work, preserving exact change scope and personal message conventions.
+description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
 # Commit Workflow
@@ -8,6 +8,17 @@ description: Review, create, and push Git commits without asking for routine wor
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.
 
 Use normal Git commands or the connected GitHub interface. Claude's commit wrapper and PreToolUse hooks are not installed or required by this skill. The checks below are instructions, not an automatic command interceptor.
+
+## Repository Workflow
+
+Follow the workflow the project's rules record; the repository's `.agent-workflow.json` names its mode, base branch, and required checks or check commands (user decision, 2026-11-13):
+
+- **Pull request with a guarded merge** (personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request, and merge it only with `python3 ~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. Never push the base branch, merge with administrator rights, or enable auto-merge.
+- **Local integration** (a repository without a remote): integrate the task branch with `python3 ~/.claude/scripts/local-integrate.py`, which checks the merged result in a temporary worktree and moves the base only when the checks pass.
+- **Direct commits under a lock**: commit only while holding the repository's lock for the whole write, check, and commit.
+- **Team workflow**: follow the team's rules and ask before every merge.
+
+In the first two modes every writing task owns one worktree and one uniquely named branch; create it with `git worktree add` from the current `origin/<base>` before the first edit, and never edit or switch branches in the original checkout or in another task's worktree. Update a pushed task branch by merging the base into it, not by rebasing. Remove a finished task's worktree only with `python3 ~/.claude/scripts/worktree-cleanup.py`, which first checks that its work is committed, integrated, and not in use; closing a pull request is not abandonment.
 
 ## Review the Change
 
@@ -34,6 +45,6 @@ When other sessions work in the same checkout, the default index is shared: thei
 
 Before amending, inspect recent history and determine whether the previous commit is owned, unpushed, and part of the same topic; amend only such a commit. Obtain authorization for rewriting pushed history. Do not amend others' commits or force-push shared history on your own. If a force push is explicitly authorized, inspect the current remote head and use a lease.
 
-Push once per task, after its last commit, as a command of its own, without asking: the current branch to its own remote (user decision, 2026-11-09). Ask first before a force push, deleting a remote branch or tag, a mirror or tag push, a push to another remote or ref, or any push in a repository that sets `shellGuard.askBeforePush`. Commit straight to the branch a solo repository works on, without a pull request, unless the project's rules say otherwise; when a push there starts deploying, ask before pushing or move the repository to pull requests with required checks. Verify the remote result. Update the associated plan and status records with the actual commit hash and completed scope; do not mark unverified work complete.
+Push once per task, after its last commit, as a command of its own, without asking: the current branch to its own remote (user decision, 2026-11-09). Ask first before a force push, deleting a remote branch or tag, a mirror or tag push, a push to another remote or ref, or any push in a repository that sets `shellGuard.askBeforePush`. Where the project records no workflow, commit straight to the branch the repository works on; when a push there starts deploying, ask before pushing. In a pull-request repository, never push the base branch. Verify the remote result. Update the associated plan and status records with the actual commit hash and completed scope; do not mark unverified work complete.
 
 Never commit credentials, real `.env` files, unrelated configuration, or temporary test patches. Do not automatically include Claude settings or permission changes.

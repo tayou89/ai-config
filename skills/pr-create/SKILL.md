@@ -103,7 +103,7 @@ PR title and the skill rule text are English. Body **content** language follows 
 
 ## 4. Show Body Before Creating
 
-Show the drafted title + body to the user before invoking `gh pr create`. Get explicit approval. PRs are externally visible and editing after creation is awkward — confirm content upfront.
+In a repository whose recorded workflow is the guarded pull request, create and update the task's pull request without showing the body first, and merge it as `git-commit` section 1 describes (user decision, 2026-11-13). Elsewhere, show the drafted title and body to the user before `gh pr create` and get explicit approval, and do not merge: pull requests are externally visible and editing after creation is awkward.
 
 ## 5. Run gh pr create
 
@@ -140,7 +140,7 @@ Flags:
 
 - Return the PR URL to the user
 - Ask if reviewers / labels / milestone should be added
-- Do NOT auto-merge or auto-enable auto-merge — user decision
+- Never enable GitHub auto-merge, and merge only as section 4 allows
 
 ## Rules
 
@@ -150,4 +150,4 @@ Flags:
 - **Do not include `Generated with Claude Code` or similar trailers** per global policy.
 - **Do not reference bare issue numbers** — always include what the issue is about.
 - **Do not push `--force` without explicit user approval**, especially after PR creation.
-- **Do not auto-merge** even if checks pass.
+- **Never enable GitHub auto-merge**, and merge only as section 4 allows.

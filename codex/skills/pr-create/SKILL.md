@@ -105,7 +105,7 @@ PR title and the skill rule text are English. Body **content** language follows 
 
 ## 4. Show Body Before Creating
 
-Prepare the complete title, body, base/head branches, and verification result before publication. Reuse explicit authorization to create or update this PR; ask only when the intended publication or a material decision is not authorized.
+Prepare the complete title, body, base/head branches, and verification result before publication. In a repository whose recorded workflow is the guarded pull request, create and update the task's pull request without a separate body approval and merge it as the git-commit skill's Repository Workflow describes (user decision, 2026-11-13). Elsewhere, reuse explicit authorization to create or update this PR, ask only when the intended publication or a material decision is not authorized, and do not merge.
 
 ## 5. Run gh pr create
 
@@ -121,7 +121,7 @@ Flags:
 
 - Return the PR URL and attach the created or worked-on PR to the current Codex task using the available artifact attachment tool.
 - Apply requested reviewers, labels, or milestones; do not contact reviewers without authorization.
-- Do NOT auto-merge or auto-enable auto-merge — user decision
+- Never enable GitHub auto-merge, and merge only as section 4 allows
 
 ## Rules
 
@@ -131,4 +131,4 @@ Flags:
 - **Do not include `Generated with Claude Code` or similar trailers** per global policy.
 - **Do not reference bare issue numbers** — always include what the issue is about.
 - **Do not push `--force` without explicit user approval**, especially after PR creation.
-- **Do not auto-merge** even if checks pass.
+- **Never enable GitHub auto-merge**, and merge only as section 4 allows.

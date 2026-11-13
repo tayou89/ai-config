@@ -1,62 +1,19 @@
 ---
 name: resolve-conflict
-description: Analyze git push/rebase/merge conflicts, record resolution plan as a version revision, and resolve after user approval.
+description: Resolve git merge, rebase, cherry-pick, or push conflicts within the authorized task, keeping both sides' intent, and ask only when the resolution needs a new decision.
 ---
 
 # Resolve Conflict Workflow
 
-## 1. Assess Conflict State
+Conflicts are routine when tasks work in their own worktrees and merge the base into their branches, so resolve them within the authorized task (user decision, 2026-11-13).
 
-```bash
-git status
-git diff --name-only --diff-filter=U   # conflicted files
-```
-
-## 2. Analyze Cause
-
-- Check what commits were added to remote (`git log origin/main --oneline`)
-- Compare both sides' changes in conflicted files
-- Identify conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`) location and content
-
-## 3. Add Plan Revision
-
-Add a **new version at the top** of the existing plan file (`claude-plans/plan-{feature-name}.md`):
-
-```markdown
-## v{N} — {YYYY-MM-DD} | PENDING APPROVAL
-
-### Changes from v{N-1}
-- Add conflict resolution steps
-
-### Conflict Cause
-- What happened (remote changes)
-- Which files, where conflicts occurred
-
-### Conflict Details
-| Item | Local commit | Remote current |
-|------|-------------|----------------|
-| ... | ... | ... |
-
-### Resolution Steps
-1. Step-by-step resolution plan
-2. ...
-```
-
-Mark previous version as `SUPERSEDED`.
-
-## 4. Request Approval
-
-Summarize and present to user. **Wait for explicit approval** before starting resolution.
-
-## 5. Resolve After Approval
-
-Mark version as `APPROVED` and proceed:
-- Rebase conflict: `git rebase --abort` → clean pull → reapply changes
-- Merge conflict: resolve → `git add` → `git merge --continue`
-- Commit & push
+1. Inspect the current operation, the actual target branch, the common base, both sides' changes, and what each meant to do (`git status`, `git log --merge`, the conflicted files from `git diff --name-only --diff-filter=U`).
+2. Resolve mechanical conflicts within the authorized task without asking, keeping both sides' intent. Ask only when the resolution needs a new product decision, discards work, or widens the approved scope; who wrote a line does not decide that.
+3. Resolve source files first, then regenerate derived files (generated rule copies, lock files) with their generator instead of editing them by hand. Inspect the combined diff and rerun the checks the resolution affects.
+4. Continue the merge, rebase, or cherry-pick. Do not abort, reset, take a whole side, or reapply a whole branch by default. On a task branch already pushed, merge the base in rather than rebasing.
+5. When the resolution changes a planned design, record it as a new version of the plan.
 
 ## Rules
 
-- No `git push --force` without user confirmation
-- Never arbitrarily overwrite the other side's changes
-- Verify both sides' changes are preserved after resolution
+- Never force-push without the user's confirmation.
+- Verify both sides' changes are preserved after resolution.

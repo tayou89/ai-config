@@ -25,6 +25,8 @@ Create the output folder if missing, write the brief to `<output folder>/review-
 codex exec -m gpt-6-astra -c model_reasoning_effort="xhigh" -s read-only -C "<project root>" -o "<output folder>/review-<topic>.md" "$(cat "<output folder>/review-brief-<topic>.md")" </dev/null
 ```
 
+When the project uses worktrees, the project root here and the artifact paths in the brief are the task's worktree, since the original checkout shows the base branch before the merge (user decision, 2026-11-13).
+
 `-m` and `-c model_reasoning_effort` follow the reviews row of the work-type table in `decisions-and-collaboration`: Codex's strongest model at xhigh, set here so the Codex app's own default does not decide it (user decision, 2026-11-08). Do not drop to a cheaper model or lower effort to save quota until a comparison on real reviews shows it finds as much; change the model name when a stronger one ships. `-s read-only` lets it read any file but write none, `-o` saves its final answer, and closing stdin keeps piped input out of the prompt. Leave out `--ephemeral` so Codex keeps the session log and the run shows in its usage history. Add `--skip-git-repo-check` outside a git repository. If `codex` is missing, fails, or the quota check stops it, say why and run one fresh same-family subagent with the same brief instead, at the strongest model and xhigh; this invocation approves that one agent.
 
 The brief states:

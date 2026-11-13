@@ -7,7 +7,7 @@ description: Write implementation plans and get user approval before starting no
 
 ## 1. Prepare claude-plans Folder
 
-Ensure `claude-plans/` exists in the project root. Verify `claude-plans/` is in global gitignore (`~/.gitignore_global`) and `core.excludesfile` is set.
+Ensure `claude-plans/` exists in the project root, the original checkout's when the project uses worktrees: the worktree guard leaves it writable there, and a plan must outlive the task's worktree (user decision, 2026-11-13). Verify `claude-plans/` is in global gitignore (`~/.gitignore_global`) and `core.excludesfile` is set.
 
 ## 2. Determine Plan File
 

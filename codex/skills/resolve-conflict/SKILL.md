@@ -9,7 +9,9 @@ Follow the current user request, applicable project instructions, and Codex perm
 
 Inspect `git status`, the active operation, current/upstream branches, conflicted paths, both sides' commits, and the relevant base. Use the actual upstream, not an assumed main branch.
 
-Explain the cause and intended resolution. Record it in the existing plan if it changes a planned design. Resolve routine conflicts within the already authorized work; ask when conflicting product intent, destructive loss, or a new scope requires a user decision.
+Explain the cause and intended resolution. Record it in the existing plan if it changes a planned design. Resolve routine conflicts within the already authorized work; ask when conflicting product intent, destructive loss, or a new scope requires a user decision. Who wrote a line does not decide that.
+
+Resolve source files first, then regenerate derived files (generated rule copies, lock files) with their generator instead of editing them by hand. On a task branch already pushed, merge the base in rather than rebasing (user decision, 2026-11-13).
 
 Preserve the intended behavior from both sides. Do not accept all of one side, abort a rebase, reset, or reapply a whole branch by default. Resolve the current operation's files, check the combined diff and markers, run relevant verification, stage only resolved paths, and continue with the corresponding merge/rebase/cherry-pick command.
 
