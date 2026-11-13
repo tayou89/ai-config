@@ -39,4 +39,4 @@ At the milestone end, write the report from the vault template: how to try the d
 
 ## Quality bar
 
-Apply the vault's quality criteria for the project's kind, including the reviews they require before the first public launch and before adding payments.
+Apply the vault's quality criteria for the project's kind, including the reviews they require before the first public launch and before adding payments. Before a milestone's first production deploy, show on the test deploy that the operations plan works as written: logs and errors arrive where it shows them, a test alert reaches its receiver, and its rollback or restore steps have run once.
