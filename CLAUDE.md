@@ -17,6 +17,7 @@ Hooks enforce these rules and say why when they stop or ask; follow their messag
 - Starting a session needs a model and effort; a start while the computer is overloaded goes ahead without asking, and the session tells the user the load in one line; task-list, next-step-box, question, caption, and title text must be in the reply language (user decisions, 2026-11-09, 2026-11-11, and 2026-11-12).
 - Writing code or screen files, through edits or the shell, inline scripts included, and Figma writes are refused until this session, or this subagent, has loaded the skills their trigger names with the Skill tool (user decision, 2026-11-12).
 - Notices never block: `[CONFIG SYNC]` when this computer and the configuration repository differ, `[PROJECT GOAL]` when the project rules have no goal heading (user decision, 2026-11-12), `[BULLETIN]` at a user turn for session-bulletin lines the session has not seen (user decision, 2026-11-13), `[LANGUAGE REMINDER]` after a progress line in another language, and `[PLAN CODE REMINDER]` before writing a plan file.
+- A question that points elsewhere in the chat instead of showing what it asks about gets a `[BACK-REFERENCE]` notice in the next-step box and is sent back in a question dialog or closing message (user decision, 2026-11-13).
 
 ## Skill Triggers
 
@@ -60,10 +61,6 @@ Load each skill below with the Skill tool before the first action of its task ty
 - **Characterize each option on five axes**: When presenting two or more alternatives, compare every option on accuracy, safety and reversibility, standardness, design fit, and effort, as `decisions-and-collaboration` defines them, and state the recommendation and why; a yes/no approval needs no axes.
 - **Verify "standard" by citation**: Before calling an approach standard in any field, cite its primary specification for a formal standard, or two or more independent, relevant implementations or authorities for an established practice (e.g. AWS Builders' Library, Google SRE, Redux) and where they stop matching this case; otherwise call it a context-specific choice and justify it (user decision, 2026-11-13). Count workarounds removed vs. introduced; moving one elsewhere is "workaround relocation", not a standard fix.
 - **Choose for the intended lifetime**: In every task, choose and recommend the standard approach that meets the agreed outcome over its intended lifetime, naming its limits and the changes considered; judge by confirmed requirements, approved direction, and observed failures, not speculative features or unexamined assumptions such as timing margins or today's scale. Required work is part of the task: effort never justifies a weaker result, since the user prefers more work upfront over rework later, and a needed scope change is raised, not shortcut (user decision, 2026-11-13).
-
-## Retroactive Compliance
-
-When a new rule is added, audit all current project deliverables for violations. Propose agents if scope is large (with approval). Report and fix violations found.
 
 ## Visibility and Git Hygiene
 
