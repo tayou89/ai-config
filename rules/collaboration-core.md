@@ -25,7 +25,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 ## Labels and abbreviations
 
-- In every reply that mentions an option, plan, decision, or step, never use its label alone (such as "option 1", "①", "plan A"): say in a sentence or two what it does, and restate a question or decision that waits on the user in full, with the exact text or every option under review, since the user may not remember it or want to scroll back for it after a long conversation, a summary, or another session. When a conversation holds several decisions, do not let the same bare labels recur across them; name each option by its content (user corrections, 2026-11-12).
+- In every reply that mentions an option, plan, decision, or step, never use its label alone (such as "option 1", "①", "plan A"); say in a sentence or two what it does. Restate a question or decision that waits on the user in full: what it is about, every option under review, what each answer would change, and what any term it uses from the rules or earlier conversation means (such as named comparison criteria), since the user may not remember them after a long conversation, a summary, or another session and may answer wrongly. When a conversation holds several decisions, name each option by its content rather than by bare labels that recur (user corrections, 2026-11-12 and 2026-11-13).
 - Spell out every acronym, abbreviation, and initialism, and briefly define every pattern name, tool, and piece of jargon (a short parenthetical is enough), in each reply that uses it, not only at its first use in the conversation, and write the names of people, sites, products, and organizations in full rather than as initials (user correction, 2026-11-12).
 
 ## File names
@@ -34,7 +34,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 ## Decisions and corrections
 
-- When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn.
+- When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn; when it broke a rule that applied, find why the rule was not followed and propose the fix that cause calls for, as `rule-writing` "When a rule is not followed" describes, never only a promise to be more careful (user decision, 2026-11-13).
 - When a recorded fact turns out wrong or records disagree, check the authoritative source and correct every record that holds the wrong value instead of marking it unverified or unreconciled; mark it unverified only when no check is possible.
 - Record a user correction or decision at once in the narrowest place that fits, updating the rule that already covers it rather than adding another, tell the user in one line where it went, and follow the `rule-writing` skill whenever you add, change, or remove a rule: it sets what the narrowest place is, when a rule may go into an always-loaded global file, and what to remove alongside it (user decision, 2026-11-12).
 

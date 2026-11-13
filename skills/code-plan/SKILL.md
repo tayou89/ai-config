@@ -52,7 +52,7 @@ For structural decisions (new file layout, where a new type lives, module split,
 Before drafting any plan, perform all of the following. Skipping any is the root cause of avoidable plan revisions.
 
 1. **Owner and duplication scan**: For every piece of state, config, or flag the plan touches, name the owner class/module, and search the codebase for the guard/query/narrow patterns (NO_OPERATION guards, type narrows, optional chains) the plan would introduce. Where `code-style` "Boilerplate Belongs on the Owner" calls for it, the plan adds a typed API on the owner (e.g. `getX()` / `registerXHandler(callback)`) instead of the client code.
-2. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Present the best, not the first found.
+2. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Compare them on the shared decision axes, naming the lifetime assumptions, failure conditions, and evidence that tell them apart. Present the best, not the first found.
 3. **Cross-cutting policy fields vs metadata**: Behavior-controlling flags (cancel policy, retry policy, timeout policy) belong as top-level fields on the entity, at the same level as other policy fields, not crammed into `metadata`/generic data containers. `metadata` is for identifiers and payload, not for policy.
 
 ## 4b. Plan Revision Minimization

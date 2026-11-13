@@ -26,6 +26,11 @@ Apply before adding, changing, moving, or removing a rule, skill, hook, or memor
 - Write a hook's added context as one or two short factual sentences, not as a system command, since notices that read like commands can be taken for prompt injection (text pretending to be instructions).
 - Write global rules in English and keep them tool-neutral so every AI tool can use them; user-facing replies and project documents follow the user's language.
 
+## When a rule is not followed
+
+- When a rule that applied was not followed, find the cause from the transcript and the rule text of that time before proposing a fix, and say which it was with the evidence (user decision, 2026-11-13): no rule covered the case; the wording was vague or named a narrower case; the rule was not loaded at that moment (a skill not loaded, a reference not read, text cut by a compaction or a size limit); another instruction conflicted with it; or the model's habit overrode a clear rule that was loaded.
+- Propose the fix that the cause calls for and show it to the user like any rule change: write or sharpen the sentence; move it where it loads when needed (a trigger, an always-loaded file, the top of a skill); remove the conflict; restore text lost in a cut; or, for a habit that recurs against a clear, loaded rule, a hook or check on the triggering action or a question for the independent reviewer. A promise to be more careful is not a fix.
+
 ## Size
 
 - The repository's commit check measures always-loaded rules in bytes and stops a commit over budget; when it does, make room by removing or moving text rather than raising the budget, unless the user decides otherwise.
