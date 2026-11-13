@@ -52,6 +52,8 @@ Read the matching skill before the task. Paths below are relative to this global
 | JavaScript-to-TypeScript conversion | [typescript-migration](skills/typescript-migration/SKILL.md) |
 | Python writing, tooling, and asyncio code | [python](skills/python/SKILL.md) |
 | Substantial implementation planning | [code-plan](skills/code-plan/SKILL.md) |
+| Planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report (read the vault, never write it) | [knowledge-vault](skills/knowledge-vault/SKILL.md) |
+| Any work in a project whose rules adopt milestone delivery | [milestone-delivery](skills/milestone-delivery/SKILL.md) |
 | Application configuration or environment setup | [config-files](skills/config-files/SKILL.md) |
 | Integration/runtime tests with external dependencies | [integration-testing](skills/integration-testing/SKILL.md) |
 | Git commits | [git-commit](skills/git-commit/SKILL.md) |
