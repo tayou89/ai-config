@@ -46,6 +46,8 @@
     ]
   },
   "model": "opus[1m]",
+  "cleanupPeriodDays": 90,
+  "desktopSessionCleanupPeriodDays": 90,
   "attribution": {
     "commit": "",
     "pr": "",
