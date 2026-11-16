@@ -43,17 +43,17 @@ Choose each run's model and reasoning effort by its work type from this table (u
 
 | Work type | Start at | Raise to after a verified failure |
 | --- | --- | --- |
-| Main session (relaying and managing sessions) | Strongest · xhigh, since it caps every session it starts | — |
+| Main session, and any session that starts and manages others, such as a project's role session (relaying and managing sessions) | Strongest · xhigh, since it caps every session it starts | — |
 | Reviews (independent, code, security) and second opinions | Strongest · xhigh | max, only with the user's approval |
 | Code with many hidden edge cases (parsers, concurrency, security, data migration, anything that can lose data or money) | Strongest · xhigh | max, only with the user's approval |
 | Judgment work: decisions and plans, architecture, screen and UX design, decision and research reports, writing rules, other code changes, exhaustive audits | Strongest · high | Strongest · xhigh |
-| Checklist review against written rules | Smaller · high | Strongest · high |
-| Mechanical or read-only work: finding files, captures, format and link checks, collecting logs or numbers, applying an exact edit already decided | Smaller · medium | Smaller · high, then strongest · high |
+| Checklist review against written rules, including a review of captures, comparison boards, or a diff before showing or committing | Smaller · high | Strongest · high |
+| Mechanical or read-only work: finding files, taking captures, format and link checks, collecting logs or numbers, applying an exact edit already decided | Smaller · medium | Smaller · high, then strongest · high |
 
 - Never start judgment work, reviews, or edge-case-heavy code on the smaller model or below high, however small it looks: their results decide what the user acts on and what later work builds on, so a weak first pass costs more than it saves. Give work that mixes types the highest row any part needs, and use the judgment row when unsure.
 - A verified failure is a failing check or test the run could not fix, a reviewer's finding that reproduces, or the user's correction of something missed. Then raise one step and say why in one line: raise effort when the run skipped a file, step, or check, and the model when it was wrong with full context. Do not raise on a hunch, and start the next task from the table again.
 - Set the values with the starting tool's own options and state them in one line as the run starts (for example, "smaller · medium: captures only"). A session cannot start runs above its own model or effort, so keep the main session at its row. This includes a proposed session: one started or proposed without them inherits this session's level, and a hook denies such a call. Project rules come first.
-- A session cannot change its own model or effort. When its level clearly mismatches the row of the work it starts, propose the change once in one line, and do not repeat a declined proposal in that session.
+- A session cannot change its own model or effort. When its level clearly mismatches the row of the work it starts, propose the change once in one line, and do not repeat a declined proposal in that session. When a running session takes on the main row's role (the user designates it, it is moved to the top level, or it becomes a project's role session), the session that hands it the role raises it to that row with the session-effort tool before it starts sessions, or proposes that once when the user handed it the role, since what it starts cannot run above it.
 - Before a run that draws on a limited usage quota, read the remaining quota when the tool can do so without spending it. If the quota cannot cover the run, say so with the reset time and use the fallback reviewer rather than a weaker model.
 
 ## Working alongside other sessions
