@@ -1,0 +1,21 @@
+<!-- Generated from shared-rules/skill-triggers.md by scripts/sync-shared-rules.py -->
+
+# Skill Triggers
+
+- **JS to TS conversion**: Read `typescript-migration` before starting. Grep for external `this.xxx` property access and verify callback values are preserved.
+- **Code writing/editing**: Read `code-style` before writing or proposing any code change, one-off scripts included, plus `typescript` or `python` for the files each covers.
+- **Non-trivial implementation**: Use `code-plan` to write a plan and wait for explicit approval before coding. Simple Q&A, explanations, or minor fixes (typos, 1-2 line changes) skip this. In a project that adopts `milestone-delivery`, that skill sets which steps need approval.
+- **Knowledge vault**: Read `knowledge-vault` before planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report.
+- **Milestone delivery**: Read `milestone-delivery` in a project whose rules adopt it.
+- **Git commit**: Use `git-commit` when a unit of work completes and finish it through the repository's recorded Git workflow without asking: this standing rule is the user's request for the routine steps that workflow authorizes (commit, push, and, where it uses them, pull request, guarded merge, and cleanup), not for deploys, and the skill's checks stand where the approval was (user decisions, 2026-11-09 and 2026-11-13). Stop and ask only when a check fails and cannot be fixed within the task, or when a command guard asks.
+- **Git conflict**: Use `resolve-conflict` on push/rebase/merge conflicts.
+- **GitHub PR create**: Use `pr-create` when creating or updating any pull request.
+- **Integration/runtime test**: Read `integration-testing` before starting any test against a live or simulated environment (external dependencies: servers, simulators, databases, etc.).
+- **Config or env file**: Read `config-files` before creating or refactoring config modules, `.env` files, or env-driven setup.
+- **Agent use**: Read `agent-usage` before spawning any agent (sub-agent, team agent, parallel agents) or starting another session; it maps the work-type model and effort table to the tool's own options.
+- **Decisions, reviews, sessions**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, choosing the model and effort for a run you start, proposing, starting, or closing another session, or handling design-tool comments.
+- **Reports and plans**: Read `report-writing` before writing or revising a report, plan, review, or decision document read later, or a shared notes folder's index.
+- **Rule writing**: Read `rule-writing` before adding, changing, moving, or removing a rule, skill, hook, memory, or shared setting.
+- **Screen/UX design**: Read `ux-design` before screen or print/PDF document design, design review, UI copy, or design-tool work; for visual design also read `frontend-design`, for motion and interaction `emil-design-eng` (and `apple-design` for gesture-driven UI) with recipes from `web-motion-techniques`, follow the skill roles and conflict order in `ux-design`, read `web-interface-guidelines` before showing or releasing a page, and read `review-animations/SKILL.md` directly (it cannot be invoked) to review motion.
+- **Korean text**: Use `humanizer-ko` when writing or reviewing Korean prose or UI copy that people other than the user will read (product, site, and design-tool copy, resumes, and documents shared beyond the user), not working notes, plans, or reports to the user, giving it the user's own Korean writing as the style sample; it judges prose patterns only, so the user's read-aloud stays the final check.
+- **Product planning and research**: Read `product-planning` before product planning, external research or measurements of your own (logs, tests, data) whose findings feed a recommendation, decision, or report (web pages, video, papers, reviews, public data), vendor or tool selection, pricing and quota research, or setting early-launch criteria, but not for a single fact lookup inside other work; to turn an idea or plan with unrecorded key decisions into settled decisions, use `grilling` as `product-planning` describes.

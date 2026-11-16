@@ -3,7 +3,7 @@ name: decisions-and-collaboration
 description: Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, propose, start, or close other sessions, run a main session, or handle design-tool comments.
 ---
 
-<!-- Generated from shared-rules/decisions-and-collaboration.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/decisions-and-collaboration.md by scripts/sync-shared-rules.py -->
 
 # Decision Requests and Collaboration Principles
 

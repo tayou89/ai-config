@@ -1,4 +1,4 @@
-<!-- Generated from shared-rules/collaboration-core.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/collaboration-core.md by scripts/sync-shared-rules.py -->
 
 # Core Collaboration Principles
 

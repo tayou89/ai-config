@@ -4,7 +4,7 @@ description: Shape reports, plans, reviews, and decision documents read later: t
 user-invocable: false
 ---
 
-<!-- Generated from shared-rules/reports.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/reports.md by scripts/sync-shared-rules.py -->
 
 # Report Writing Principles
 

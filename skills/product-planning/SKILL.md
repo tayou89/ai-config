@@ -4,7 +4,7 @@ description: Apply planning and research principles to product planning, externa
 user-invocable: false
 ---
 
-<!-- Generated from shared-rules/planning.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/planning.md by scripts/sync-shared-rules.py -->
 
 # Planning and Research Principles
 

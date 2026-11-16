@@ -4,7 +4,7 @@ description: Present options for user decisions, record decision status, run che
 user-invocable: false
 ---
 
-<!-- Generated from shared-rules/decisions-and-collaboration.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/decisions-and-collaboration.md by scripts/sync-shared-rules.py -->
 
 # Decision Requests and Collaboration Principles
 

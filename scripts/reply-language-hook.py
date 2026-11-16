@@ -143,7 +143,7 @@ def _make_field_decision(hook_input: dict[str, Any], language: _Language) -> dic
 
     if foreign:
         listed = "\n".join(f"- {field.path}: {field.text[:120]}" for field in foreign)
-        reason = f"The user reads these fields, so write them in {language.name} (CLAUDE.md Language Policy), then call the tool again. Keep code, paths, and names as they are; a field that is only a name, such as a product or tool name, passes once it has a word in {language.name} beside the name.\n{listed}"
+        reason = f"The user reads these fields, so write them in {language.name} (`work-principles` \"Language\"), then call the tool again. Keep code, paths, and names as they are; a field that is only a name, such as a product or tool name, passes once it has a word in {language.name} beside the name.\n{listed}"
 
         return {
             _HOOK_OUTPUT_KEY: {

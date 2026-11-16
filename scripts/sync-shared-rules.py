@@ -40,6 +40,8 @@ CLAUDE_SKILL_FRONTMATTER = "user-invocable: false\n"
 
 # source file -> its section heading in codex/AGENTS.md
 ALWAYS_RULES = {
+    "skill-triggers.md": "## Skill Triggers",
+    "work-principles.md": "## Core Work Principles",
     "collaboration-core.md": "## Core Collaboration Principles",
     "writing.md": "## Shared Writing Principles",
 }
@@ -83,7 +85,7 @@ def read_source(source_file: str) -> str:
 
 
 def make_generated_notice(source_file: str) -> str:
-    return f"<!-- Generated from shared-rules/{source_file} by {SCRIPT_PATH}. Edit the source, not this copy. -->\n\n"
+    return f"<!-- Generated from shared-rules/{source_file} by {SCRIPT_PATH} -->\n\n"
 
 
 def build_skill(source_file: str, name: str, description: str, extra_frontmatter: str) -> str:

@@ -3,7 +3,7 @@ name: report-writing
 description: Shape reports, plans, reviews, and decision documents read later: the first screen, current state only, short tables, plain words, an appendix, and the report check. Apply when writing or revising one, or keeping a shared notes folder and its index.
 ---
 
-<!-- Generated from shared-rules/reports.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/reports.md by scripts/sync-shared-rules.py -->
 
 # Report Writing Principles
 

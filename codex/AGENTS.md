@@ -2,23 +2,13 @@
 
 Apply these reusable preferences across projects. Follow system/developer instructions, the current user request, and more specific project instructions. Keep project details in the project. Existing authorization for an action remains valid; these rules do not create extra permission gates or authorize unrelated external actions.
 
-## Communication and Rule Maintenance
-
-- Respond in polite Korean unless the user requests another language. Keep reusable AI rules in English, and commit messages in English unless the project's rules choose another language; user-facing plans and explanations follow the requested language.
-- Use clear subjects, concrete actions, and consistent names. Briefly explain unfamiliar terms when they matter to the reader's decision.
-- Follow [rule-writing](skills/rule-writing/SKILL.md) before adding, changing, or removing a rule, skill, or memory.
-
 ## Engineering and Design
 
-- When something fails or behaves unexpectedly, in code or anywhere else, investigate and state the root cause before modifying code or proposing instructions or workarounds, and include another session or job changing the same target at the same time among the causes checked (user decision, 2026-11-12). Read actual implementations and consumers; trace caller, callee, dispatch, state transitions, and relevant logs rather than diagnosing from names. Test hypotheses with a check whose results tell them apart, and say so when the cause stays unknown; authorized containment of ongoing harm may come first but is not the fix. Before claiming a fix works or a target is in a stated condition, check it on the target within authorization and report what was observed; when that cannot or may not be done, say so, with the evidence used instead (user decision, 2026-11-13). Re-verify disputed findings and retract incorrect claims.
-- Before structural changes, search for 2–3 analogous local patterns, list affected definitions and callers, and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
-- Compare at least two viable designs for a substantive change; use the planning skill for deeper structural alternatives. In every task, choose and recommend the standard approach that meets the agreed outcome over its intended lifetime, naming its limits and the changes considered; judge by confirmed requirements, approved direction, and observed failures, not speculative features or unexamined assumptions such as timing margins or today's scale. Required work is part of the task: effort never justifies a weaker result, and a needed scope change is raised, not shortcut (user decision, 2026-11-13). Do not label necessary separation or existing patterns as over-engineering.
-- When presenting multiple decision alternatives, compare accuracy, safety and reversibility, standardness, design fit, and effort as the decisions-and-collaboration skill defines them, naming the conditions and changes each option was assessed against. Make the recommendation explicit. Do not use elaborate option labels for a simple approval.
-- Before calling an approach standard in any field, cite its primary specification for a formal standard, or two or more independent, relevant implementations or authorities for an established practice and where they stop matching this case; otherwise call it a personal or context-specific choice and justify it (user decision, 2026-11-13). Count workarounds removed and introduced rather than merely relocated.
-- Fix incorrect types, schemas, contracts, and ownership at their source. Do not conceal defects with casts, suppressions, loose types, or symptom-only wrappers. If a real workaround is necessary, explain why the root fix is infeasible and obtain any missing decision.
+- Before structural changes, search for 2–3 analogous local patterns and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
+- Compare at least two viable designs for a substantive change, using the code-plan skill for deeper structural alternatives, and do not label necessary separation or existing patterns as over-engineering.
+- Fix incorrect types, schemas, contracts, and ownership at their source rather than hiding them with casts, suppressions, loose types, or symptom-only wrappers.
 - Define and export shared types, interfaces, constants, and enums from their provider or genuine shared owner. Reuse definitions; keep derived values local for one consumer and shared when multiple consumers need them.
 - Repeated guard/query/narrowing boilerplate against an owner's internals belongs in an appropriate owner API. Resource cleanup belongs with resource ownership. Keep behavior policy separate from payload data.
-- Search for other occurrences of an identified defect. Fix the affected occurrences within the agreed scope; report unrelated or broader work instead of silently expanding the task.
 
 ## Planning, Verification, and Completion
 
@@ -26,54 +16,78 @@ Apply these reusable preferences across projects. Follow system/developer instru
 - For substantial work, inspect dependencies and uncertainties and prepare a concrete plan. Honor user-requested design/review checkpoints. Existing approval for a concrete implementation covers routine choices and verification within that scope.
 - Validate proposed shared type/signature changes with minimal consumer/provider examples and the project's compiler before treating feasibility as established. Record what was actually checked; do not fabricate a pass or hide unresolved assumptions. If evidence needs an experiment, specify the experiment and possible outcomes.
 - Follow applicable skills even when a plan omits them. When three or more unanticipated type/signature/cast changes appear, pause the affected implementation and revisit the design instead of accumulating workarounds. Continue independent authorized work.
-- Before work, state the outcome and the field's professional acceptance criteria, and aim proposals, recommendations, and answers at that goal rather than a guessed preference; when the user's stated direction departs from it, say how and ask whether to change the direction or the goal. Complete review findings within scope, run appropriate type/lint/test checks, and inspect the final diff before declaring completion, judging the result against those criteria, since passing mechanical checks alone does not show quality (user decision, 2026-11-13). Distinguish existing failures, new failures, checks not run, and actual completion. Do not weaken checks to make them pass.
-- Stop and diagnose failed or partial startup before retrying. Do not run applications against production/staging/live infrastructure on a development machine without explicit authorization and a clear assessment of active connections and possible effects. Use authorized test environments for verification.
 - Drive a browser through `ego-browser nodejs -e '<script>'`, or `ego-browser nodejs -e 'await import("<absolute path>")'` for a longer script file, which the command rules run outside the sandbox; do not start Chrome or another Chromium directly, since inside the macOS sandbox it aborts at startup and shows the user a crash dialog, and if a task needs one anyway, request escalated permissions on its first run (user decision, 2026-11-11).
-- Show the concrete change before an unapproved output-generating build or publication; routine commits and pushes follow the git-commit skill and need no approval, while changes to rules, skills, hooks, and shared settings still need the user's review before they are applied (user decision, 2026-11-09). Do not repeat approval already given for that action. Ordinary read-only checks and reversible work within an authorized task proceed without extra confirmation.
+- Show the concrete change before an unapproved output-generating build or publication. Do not repeat approval already given for that action; ordinary read-only checks and reversible work within an authorized task proceed without extra confirmation.
 - After a commit, update the relevant plan and status records with the hash. Mark a plan complete only when all required work and verification are done; retain unresolved items and update references if the plan is renamed. Preserve a useful handover record when needed.
 
 ## Git, Files, and Security
 
 - Inspect branch and working-tree state before changing branches or committing. Preserve unrelated staged and unstaged changes; do not automatically stash, restore, delete, or amend them. Use isolated working copies when appropriate.
-- Keep local tracking branch names aligned with their remote branches unless the user requests otherwise. Keep temporary test patches separate from deliverable changes and restore only your own temporary changes.
-- Finish each completed unit of work through the repository's recorded Git workflow as the git-commit skill describes, without asking: commit, push, and, where the workflow uses them, pull request, guarded merge, and cleanup (user decisions, 2026-11-09 and 2026-11-13). This does not cover deploys or changes outside the task. Do not rewrite published history, force-push, delete remote refs, bypass a merge check, or merge a PR outside that workflow. Follow the git-commit and PR skills for review and messages.
+- Keep temporary test patches separate from deliverable changes and restore only your own temporary changes.
+- The Git workflow covers only the task's own changes: do not rewrite published history, force-push, delete remote refs, bypass a merge check, or merge a pull request outside that workflow.
 - Use available tools to complete authorized work directly. Do not change authentication, permissions, global Git settings, or external messaging merely because an old Claude workflow did so.
-- Keep secrets out of source, logs, commits, and responses. Use environment configuration and placeholder examples. Mask sensitive values when reporting configuration findings.
-- For archive analysis, extract into a clearly named `extracted/` folder in the authorized workspace and report the relevant files. Preserve originals and user work.
 
 ## Task-Specific Skills
 
-Read the matching skill before the task. Paths below are relative to this global AGENTS.md file; the installer places them in the same Codex home directory.
+Read the matching skill below before the task: a skill named `name` is at `skills/name/SKILL.md` beside this file, where the installer places it. Only load task-relevant skills. These are instruction workflows; Claude settings, hooks, model names, slash commands, commit wrapper, Discord forwarding, and automatic settings-repository pulls are not installed.
 
-| Task | Skill |
-| --- | --- |
-| Code writing/editing or code examples | [code-style](skills/code-style/SKILL.md) |
-| TypeScript or TSX writing and type design | [typescript](skills/typescript/SKILL.md) |
-| JavaScript-to-TypeScript conversion | [typescript-migration](skills/typescript-migration/SKILL.md) |
-| Python writing, tooling, and asyncio code | [python](skills/python/SKILL.md) |
-| Substantial implementation planning | [code-plan](skills/code-plan/SKILL.md) |
-| Planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report (read the vault, never write it) | [knowledge-vault](skills/knowledge-vault/SKILL.md) |
-| Any work in a project whose rules adopt milestone delivery | [milestone-delivery](skills/milestone-delivery/SKILL.md) |
-| Application configuration or environment setup | [config-files](skills/config-files/SKILL.md) |
-| Integration/runtime tests with external dependencies | [integration-testing](skills/integration-testing/SKILL.md) |
-| Git commits | [git-commit](skills/git-commit/SKILL.md) |
-| Git conflicts | [resolve-conflict](skills/resolve-conflict/SKILL.md) |
-| GitHub PR creation/update | [pr-create](skills/pr-create/SKILL.md) |
-| Authorized subagent coordination | [agent-usage](skills/agent-usage/SKILL.md) |
-| Visual design: a new or reshaped screen, layout, typography, color, or motion, or a review of one | [frontend-design](skills/frontend-design/SKILL.md) |
-| Motion and interaction details, or reviewing animations | [emil-design-eng](skills/emil-design-eng/SKILL.md), [review-animations](skills/review-animations/SKILL.md), and for gesture-driven UI [apple-design](skills/apple-design/SKILL.md); recipes in [web-motion-techniques](skills/web-motion-techniques/SKILL.md) |
-| Reviewing web UI code before it is shown or released | [web-interface-guidelines](skills/web-interface-guidelines/SKILL.md) |
-| Writing or reviewing Korean prose or UI copy that people other than the user will read (product, site, and design-tool copy, resumes, documents shared beyond the user), not working notes, plans, or reports to the user | [humanizer-ko](skills/humanizer-ko/SKILL.md), with the user's own Korean writing as the style sample |
-| Turning an idea or plan with unrecorded key decisions into settled decisions, as product-planning describes | [grilling](skills/grilling/SKILL.md) |
-| Screen/UX design, print and PDF document design, design review, UI copy, or design-tool work | [ux-design](skills/ux-design/SKILL.md) |
-| Decision requests, decision records, checkpoint reviews, starting or coordinating other sessions, a main session, or design comments | [decisions-and-collaboration](skills/decisions-and-collaboration/SKILL.md) |
-| Writing or revising a report, plan, review, or decision document read later, or a shared notes folder and its index | [report-writing](skills/report-writing/SKILL.md) |
-| Product planning, external research or measurements of your own (logs, tests, data) that feed a recommendation, decision, or report (not a single fact lookup inside other work) and source selection, vendor/tool selection, or pricing and quota research | [product-planning](skills/product-planning/SKILL.md) |
-| Adding, changing, moving, or removing a rule, skill, hook, or memory, or changing a shared setting | [rule-writing](skills/rule-writing/SKILL.md) |
+The Skill Triggers, Core Work, Core Collaboration, and Shared Writing sections below and the decisions-and-collaboration, product-planning, report-writing, rule-writing, and ux-design skills are generated from the repository's `shared-rules/`; edit the source and regenerate instead of editing installed copies.
 
-The last five skills and the Core Collaboration and Shared Writing Principles below are generated from the repository's `shared-rules/`; edit the source and regenerate instead of editing installed copies.
+## Skill Triggers
 
-Only load task-relevant skills. These are instruction workflows; Claude settings, hooks, model names, slash commands, commit wrapper, Discord forwarding, and automatic settings-repository pulls are not installed.
+- **JS to TS conversion**: Read `typescript-migration` before starting. Grep for external `this.xxx` property access and verify callback values are preserved.
+- **Code writing/editing**: Read `code-style` before writing or proposing any code change, one-off scripts included, plus `typescript` or `python` for the files each covers.
+- **Non-trivial implementation**: Use `code-plan` to write a plan and wait for explicit approval before coding. Simple Q&A, explanations, or minor fixes (typos, 1-2 line changes) skip this. In a project that adopts `milestone-delivery`, that skill sets which steps need approval.
+- **Knowledge vault**: Read `knowledge-vault` before planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report.
+- **Milestone delivery**: Read `milestone-delivery` in a project whose rules adopt it.
+- **Git commit**: Use `git-commit` when a unit of work completes and finish it through the repository's recorded Git workflow without asking: this standing rule is the user's request for the routine steps that workflow authorizes (commit, push, and, where it uses them, pull request, guarded merge, and cleanup), not for deploys, and the skill's checks stand where the approval was (user decisions, 2026-11-09 and 2026-11-13). Stop and ask only when a check fails and cannot be fixed within the task, or when a command guard asks.
+- **Git conflict**: Use `resolve-conflict` on push/rebase/merge conflicts.
+- **GitHub PR create**: Use `pr-create` when creating or updating any pull request.
+- **Integration/runtime test**: Read `integration-testing` before starting any test against a live or simulated environment (external dependencies: servers, simulators, databases, etc.).
+- **Config or env file**: Read `config-files` before creating or refactoring config modules, `.env` files, or env-driven setup.
+- **Agent use**: Read `agent-usage` before spawning any agent (sub-agent, team agent, parallel agents) or starting another session; it maps the work-type model and effort table to the tool's own options.
+- **Decisions, reviews, sessions**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, choosing the model and effort for a run you start, proposing, starting, or closing another session, or handling design-tool comments.
+- **Reports and plans**: Read `report-writing` before writing or revising a report, plan, review, or decision document read later, or a shared notes folder's index.
+- **Rule writing**: Read `rule-writing` before adding, changing, moving, or removing a rule, skill, hook, memory, or shared setting.
+- **Screen/UX design**: Read `ux-design` before screen or print/PDF document design, design review, UI copy, or design-tool work; for visual design also read `frontend-design`, for motion and interaction `emil-design-eng` (and `apple-design` for gesture-driven UI) with recipes from `web-motion-techniques`, follow the skill roles and conflict order in `ux-design`, read `web-interface-guidelines` before showing or releasing a page, and read `review-animations/SKILL.md` directly (it cannot be invoked) to review motion.
+- **Korean text**: Use `humanizer-ko` when writing or reviewing Korean prose or UI copy that people other than the user will read (product, site, and design-tool copy, resumes, and documents shared beyond the user), not working notes, plans, or reports to the user, giving it the user's own Korean writing as the style sample; it judges prose patterns only, so the user's read-aloud stays the final check.
+- **Product planning and research**: Read `product-planning` before product planning, external research or measurements of your own (logs, tests, data) whose findings feed a recommendation, decision, or report (web pages, video, papers, reviews, public data), vendor or tool selection, pricing and quota research, or setting early-launch criteria, but not for a single fact lookup inside other work; to turn an idea or plan with unrecorded key decisions into settled decisions, use `grilling` as `product-planning` describes.
+
+## Core Work Principles
+
+1. **Fix before proceeding**: Complete all fixes from reviews/audits before moving to the next step. Order: fix → checks pass (type check, lint, tests) → commit → next step. Never weaken a check to make it pass, and report existing failures, new failures, and checks not run apart.
+2. **Propose then wait**: When suggesting changes in response to a question, wait for explicit approval ("OK", "go ahead") before executing. Even for comparison questions ("which is better?"), present recommendation and wait for user's choice.
+3. **Complete the scope**: Never silently skip parts of agreed work or self-justify workarounds (suppression comments, loose types, scope omission, symptom-only patches). If blocked, stop and report root cause immediately — let user decide.
+4. **Root cause first**: When something fails or behaves unexpectedly, in code or anywhere else (a screen, a design file, a server, a document), find and state its cause before proposing instructions, workarounds, or fixes, and include another session or job changing the same target at the same time among the causes you check (user decision, 2026-11-12). Test hypotheses with a check whose results tell them apart, and say so when the cause stays unknown. Fix the cause, not the symptom; authorized containment of ongoing harm may come first but is not the fix (user decision, 2026-11-13). Propose a workaround only when a root fix is technically impossible, with why and the alternatives; the user chooses.
+5. **Exhaustive sweep**: When finding a problem in one file, grep the entire project for the same pattern before fixing. Fix all occurrences at once, and report work beyond that pattern instead of silently taking it on. Propose prevention rules if needed.
+6. **Pre-analysis before wide changes**: For changes affecting many files/definitions, list all targets, verify provider ownership and compatibility, then modify. No "change first, fix errors later".
+7. **Prevent recurrence on first correction**: one correction is enough; record it as `collaboration-core` "Decisions and corrections" describes (user decision, 2026-11-12).
+8. **Completeness check**: Before starting, read the project's goal (one or two sentences in its project rules, and for a product other people use also its security and failure-handling goals, as `product-planning` describes) and state in one line how this work serves it, the outcome it must achieve with the field's professional acceptance criteria, and the evidence other than your own judgment that will show it; when the project has no recorded goal, or the request and records leave the work's goal unclear or open to two readings that lead to different work, ask the user before starting rather than guessing, and record the project goal they give in the project rules (user decisions, 2026-11-12 and 2026-11-13). Aim every proposal, recommendation, method, and answer at that goal, not at a direction you guess the user prefers; when the user's stated direction departs from the goal, say how and ask whether to change the direction or the goal (user decision, 2026-11-13). Before declaring done, check the result against the outcome, criteria, and evidence (mechanical checks alone do not show quality), self-verify the whole result for inconsistencies, and cross-check prior decisions so nothing decided earlier is left in its old state.
+9. **Verify, don't assume**: Read the actual implementation, output, or primary source before relying on it, never inferring behavior from names, documentation, or convention; when answering why something happens or proposing a fix, trace caller → callee → handler (including switch/case labels), state, and the ±30s log window end to end. Before claiming a fix works or a target is in a stated condition (a shortcut, a link, a screen), check it on the target within your authorization and report what you observed; when you cannot or may not, say so, with the evidence you used instead (user decision, 2026-11-13). Keep observation and inference apart, and state "need to verify <X>" rather than asserting.
+10. **Re-verify before declaring existing work wrong**: During review/verification phases (plan review, code review, pre-commit check), before labeling existing code/plans as incorrect or "needs fix", trace the actual runtime path through the source — don't reason from naming or pattern. Reviewers tend to pattern-match toward "issues found", producing false-positive corrections that propagate as unnecessary changes. When the user challenges a claim ("are you sure?", "really?", "is that confirmed?"), treat as a re-verification trigger before defending; if disproven, retract the claim immediately, state what was actually correct, and update the affected analysis/plan/diff.
+11. **Stop and diagnose on startup/init failure**: When a process fails to start, comes up partially (some endpoints listening, others not), or behaves inconsistently after a startup attempt, find which component failed and why (env, config, port collision, dependency, code) and fix it before retrying or moving to later steps, never blind restarts or retry loops, since results after an unfinished startup cannot be trusted. Applies to test environments, dev servers, simulators, daemons, and any multi-process startup.
+12. **Production mode execution block**: Never start an application in production, staging, or live mode on a development machine without explicit user approval, whatever selects the mode (an environment variable, a command-line option, or a production-only script). Even after approval, first (1) inspect the config and secrets the mode will load and report whether endpoints point at real production infrastructure, and (2) if so, evaluate which active connections it forms on boot (API writes, databases, message brokers, hardware controllers, subscriptions) and re-confirm, since even a few seconds of startup can affect production. Verify in simulation, sandbox, or test modes instead; production-mode startup belongs only on the production host.
+
+### Language
+
+- Write rules, skills, instruction files, and memory files in English, since Korean text takes about 2.4 times the tokens. Write everything the user reads in polite Korean (존댓말), never 반말 (informal speech), unless the user asks for another language: replies and progress lines, plans, reports, and every field the tool shows the user, even when the brief, rules, tool output, or a label before it is English (user decision, 2026-11-09). Only subagent prompts are English, and commit messages are English unless the project's rules choose another language (user decision, 2026-11-12); quoted code, commands, identifiers, and English rule text under review stay as they are.
+
+### Proposals and options
+
+- **Characterize each option on five axes**: When presenting two or more alternatives, compare every option on accuracy, safety and reversibility, standardness, design fit, and effort, as `decisions-and-collaboration` defines them, and state the recommendation and why; a yes/no approval needs no axes.
+- **Verify "standard" by citation**: Before calling an approach standard in any field, cite its primary specification for a formal standard, or two or more independent, relevant implementations or authorities for an established practice (e.g. AWS Builders' Library, Google SRE, Redux) and where they stop matching this case; otherwise call it a context-specific choice and justify it (user decision, 2026-11-13). Count workarounds removed vs. introduced; moving one elsewhere is "workaround relocation", not a standard fix.
+- **Choose for the intended lifetime**: In every task, choose and recommend the standard approach that meets the agreed outcome over its intended lifetime, naming its limits and the changes considered; judge by confirmed requirements, approved direction, and observed failures, not speculative features or unexamined assumptions such as timing margins or today's scale. Required work is part of the task: effort never justifies a weaker result, since the user prefers more work upfront over rework later, and a needed scope change is raised, not shortcut (user decision, 2026-11-13).
+
+### Git and files
+
+- Local tracking branch names must mirror the remote branch name exactly (e.g. `git checkout -b feature/foo origin/feature/foo`) unless the user asks otherwise. Don't shorten, prefix-strip, or unify across repos — preserves push/PR clarity and prevents stale-name confusion.
+- Compressed files (.gz, .zip): always extract to `extracted/` subdirectory before analysis so the user can open them in the editor. Report with file paths and line numbers. User cleans up extracted folder.
+
+### Security
+
+- Never expose tokens, API keys, passwords in output or logs. Mask when displaying.
+- Never hardcode secrets — use env vars / `.env`, and placeholder values in examples.
+- Never commit `.env` or credential files.
 
 ## Core Collaboration Principles
 

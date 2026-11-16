@@ -18,7 +18,7 @@ Before proposing any code change (fix, feature, refactor), grep the codebase for
 
 - Always prefer **industry standard / best practices** when writing, modifying, or suggesting code.
 - Resolution order: (1) find the standard approach first, (2) workarounds (casts, non-null assertions, loose types) only when standard is technically impossible, (3) if workaround needed, explain why standard is impossible and get user approval.
-- **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (CLAUDE.md "Proposals and Options").
+- **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (`work-principles` "Proposals and options").
 - **Definitions are root causes**: When casts, assertions, or workarounds exist because a type/interface/schema definition is wrong or incomplete, the definition IS the root cause — fix it first. Never classify a workaround as "unavoidable" without verifying the underlying definition is correct and complete.
 - **Never settle for "first working solution"**: Before proposing any fix, refactoring, or design change, evaluate at least 2 alternatives (plans: at least 3, see `code-plan` 4a). Check standard language features before introducing new types or cross-module imports. Verify dependency direction, ownership, and naming. Present the best solution, not the first one found.
 - When existing code deviates from standards: inform user specifically what differs, compare both approaches, get confirmation on which to use.

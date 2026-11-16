@@ -200,7 +200,7 @@ class SkillGateHookTest(unittest.TestCase):
     def test_edit_is_refused_until_its_skills_load(self) -> None:
         self.assertEqual(
             self._read_reason(self._decide()),
-            "Writing `b.py` needs `code-style` and `python` loaded with the Skill tool first (CLAUDE.md Skill Triggers), and this session has no finished Skill-tool load of them since its start or last compaction.",
+            "Writing `b.py` needs `code-style` and `python` loaded with the Skill tool first (CLAUDE.md \"Skill Triggers\"), and this session has no finished Skill-tool load of them since its start or last compaction.",
         )
         self._load(CODE_STYLE)
         self.assertIn("needs `python` loaded", self._read_reason(self._decide()))

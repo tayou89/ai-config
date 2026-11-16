@@ -4,7 +4,7 @@ description: Apply screen and UX design principles to screen design, print and P
 user-invocable: false
 ---
 
-<!-- Generated from shared-rules/design.md by scripts/sync-shared-rules.py. Edit the source, not this copy. -->
+<!-- Generated from shared-rules/design.md by scripts/sync-shared-rules.py -->
 
 # Screen and UX Design Principles
 
