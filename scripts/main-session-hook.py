@@ -20,7 +20,10 @@ rule missing from its context (2026-11-13). This hook puts the facts back:
 
 Hook input carries no session lineage, so the hook reads the desktop app's
 session records through `session_lineage`; when they or the app's session
-variable are missing, as in a terminal session, the hook adds nothing. The
+variable are missing, as in a terminal session, the hook adds nothing. A
+top-level session whose title its project's role list marks `(not main)`,
+read through `project_rules` from the hook input's folder, gets nothing
+either, since the user set that role apart (user decision, 2026-11-16). The
 conversation part is estimated from the transcript as the last request's
 input tokens minus the first request's, which matched the app's Messages
 category within 2.6% on 2026-11-13, reading high as the fixed part grows
@@ -40,7 +43,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from session_lineage import count_started_sessions
+from project_rules import list_not_main_role_titles
+from session_lineage import count_started_sessions, read_host_session_record, read_session_title
 
 _HOOK_NAME = "main-session-hook"
 _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
@@ -56,6 +60,7 @@ _AGENT_ID_KEY = "agent_id"
 _TOOL_NAME_KEY = "tool_name"
 _TOOL_INPUT_KEY = "tool_input"
 _TRANSCRIPT_PATH_KEY = "transcript_path"
+_CWD_KEY = "cwd"
 _BACKGROUND_KEY = "run_in_background"
 _USER_PROMPT_SUBMIT = "UserPromptSubmit"
 _PRE_TOOL_USE = "PreToolUse"
@@ -128,7 +133,7 @@ def _make_notice(hook_input: dict[str, Any]) -> str | None:
     elif event == _USER_PROMPT_SUBMIT:
         return _make_turn_notice(hook_input)
     elif event == _PRE_TOOL_USE and _is_writing_call(hook_input):
-        return _TOOL_NOTICE if count_started_sessions() else None
+        return _TOOL_NOTICE if _count_led_sessions(hook_input) else None
     else:
         return None
 
@@ -141,7 +146,7 @@ def _read_hook_input() -> dict[str, Any]:
 
 
 def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
-    count = count_started_sessions()
+    count = _count_led_sessions(hook_input)
 
     if count:
         transcript = _read_transcript_records(hook_input.get(_TRANSCRIPT_PATH_KEY))
@@ -152,6 +157,29 @@ def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
         return " ".join(lines)
     else:
         return None
+
+
+def _count_led_sessions(hook_input: dict[str, Any]) -> int:
+    """The sessions this one leads as a main session: none when its project's rules mark its role `(not main)`."""
+    record = read_host_session_record()
+
+    if record is not None and not _is_set_apart_from_main(record, hook_input):
+        return count_started_sessions(record)
+    else:
+        return 0
+
+
+def _is_set_apart_from_main(record: dict[str, Any], hook_input: dict[str, Any]) -> bool:
+    title = read_session_title(record)
+    folder = _get_session_folder(hook_input)
+
+    return bool(title) and title in list_not_main_role_titles(folder)
+
+
+def _get_session_folder(hook_input: dict[str, Any]) -> Path:
+    folder = hook_input.get(_CWD_KEY)
+
+    return Path(folder).resolve() if isinstance(folder, str) and folder else Path.cwd()
 
 
 def _is_writing_call(hook_input: dict[str, Any]) -> bool:

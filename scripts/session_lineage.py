@@ -22,6 +22,7 @@ _SESSION_RECORD_SUFFIX = ".json"
 _SPAWNED_FROM_KEY = "spawnedFrom"
 _SESSION_ID_KEY = "sessionId"
 _DETACHED_KEY = "lineageDetached"
+_TITLE_KEY = "title"
 _ENCODING = "utf-8"
 
 
@@ -30,18 +31,22 @@ def read_host_session_record() -> dict[str, Any] | None:
     return _read_session_record(_get_host_session(), _get_records_directory())
 
 
-def count_started_sessions() -> int:
-    """How many sessions this session started, or 0 when it is under another session or not an app session."""
-    host_session = _get_host_session()
-    records = _get_records_directory()
-    record = _read_session_record(host_session, records)
+def count_started_sessions(record: dict[str, Any]) -> int:
+    """How many sessions the session with this record started, or 0 when it is under another session."""
+    session_id = record.get(_SESSION_ID_KEY)
 
-    if record is not None and not is_under_another_session(record):
-        paths = records.glob(_SESSION_RECORD_PATTERN)
+    if isinstance(session_id, str) and session_id and not is_under_another_session(record):
+        paths = _get_records_directory().glob(_SESSION_RECORD_PATTERN)
 
-        return sum(1 for path in paths if _is_started_by(path, host_session))
+        return sum(1 for path in paths if _is_started_by(path, session_id))
     else:
         return 0
+
+
+def read_session_title(record: dict[str, Any]) -> str:
+    title = record.get(_TITLE_KEY)
+
+    return title.strip() if isinstance(title, str) else ""
 
 
 def is_under_another_session(record: dict[str, Any]) -> bool:

@@ -37,6 +37,14 @@ MAIN_SESSION = "local_main"
 CHILD_SESSION = "local_child"
 GRANDCHILD_SESSION = "local_grandchild"
 OTHER_SESSION = "local_other"
+MANAGEMENT_ROLE = "웹사이트 관리"
+DESIGN_ROLE = "웹사이트 디자인"
+AGENTS_FILE = "AGENTS.md"
+CLAUDE_FILE = "CLAUDE.md"
+MANAGEMENT_ITEM = f"- `{MANAGEMENT_ROLE}`: the main session."
+DESIGN_ITEM = f"- `{DESIGN_ROLE}` (not main): design work, which opens short-lived sub-sessions."
+ROLE_LIST = "\n".join(["## Role sessions (user decisions, 2026-11-13)", "", MANAGEMENT_ITEM, DESIGN_ITEM, ""])
+MISPLACED_ROLE_LIST = "\n".join(["## Role sessions", "", MANAGEMENT_ITEM, "", "## Notes", "", DESIGN_ITEM, ""])
 FIRST_REQUEST_TOKENS = 90_000
 SKILL_LOADED_AT = "2026-11-11T09:28:44.763Z"
 SKILL_LOADED_EPOCH = 1_794_389_324.763
@@ -70,8 +78,10 @@ class MainSessionHookTest(unittest.TestCase):
         self._claude_home = self._root / "claude"
         self._records = self._home / RECORDS_PATH
         self._transcript = self._root / "transcript.jsonl"
+        self._project = self._root / "project"
         self._records.mkdir(parents=True)
         self._claude_home.mkdir()
+        (self._project / ".git").mkdir(parents=True)
 
     def tearDown(self) -> None:
         self._directory.cleanup()
@@ -141,6 +151,49 @@ class MainSessionHookTest(unittest.TestCase):
         self._write_record(OTHER_SESSION)
 
         self.assertEqual(self._run_hook(MAIN_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_role_marked_not_main_gets_nothing(self) -> None:
+        self._write_record(MAIN_SESSION, spawned_from=OTHER_SESSION, detached=True, title=DESIGN_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+        hook_inputs: list[dict[str, Any]] = [
+            {EVENT_KEY: USER_PROMPT_SUBMIT},
+            {EVENT_KEY: PRE_TOOL_USE, TOOL_NAME_KEY: "Edit", TOOL_INPUT_KEY: {}},
+        ]
+
+        for hook_input in hook_inputs:
+            with self.subTest(event=hook_input[EVENT_KEY]):
+                self.assertEqual(self._run_hook(MAIN_SESSION, hook_input), "")
+
+    def test_other_role_in_the_same_list_is_still_main(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+
+        self.assertIn(NOTICE_TAG, self._read_turn_context())
+
+    def test_not_main_mark_outside_the_role_list_does_not_count(self) -> None:
+        self._write_record(MAIN_SESSION, title=DESIGN_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
+        self._write_rules(AGENTS_FILE, MISPLACED_ROLE_LIST)
+
+        self.assertIn(NOTICE_TAG, self._read_turn_context())
+
+    def test_role_list_is_read_from_the_project_root_in_any_rules_file(self) -> None:
+        folder = self._project / "src" / "pages"
+
+        self._write_record(MAIN_SESSION, title=DESIGN_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
+        self._write_rules(CLAUDE_FILE, f"# Project\n\n#### Role sessions\n- `{DESIGN_ROLE}` (Not Main): design.\n")
+        folder.mkdir(parents=True)
+
+        self.assertEqual(self._run_hook(MAIN_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT, "cwd": str(folder)}), "")
+
+    def test_session_without_a_title_is_still_main(self) -> None:
+        self._write_main_with_child()
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+
+        self.assertIn(NOTICE_TAG, self._read_turn_context())
 
     def test_session_outside_the_app_gets_nothing(self) -> None:
         self._write_main_with_child()
@@ -269,6 +322,7 @@ class MainSessionHookTest(unittest.TestCase):
         spawned_from: str | None = None,
         detached: bool = False,
         archived: bool = False,
+        title: str | None = None,
     ) -> None:
         record: dict[str, Any] = {"sessionId": session_id, "isArchived": archived}
 
@@ -276,7 +330,12 @@ class MainSessionHookTest(unittest.TestCase):
             record["spawnedFrom"] = {"sessionId": spawned_from, "sideSession": True}
         if detached:
             record["lineageDetached"] = True
+        if title is not None:
+            record["title"] = title
         (self._records / f"{session_id}.json").write_text(json.dumps(record), encoding=ENCODING)
+
+    def _write_rules(self, name: str, text: str) -> None:
+        (self._project / name).write_text(text, encoding=ENCODING)
 
     def _write_transcript(self, *records: dict[str, Any]) -> None:
         lines = [json.dumps(record, separators=(",", ":")) for record in records]
@@ -306,7 +365,7 @@ class MainSessionHookTest(unittest.TestCase):
         hook_input: dict[str, Any],
         extra_environment: dict[str, str] | None = None,
     ) -> str:
-        full_input = {"transcript_path": str(self._transcript), **hook_input}
+        full_input = {"transcript_path": str(self._transcript), "cwd": str(self._project), **hook_input}
         result = self._run_process(session_id, json.dumps(full_input), extra_environment)
 
         self.assertEqual(result.returncode, 0, result.stderr)
