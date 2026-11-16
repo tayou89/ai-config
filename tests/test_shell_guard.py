@@ -975,6 +975,8 @@ THEIRS = "\n## theirs\ntheir text\n"
 MINE_2 = "\n## mine 2\nmore\n"
 MINE_3 = "\n## mine 3\nlast\n"
 NOTES_FILE = "notes.md"
+HOOKED_CALL = "resend(order_id=1, attempt=2)\n"
+HOOK_REWRITTEN_CALL = "resend(\n    order_id=1,\n    attempt=2,\n)\n"
 GITHUB_URL = "https://github.com/example/repository.git"
 NO_OVERLAP_TEXT = "no other session's call overlapped your writes"
 MY_TEXT = "my text\n"
@@ -1841,6 +1843,10 @@ class SessionWritesFixture:
 
         self.run_record_hook(session, POST_TOOL_USE, tool_use, command, {})
 
+    def write_without_hook(self, path: str, text: str) -> None:
+        """Replace a file's content with no record of the write, as a project's formatting hook does after an Edit."""
+        (self.repository / path).write_bytes(text.encode())
+
     def append(self, path: str, text: str) -> None:
         """Write to a file without any hook, as a running command or a person does."""
         with (self.repository / path).open("a", newline="") as file:
@@ -2461,6 +2467,41 @@ class SessionWritesTest(unittest.TestCase):
         self.assertIn("another session edited this file while you wrote it", result.stderr)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
 
+    def test_my_edit_rewritten_by_a_project_hook_is_asked_not_left_out(self) -> None:
+        """An own line a formatting hook rewrote outside the record stops the commit instead of dropping out of it."""
+        head = self.fixture.run_git("rev-parse", "HEAD")
+
+        self.fixture.edit(OWN_SESSION, LOG_FILE, BASE_TEXT, BASE_TEXT + HOOKED_CALL)
+        self.fixture.write_without_hook(LOG_FILE, LOG_BASE.replace(BASE_TEXT, BASE_TEXT + HOOK_REWRITTEN_CALL))
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE, NOTES_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("a project hook", result.stderr)
+        self.assertIn("order_id=1,", result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_change_after_mine_with_only_a_failed_snapshot_of_another_session_is_asked(self) -> None:
+        broken_index = self.fixture.root / "broken-index"
+        command = {"command": "python3 write.py log.md"}
+
+        broken_index.write_text(BROKEN_INDEX_TEXT)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "blind-2", command, broken_index=broken_index)
+        self.fixture.append(LOG_FILE, MINE_2)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "blind-2", command, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_lines_from_before_my_first_write_are_still_left_out(self) -> None:
+        self.fixture.append(LOG_FILE, THEIRS)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE + MINE_1)
+
     def test_every_unproven_file_is_refused_at_once(self) -> None:
         """One refusal names every file and one rerun covers them, so the commit needs one dialog."""
         started = self.fixture.start_command(OTHER_SESSION)
@@ -2872,7 +2913,7 @@ class CommandScopeTest(unittest.TestCase):
 
         temporary.mkdir()
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
-        self.fixture.append(LOG_FILE, MINE_2)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_2)
         result = subprocess.run(
             [
                 sys.executable,

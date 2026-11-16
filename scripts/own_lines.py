@@ -11,6 +11,8 @@ usual case in a shared log.
 A write whose snapshots may also hold another session's change is
 contested: none of its changes is counted as this session's, and those the
 commit would leave out are returned so the caller asks instead of guessing.
+So is a change between writes that no other session's record explains,
+since it may be this session's line rewritten outside the record.
 The record types are named apart from the earlier format's (OwnWrite,
 OwnContent), so a process that loads an older copy of a sibling module
 fails on import instead of reading the new records with the old meaning.
@@ -50,9 +52,19 @@ class RecordedWrite:
 
 @dataclass(frozen=True)
 class FileHistory:
+    """A session's writes to one file, and the file now.
+
+    `unexplained_steps` holds the gaps in the chain of writes that no other
+    session's record leads through: the step of the own write a gap comes
+    before, or one past the last write for what changed since it. Their
+    changes may be this session's own lines rewritten outside the record, by
+    a project hook say, so they are asked about instead of left out.
+    """
+
     first_before: str
     own_writes: tuple[RecordedWrite, ...]
     working_tree: str
+    unexplained_steps: frozenset[int] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -262,17 +274,27 @@ def _build_weave(history: FileHistory) -> tuple[list[_LineRecord], list[list[_Li
 
     for step, write in enumerate(history.own_writes, start=1):
         if write.before != current:
-            weave, _, _ = _apply_version(weave, write.before, LineOrigin.OTHER, -step)
+            weave = _apply_gap(weave, write.before, -step, step in history.unexplained_steps)
             versions.append(_list_live(weave))
         weave, inserted, deleted = _apply_version(weave, write.after, LineOrigin.OWN, step)
         versions.append(_list_live(weave))
         if write.contested:
             _mark_contested(inserted, deleted)
         current = write.after
+    final_step = len(history.own_writes) + 1
     if history.working_tree != current:
-        weave, _, _ = _apply_version(weave, history.working_tree, LineOrigin.OTHER, len(history.own_writes) + 1)
+        weave = _apply_gap(weave, history.working_tree, final_step, final_step in history.unexplained_steps)
         versions.append(_list_live(weave))
     return weave, versions
+
+
+def _apply_gap(weave: list[_LineRecord], text: str, step: int, is_unexplained: bool) -> list[_LineRecord]:
+    """Apply what changed between own writes as others' lines, marked contested when no record explains it."""
+    applied, inserted, deleted = _apply_version(weave, text, LineOrigin.OTHER, step)
+
+    if is_unexplained:
+        _mark_contested(inserted, deleted)
+    return applied
 
 
 def _list_live(weave: list[_LineRecord]) -> list[_LineRecord]:

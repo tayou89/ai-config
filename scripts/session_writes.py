@@ -512,7 +512,9 @@ def load_file_history(
     if own:
         foreign = _list_foreign_writes(session_id, root, path, events)
         own_writes = tuple(_make_recorded_write(event, foreign) for event in own)
-        return FileHistory(_read_blob(root, own[0].before), own_writes, current_text)
+        unexplained = _list_unexplained_steps(root, own, foreign, current_text)
+
+        return FileHistory(_read_blob(root, own[0].before), own_writes, current_text, unexplained)
     else:
         return None
 
@@ -1165,6 +1167,55 @@ def _is_taken_before_own_writes(aligned: Sequence[WriteEvent], event: WriteEvent
         else:
             chain_after = previous.before
     return False
+
+
+def _list_unexplained_steps(
+    root: str,
+    own: Sequence[WriteEvent],
+    foreign: Sequence[WriteEvent | UnknownWrite],
+    working_text: str,
+) -> frozenset[int]:
+    """The gaps in this session's chain of writes that no chain of other sessions' writes bridges.
+
+    A gap is what changed after one own write and before the next, or after
+    the last one; its step is the number of the own write after it, or one
+    past the last. Contents are compared as text, as the line weave compares
+    them, so a file that is gone and an empty one are the same. Only another
+    session's recorded contents explain a gap: a snapshot that failed or a
+    call still running says nothing about what it wrote, so such a gap stays
+    unexplained and the commit asks. Writes that ended before this session's
+    first one cannot bridge a gap, so their contents are not read.
+    """
+    ends = [_read_blob(root, event.after) for event in own]
+    starts = [*(_read_blob(root, event.before) for event in own[1:]), working_text]
+    edges = [
+        (_read_blob(root, event.before), _read_blob(root, event.after), event.end)
+        for event in foreign
+        if isinstance(event, WriteEvent) and event.end >= own[0].start
+    ]
+    gaps = enumerate(zip(own, ends, starts), start=2)
+
+    return frozenset(
+        step
+        for step, (previous, end, start) in gaps
+        if end != start and not _is_bridged(end, start, previous.start, edges)
+    )
+
+
+def _is_bridged(start: str, target: str, since: float, edges: Sequence[tuple[str, str, float]]) -> bool:
+    """Whether other sessions' writes, as (before, after, end) texts, that ended after `since` lead from one content
+    to another."""
+    reached = {start}
+    frontier = [start]
+
+    while frontier:
+        content = frontier.pop()
+        following = [after for before, after, end in edges if before == content and end >= since]
+        new = [after for after in following if after not in reached]
+
+        reached.update(new)
+        frontier.extend(new)
+    return target in reached
 
 
 def _make_recorded_write(event: WriteEvent, foreign: Sequence[WriteEvent | UnknownWrite]) -> RecordedWrite:
