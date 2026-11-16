@@ -44,6 +44,7 @@ Apply to screen design, print and PDF documents such as résumés and reports, d
 - Do not mix centered text with left-aligned cards or lists on one screen.
 - Build cards of the same kind with the same structure, with or without an image, so text starts on the same line.
 - Review screens at a real phone height (e.g., 812px). An overly tall canvas exaggerates empty space and leads to wrong judgments.
+- Before showing a print or PDF document, check two things with a script and fix or ask about every mismatch: a table of parallel items (each entry's fields in one order, section and heading names, how quantities are phrased), and the rendered PDF's layout (each label on the baseline of the first line beside it, the first item of every section in one size and weight, dates ending in one right-aligned column, no heading or rule left alone at a page foot, and extracted text that keeps reading order with adjacent parts separated) (user corrections, 2026-11-10 and 2026-11-11).
 
 ## States and accessibility
 
@@ -106,3 +107,5 @@ Apply to screen design, print and PDF documents such as résumés and reports, d
 - Keep a copy of the original before large changes, and always inspect a capture yourself after editing. Check that duplication did not bring along wrapper frames and that text is not clipped or overlapping.
 - Keep sample data (names, dates, numbers) consistent across screens that show one flow, and check that totals add up.
 - At the start of every round, list the user's open requests and every unresolved design-tool comment on every page, each with its status, and keep each on the list until it is done or the user drops it (user decision, 2026-11-11).
+- When handing over a design-tool node, give its web link and, for the desktop app, a one-line `bash` block that opens it through the app's URL scheme (Figma: `open "figma://file/<fileKey>?node-id=<a-b>"`), never `open -a Figma "<web URL>"`, which opened the web browser instead (user correction, 2026-11-06); if nothing appears, the app window may sit on another desktop, so tell the user to switch to it rather than falling back to the web.
+- Read design-tool comments through the tool's connector (Figma: `get_comments`, which returned the file's comments on 2026-11-16) and, where it fails, through the signed-in `ego-browser` with `page.fetch("https://www.figma.com/api/file/<fileKey>/comments")`, which is also how to post or resolve them under the permissions `decisions-and-collaboration` sets, since the connector cannot; never switch the user's app windows or desktops to read them (user correction, 2026-11-04).
