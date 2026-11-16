@@ -4,6 +4,19 @@
 It never blocks a tool call and prints nothing. A failure only leaves a write
 unrecorded, which the commit wrapper then treats as someone else's.
 
+With --around it runs a project's PostToolUse hook that may rewrite the file
+the call wrote, such as a formatter, and records that hook's change as one
+more write of the session. Claude Code runs the hooks matching one event in
+parallel, in no set order, so it first waits for this call's own record:
+otherwise the call's after snapshot could already hold the formatter's
+change, and the Edit's reported change would no longer explain it. The
+formatter's change is recorded like a command's: it is the session's unless
+another session's call overlapped it. The project hook gets the payload as
+it came, and its output and exit code pass through.
+
+Usage (in a project's PostToolUse hook command):
+    python3 "$HOME/.claude/scripts/session-writes-hook.py" --around <hook command> [<argument> ...]
+
 For Edit and Write it also records whether the tool's own reported change
 turns the before snapshot into the after snapshot exactly: only then is the
 change surely the session's, since the snapshots also catch whatever other
@@ -21,6 +34,7 @@ from __future__ import annotations
 import functools
 import json
 import os
+import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -38,6 +52,7 @@ from session_writes import (
     find_command_roots,
     find_repository_root,
     get_record_directory,
+    is_pending,
     list_changes,
     read_blob_text,
     read_pending,
@@ -72,23 +87,107 @@ _ADDED_SIGN = "+"
 _NO_NEWLINE_SIGN = "\\"
 _LF = "\n"
 _CRLF = "\r\n"
+_SESSION_ID_KEY = "session_id"
+_TOOL_USE_ID_KEY = "tool_use_id"
+_AROUND_OPTION = "--around"
+_AROUND_SUFFIX = ".around"
+_PROJECT_HOOK_TOOL = "project hook"
+_CALL_RECORD_WAIT_SECONDS = 5.0
+_CALL_RECORD_POLL_SECONDS = 0.05
+_USAGE_EXIT = 1
+_USAGE_TEXT = f"usage: session-writes-hook.py {_AROUND_OPTION} <hook command> [<argument> ...]"
 
 
 def main() -> None:
+    arguments = sys.argv[1:]
+
+    if arguments[:1] == [_AROUND_OPTION]:
+        sys.exit(_run_around(arguments[1:], sys.stdin.buffer.read()))
+    else:
+        _try_recording(_record_tool_call, sys.stdin.read())
+
+
+def _try_recording(record: Callable[[dict[str, Any]], None], payload_text: str | bytes) -> None:
+    """Record from a hook payload; a failure only leaves a write unrecorded, so it never stops the call."""
     try:
-        _record_tool_call(json.load(sys.stdin))
+        record(json.loads(payload_text))
     except Exception as error:
         print(f"session-writes-hook: {type(error).__name__}: {error}", file=sys.stderr)
 
 
-def _record_tool_call(payload: dict[str, Any]) -> None:
-    session_id = payload.get("session_id")
-    tool_use_id = payload.get("tool_use_id")
+def _run_around(command: list[str], payload_text: bytes) -> int:
+    """Run a project hook between snapshots of what the call wrote, and return its exit code.
 
-    if session_id and tool_use_id and payload.get(_EVENT_NAME_KEY) == _PRE_EVENT:
-        _record_call_start(session_id, tool_use_id, payload)
-    elif session_id and tool_use_id:
-        _record_changes(session_id, tool_use_id, payload)
+    Its pending file stays until the hook has ended, failed to start
+    included, so other sessions count it as running meanwhile.
+    """
+    if command:
+        _try_recording(_record_around_start, payload_text)
+        try:
+            result = subprocess.run(command, input=payload_text, check=False)
+        finally:
+            _try_recording(_record_around_changes, payload_text)
+        return result.returncode
+    else:
+        print(_USAGE_TEXT, file=sys.stderr)
+        return _USAGE_EXIT
+
+
+def _record_tool_call(payload: dict[str, Any]) -> None:
+    call = _read_call_ids(payload)
+
+    if call and payload.get(_EVENT_NAME_KEY) == _PRE_EVENT:
+        _record_call_start(*call, payload)
+    elif call:
+        _record_changes(*call, payload, payload.get(_TOOL_NAME_KEY, ""))
+
+
+def _record_around_start(payload: dict[str, Any]) -> None:
+    """Wait for the call's own record, then take the project hook's before snapshots."""
+    call = _read_call_ids(payload)
+
+    if call:
+        session_id, tool_use_id = call
+
+        _wait_for_call_record(session_id, tool_use_id)
+        _record_call_start(session_id, _make_around_id(tool_use_id), payload)
+
+
+def _record_around_changes(payload: dict[str, Any]) -> None:
+    call = _read_call_ids(payload)
+
+    if call:
+        session_id, tool_use_id = call
+
+        _record_changes(session_id, _make_around_id(tool_use_id), payload, _PROJECT_HOOK_TOOL)
+
+
+def _read_call_ids(payload: dict[str, Any]) -> tuple[str, str] | None:
+    """The session and tool call a payload belongs to, or None when either is missing."""
+    session_id = payload.get(_SESSION_ID_KEY)
+    tool_use_id = payload.get(_TOOL_USE_ID_KEY)
+
+    if session_id and tool_use_id:
+        return session_id, tool_use_id
+    else:
+        return None
+
+
+def _make_around_id(tool_use_id: str) -> str:
+    """The pending name of the project hook run for a call, apart from the call's own."""
+    return f"{tool_use_id}{_AROUND_SUFFIX}"
+
+
+def _wait_for_call_record(session_id: str, tool_use_id: str) -> None:
+    """Wait, up to a limit, until the record hook has kept the call's events and dropped its pending file.
+
+    Past the limit the project hook runs anyway: its change then sits in
+    the call's after snapshot or in a gap, and the commit asks about it.
+    """
+    deadline = time.monotonic() + _CALL_RECORD_WAIT_SECONDS
+
+    while is_pending(session_id, tool_use_id) and time.monotonic() < deadline:
+        time.sleep(_CALL_RECORD_POLL_SECONDS)
 
 
 def _record_call_start(session_id: str, tool_use_id: str, payload: dict[str, Any]) -> None:
@@ -147,14 +246,19 @@ def _try_snapshot(scope: SnapshotScope) -> RepositorySnapshot | None:
         return snapshot
 
 
-def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any]) -> None:
-    """Record the call's changes and its unknown writes, then drop its pending file, so it is never in neither."""
+def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any], tool_name: str) -> None:
+    """Record the call's changes and its unknown writes, then drop its pending file, so it is never in neither.
+
+    `tool_name` names who wrote them: the tool itself, whose own reported
+    change is judged for exactness, or a project hook run around it, whose
+    change the tool's report cannot explain.
+    """
     pending = read_pending(session_id, tool_use_id)
+    is_tool_write = tool_name == payload.get(_TOOL_NAME_KEY)
 
     if pending:
         pairs = [(before, _try_snapshot(before.get_scope())) for before in pending.snapshots]
         end = time.time()
-        tool_name = payload.get(_TOOL_NAME_KEY, "")
         changes = [
             (before.root, change)
             for before, after in pairs
@@ -170,7 +274,7 @@ def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any]) 
                 pending.start,
                 end,
                 tool_name,
-                _judge_exactness(payload, root, old, new),
+                _judge_exactness(payload, root, old, new) if is_tool_write else None,
                 RECORD_FORMAT,
             )
             for root, (path, old, new) in changes

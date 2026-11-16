@@ -474,6 +474,11 @@ def read_pending(session_id: str, tool_use_id: str) -> PendingCall | None:
         return None
 
 
+def is_pending(session_id: str, tool_use_id: str) -> bool:
+    """Whether a call's pending file is still there, so its events may not be in the record yet."""
+    return (get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}").exists()
+
+
 def remove_pending(session_id: str, tool_use_id: str) -> None:
     """Drop a call's pending file once its events are in the record, so it is never in neither."""
     pending = get_record_directory() / session_id / f"{tool_use_id}{_PENDING_SUFFIX}"
