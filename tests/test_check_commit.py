@@ -23,7 +23,7 @@ BAD_VALUE = "bad\n"
 FAKE_GITHUB_TOKEN = "gh" + "p_" + "B" * 36
 PASSING_STAND_IN = "import sys\nsys.exit(0)\n"
 FAILING_STAND_IN = "import sys\nsys.exit(1)\n"
-STAND_IN_SCRIPTS = ("sync-shared-rules.py", "check-rule-size.py")
+STAND_IN_SCRIPTS = ("sync-shared-rules.py", "check-references.py", "check-rule-size.py")
 SAMPLE_TEST = '''import os
 import unittest
 from pathlib import Path

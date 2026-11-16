@@ -126,7 +126,13 @@ RUNTIME_SCRIPTS = (
     "worktree-cleanup.py",
     "worktree-guard-hook.py",
 )
-MAINTENANCE_SCRIPTS = ("install.py", "sync-shared-rules.py", "check-commit.py", "check-rule-size.py")
+MAINTENANCE_SCRIPTS = (
+    "install.py",
+    "sync-shared-rules.py",
+    "check-commit.py",
+    "check-references.py",
+    "check-rule-size.py",
+)
 HOOKS_PATH_KEY = "core.hooksPath"
 COMMIT_HOOKS_DIRECTORY = ".githooks"
 MERGE_BY_NAME_KEYS = ("enabledPlugins", "extraKnownMarketplaces", "env")
