@@ -1,8 +1,9 @@
-"""Where a project's rules live, and the role list the session hooks read from them.
+"""Where a project's rules live, their headings, and the role list the session hooks read from them.
 
 A project's rules are the CLAUDE.md, AGENTS.md, and .claude/CLAUDE.md files at
 the root of its Git repository, the nearest folder holding `.git`, so a task
-worktree reads its own copy. The role list is the one
+worktree reads its own copy. A heading is a line of one to six `#` and a
+space; lines split on any line break, Windows `\\r\\n` included. The role list is the one
 `decisions-and-collaboration` "Working alongside other sessions" defines (user
 decision, 2026-11-16): under a "Role sessions" heading of any level, with any
 parenthetical after it, one list item per role session that starts with its
@@ -33,6 +34,10 @@ def find_project_root(folder: Path) -> Path | None:
 
 def list_rules_files(root: Path) -> list[Path]:
     return [root / name for name in RULES_FILES if (root / name).is_file()]
+
+
+def list_headings(text: str) -> list[str]:
+    return [heading.group(1) for line in text.splitlines() if (heading := _HEADING.match(line)) is not None]
 
 
 def list_not_main_role_titles(folder: Path) -> set[str]:

@@ -55,6 +55,17 @@ class ProjectGoalHookTest(unittest.TestCase):
 
         self.assertEqual(self._run_hook(project), "")
 
+    def test_goal_heading_with_windows_line_breaks_counts(self) -> None:
+        project = self._make_project("app", {"CLAUDE.md": RULES_WITH_GOAL.replace("\n", "\r\n")})
+
+        self.assertEqual(self._run_hook(project), "")
+
+    def test_goal_in_nested_claude_rules_file_is_enough(self) -> None:
+        nested_rules = str(Path(".claude") / "CLAUDE.md")
+        project = self._make_project("app", {"AGENTS.md": RULES_WITHOUT_GOAL, nested_rules: RULES_WITH_GOAL})
+
+        self.assertEqual(self._run_hook(project), "")
+
     def test_goal_word_inside_a_longer_heading_does_not_count(self) -> None:
         project = self._make_project("app", {"CLAUDE.md": "# Rules\n\n## Goals for the next release\n"})
 
@@ -105,6 +116,7 @@ class ProjectGoalHookTest(unittest.TestCase):
         (project / ".git").mkdir(parents=True)
         (project / "src").mkdir()
         for file_name, text in rules.items():
+            (project / file_name).parent.mkdir(exist_ok=True)
             (project / file_name).write_text(text, encoding="utf-8")
         return project
 

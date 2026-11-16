@@ -19,19 +19,17 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
+
+from project_rules import find_project_root, list_headings, list_rules_files
 
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _CODEX_HOME_VARIABLE = "CODEX_HOME"
 _DEFAULT_CODEX_HOME = "~/.codex"
 _CHECKOUT_RECORD = Path(".ai-config-install") / "checkout"
-_PROJECT_ROOT_MARKER = ".git"
-_RULES_FILES = ("CLAUDE.md", "AGENTS.md", str(Path(".claude") / "CLAUDE.md"))
-_HEADING = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$", re.MULTILINE)
 _GOAL_HEADINGS = ("goal", "goals", "project goal", "project goals", "목표", "프로젝트 목표")
 _SILENT_SOURCES = ("compact",)
 _HOOK_EVENT = "SessionStart"
@@ -60,19 +58,13 @@ def _read_hook_input() -> dict[str, Any]:
 
 def _add_notice(hook_input: dict[str, Any]) -> None:
     folder = Path(hook_input.get("cwd") or os.getcwd()).resolve()
-    root = _find_project_root(folder)
+    root = find_project_root(folder)
 
     if hook_input.get("source") not in _SILENT_SOURCES and root and root not in _list_excluded_folders():
-        rules_files = [root / name for name in _RULES_FILES if (root / name).is_file()]
+        rules_files = list_rules_files(root)
 
         if rules_files and not any(_has_goal(path) for path in rules_files):
             print(json.dumps(_make_hook_output(root, rules_files)))
-
-
-def _find_project_root(folder: Path) -> Path | None:
-    roots = (directory for directory in [folder, *folder.parents] if (directory / _PROJECT_ROOT_MARKER).exists())
-
-    return next(roots, None)
 
 
 def _list_excluded_folders() -> list[Path]:
@@ -92,7 +84,7 @@ def _expand(path: str) -> Path:
 
 
 def _has_goal(path: Path) -> bool:
-    headings = _HEADING.findall(path.read_text(encoding="utf-8", errors="replace"))
+    headings = list_headings(path.read_text(encoding="utf-8", errors="replace"))
 
     return any(heading.casefold() in _GOAL_HEADINGS for heading in headings)
 
