@@ -69,11 +69,14 @@ FILE_CASES = (
     ("Write", {"file_path": "/a/b.go"}, (CODE_STYLE,)),
     ("Write", {"file_path": "/a/b.sh"}, (CODE_STYLE,)),
     ("Write", {"file_path": "/private/tmp/scratchpad/x.py"}, PYTHON_SKILLS),
+    ("Write", {"file_path": "/n/side-session-notes/local_1/report.md"}, ("report-writing",)),
+    ("Edit", {"file_path": "/n/side-session-notes/local_1/INDEX.md"}, ("report-writing",)),
 )
 PASSING_FILE_CASES = (
     ("Write", {"file_path": "/a/README.md"}),
     ("Edit", {"file_path": "/a/settings.json"}),
     ("Write", {"file_path": "/a/claude-plans/plan-x.md"}),
+    ("Write", {"file_path": "/n/side-session-notes/bulletin.md"}),
     ("Write", {"file_path": "/a/Makefile"}),
     ("Read", {"file_path": "/a/b.py"}),
 )
@@ -99,6 +102,7 @@ COMMAND_CASES = (
     ("bash -c \"cat > a.sh <<'X'\necho hi\nX\"", "`a.sh`", (CODE_STYLE,)),
     ("bash -c 'echo x > a.py' > out.log", "`a.py`", PYTHON_SKILLS),
     ("python3 -Sc 'import os\nprint(os.sep)'", "this command's inline program", PYTHON_SKILLS),
+    ("cat > '/n/side-session-notes/local_1/r.md' <<'EOF'\ntext\nEOF", "`r.md`", ("report-writing",)),
     ("uv run -q python - <<'EOF'\nx\nEOF", "this command's inline program", PYTHON_SKILLS),
 )
 PASSING_COMMANDS = (

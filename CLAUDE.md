@@ -6,7 +6,7 @@ All Claude rules, skills, CLAUDE.md files, and memory files (MEMORY.md index + i
 
 ## Document Writing
 
-When writing or revising documents, plans, reports, or explanations, follow the project-agnostic [Shared Writing Principles](rules/writing.md). Use semantic structure rather than a blanket one-sentence-per-bullet format.
+When writing or revising documents, plans, reports, or explanations, follow the project-agnostic [Shared Writing Principles](rules/writing.md).
 
 ## Hook-Enforced Rules
 
@@ -15,7 +15,7 @@ Hooks enforce these rules and say why when they stop or ask; follow their messag
 - The shell guard asks the user before a push that is not routine, a production, staging, or live-mode run, and a commit of lines the session's write record does not show as its own (user decisions, 2026-11-08 to 2026-11-11).
 - The configuration repository's commit check runs the rule-copy check, the rule size check, every test, and the token scan on every commit there (user decisions, 2026-11-09 and 2026-11-12).
 - Starting a session needs a model and effort; a start while the computer is overloaded goes ahead without asking, and the session tells the user the load in one line; task-list, next-step-box, question, caption, and title text must be in the reply language (user decisions, 2026-11-09, 2026-11-11, and 2026-11-12).
-- Writing code or screen files, through edits or the shell, inline scripts included, and Figma writes are refused until this session, or this subagent, has loaded the skills their trigger names with the Skill tool (user decision, 2026-11-12).
+- Writing code, screen files, or notes-folder reports, through edits or the shell, inline scripts included, and Figma writes are refused until this session, or this subagent, has loaded the skills their trigger names with the Skill tool (user decision, 2026-11-12).
 - Notices never block: `[CONFIG SYNC]` when this computer and the configuration repository differ, `[PROJECT GOAL]` when the project rules have no goal heading (user decision, 2026-11-12), `[BULLETIN]` at a user turn for session-bulletin lines the session has not seen (user decision, 2026-11-13), `[MAIN SESSION]` at each user turn and before a file change in a main session (user decision, 2026-11-13), `[LANGUAGE REMINDER]` after a progress line in another language, and `[PLAN CODE REMINDER]` before writing a plan file.
 - A question that points elsewhere in the chat instead of showing what it asks about gets a `[BACK-REFERENCE]` notice in the next-step box and is sent back in a question dialog or closing message (user decision, 2026-11-13).
 - A question dialog in a session another session started is sent back to the next-step box (user decision, 2026-11-13).
@@ -36,6 +36,7 @@ Load each skill below with the Skill tool before the first action of its task ty
 - **Config or env file**: Read `config-files` skill before creating or refactoring config modules, `.env` files, or env-driven setup.
 - **Agent use**: Read `agent-usage` skill before spawning any agent (sub-agent, team agent, parallel agents) or starting another session; it maps the work-type model and effort table to Claude's options.
 - **Decisions, reviews, sessions**: Read `decisions-and-collaboration` before asking the user to choose between options, recording decision status, running a checkpoint review, choosing the model and effort for a run you start, proposing, starting, or closing another session, or handling design-tool comments.
+- **Reports and plans**: Read `report-writing` before writing or revising a report, plan, review, or decision document read later, or a shared notes folder's index.
 - **Rule writing**: Read `rule-writing` before adding, changing, moving, or removing a rule, skill, hook, memory, or shared setting.
 - **Screen/UX design**: Read `ux-design` before screen or print/PDF document design, design review, UI copy, or design-tool work; for visual design also read `frontend-design`, for motion and interaction `emil-design-eng` (and `apple-design` for gesture-driven UI) with recipes from `web-motion-techniques`, follow the skill roles and conflict order in `ux-design`, and use `design:design-critique`, `design:ux-copy`, and `design:accessibility-review` for critique, copy, and accessibility checks, and `web-interface-guidelines` before showing or releasing a page, and read `review-animations/SKILL.md` directly (it cannot be invoked) to review motion.
 - **Korean text**: Use `humanizer-ko` when writing or reviewing Korean prose or UI copy that people other than the user will read (product, site, and design-tool copy, resumes, and documents shared beyond the user), not working notes, plans, or reports to the user, giving it the user's own Korean writing as the style sample; it judges prose patterns only, so the user's read-aloud stays the final check.

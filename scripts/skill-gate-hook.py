@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse writing code, screen files, and Figma designs until the skills their triggers name are loaded.
+"""Refuse writing code, screen files, notes-folder reports, and Figma designs until the skills their triggers name are loaded.
 
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from report_check import is_notes_report
 from shell_command import CommandCall, ExpansionLimitError, expand_shell_command
 
 _GATE_VARIABLE = "SKILL_GATE"
@@ -89,6 +90,7 @@ _TYPESCRIPT = "typescript"
 _PYTHON = "python"
 _UX_DESIGN = "ux-design"
 _FRONTEND_DESIGN = "frontend-design"
+_REPORT_WRITING = "report-writing"
 _TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 _PYTHON_EXTENSIONS = frozenset({".py", ".pyi", ".ipynb"})
 _SCREEN_EXTENSIONS = frozenset(
@@ -204,8 +206,9 @@ def list_file_skills(path: str) -> list[str]:
     extension = os.path.splitext(path)[1].lower()
     code = [_CODE_STYLE, *_list_language_skills(extension)] if extension in _CODE_EXTENSIONS else []
     screen = [_UX_DESIGN, _FRONTEND_DESIGN] if extension in _SCREEN_EXTENSIONS else []
+    report = [_REPORT_WRITING] if is_notes_report(path) else []
 
-    return [*code, *screen]
+    return [*code, *screen, *report]
 
 
 def _list_language_skills(extension: str) -> list[str]:
