@@ -44,6 +44,7 @@ import time
 from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 
 from own_lines import ContestedLine, FileHistory, RecordedWrite, build_own_content, list_foreign_lines
@@ -83,7 +84,9 @@ _ROOT_FIELD = "root"
 _BLOBS_FIELD = "blobs"
 _TIME_FIELD = "time"
 _APPROVALS_FILE = "approved-includes.jsonl"
+_OFFERS_FILE = "offered-includes.jsonl"
 _APPROVAL_LIFETIME_SECONDS = 30 * 60
+_EDITING_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 _KIND_FIELD = "kind"
 _UNKNOWN_KIND = "unknown"
 _MAX_TRACKED_BYTES = 1024 * 1024
@@ -162,11 +165,90 @@ _GIT_CONFIG_KEY_PATTERN = re.compile(r"GIT_CONFIG_KEY_\d+")
 _GIT_CONFIG_VALUE_PATTERN = re.compile(r"GIT_CONFIG_VALUE_\d+")
 _HOOKS_DIRECTORY_NAME = "hooks"
 _COMMIT_HOOK_NAMES = ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "post-rewrite")
+_PUSH_SUBCOMMAND = "push"
+_PUSH_HOOK_NAMES = ("pre-push", "reference-transaction")
+_TREE_KEEPING_PUSH_OPTIONS = frozenset(
+    {
+        "-q",
+        "--quiet",
+        "-v",
+        "--verbose",
+        "-u",
+        "--set-upstream",
+        "--porcelain",
+        "--progress",
+        "--no-progress",
+        "-n",
+        "--dry-run",
+        "--no-verify",
+        "-f",
+        "--force",
+        "--force-with-lease",
+        "--force-if-includes",
+        "--atomic",
+        "-d",
+        "--delete",
+        "--tags",
+        "--follow-tags",
+        "-o",
+        "--push-option",
+    }
+)
+_PUSH_OPTIONS_WITH_ARGUMENT = frozenset({"-o", "--push-option"})
+_NETWORK_URL_PATTERN = re.compile(r"(?:https?|ssh|git)://\S+|[\w.-]+@[\w.-]+:\S+")
+_REMOTE_PREFIX = "remote."
+_REMOTE_URL_SUFFIX = ".url"
+_PROGRAM_RUNNING_PUSH_KEYS = frozenset({"core.sshcommand", "core.askpass", "core.gitproxy"})
+_DEFAULT_REMOTE_KEY = re.compile(r"branch\..+\.(?:push)?remote|remote\.pushdefault")
+_PROGRAM_RUNNING_REMOTE_SUFFIXES = (".receivepack", ".vcs")
+_PUSH_SIGN_KEY = "push.gpgsign"
+_FALSE_CONFIG_VALUES = frozenset({"false", "no", "off", "0", ""})
+_SUBMODULE_PUSH_KEY = "push.recursesubmodules"
+_SUBMODULE_PUSH_VALUES = frozenset({"on-demand", "only"})
+_CREDENTIAL_HELPER_KEY = re.compile(r"credential\.(?:.+\.)?helper")
+_KNOWN_CREDENTIAL_HELPERS = frozenset({"", "osxkeychain", "store", "cache", "manager", "manager-core", "libsecret"})
+_GH_CREDENTIAL_HELPER_PATTERN = re.compile(r"!['\"]?(?:\S*/)?gh['\"]? auth git-credential")
+_GH_PROGRAM = "gh"
+_GH_AUTH_GROUP = "auth"
+_TREE_KEEPING_GH_COMMANDS = {
+    "pr": frozenset({"view", "list", "checks", "status", "diff"}),
+    "run": frozenset({"view", "list", "watch"}),
+}
+_CONFIGURATION_LOCATION_VARIABLES = frozenset({"HOME", "XDG_CONFIG_HOME", "GH_CONFIG_DIR"})
 _ABSOLUTE_PATH_PATTERN = re.compile(r"""(?:^|(?<=[\s'"=(:]))((?:/|~/)[^\s'"<>|;&()`$]+)""")
 
 
 class SessionWritesError(RuntimeError):
     pass
+
+
+class IncludeChangedError(SessionWritesError):
+    """Files changed after the shell guard's dialog showed them, so the user's approval does not cover them."""
+
+    def __init__(self, paths: Sequence[str]) -> None:
+        super().__init__(", ".join(paths))
+        self.paths = list(paths)
+
+
+class ContestCause(str, Enum):
+    """What overlapped the session's unproven writes to a file."""
+
+    OTHER_EDIT = "other-edit"
+    OTHER_COMMAND = "other-command"
+    UNRECORDED = "unrecorded"
+
+
+_CONTEST_CAUSE_TEXTS = {
+    ContestCause.OTHER_EDIT: "another session edited this file while you wrote it, so they may be its",
+    ContestCause.OTHER_COMMAND: (
+        "another session's command was running in this repository while you wrote, "
+        "so the record cannot tell whose these lines are"
+    ),
+    ContestCause.UNRECORDED: (
+        "no other session's call overlapped your writes, so a person, an editor, a project hook, "
+        "or a command the record did not see changed the file around them"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -254,7 +336,8 @@ class PendingCall:
 
 @dataclass(frozen=True)
 class _IncludeApproval:
-    """Files the user let a session commit with their unrecorded lines, each with the content approved."""
+    """Files with their unrecorded lines, each with its content: as the shell guard's dialog showed it, or as the
+    user approved it."""
 
     root: str
     blobs: dict[str, str | None]
@@ -303,9 +386,10 @@ def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[s
     """Repositories a command may write.
 
     A command made only of calls that leave working trees as they were, such
-    as reading files and the commit wrapper's git index work, writes none of
-    them, except a repository it commits in whose commit hooks may change
-    files. Like Jujutsu's --ignore-working-copy, such a command takes no
+    as reading files, the commit wrapper's git index work, a push that can
+    run no program here, and GitHub CLI sign-in and viewing commands, writes
+    none of them, except a repository it commits in whose commit hooks may
+    change files. Like Jujutsu's --ignore-working-copy, such a command takes no
     snapshot, so another session's write while it ran is not read as its
     own, and it does not count as running for other sessions.
     """
@@ -408,39 +492,55 @@ def remove_expired_records() -> None:
             entry.unlink()
 
 
-def load_file_history(session_id: str, root: str, path: str) -> FileHistory | None:
+def load_file_history(
+    session_id: str,
+    root: str,
+    path: str,
+    working_text: str | None = None,
+) -> FileHistory | None:
     """The chain of this session's writes to one file, or None when it recorded none.
 
-    Raises SessionWritesError when a record, or contents it names, cannot be read back.
+    `working_text` stands for the file's current content when the caller has
+    already read it, so the history and what the caller shows agree.
+    Raises SessionWritesError when a record, or contents it names, cannot be
+    read back.
     """
     events = _read_file_events(root, path)
     own = _list_own_writes(session_id, events)
-    working_tree = Path(root, path)
-    working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
+    current_text = working_text if working_text is not None else _read_working_text(root, path)
 
     if own:
         foreign = _list_foreign_writes(session_id, root, path, events)
         own_writes = tuple(_make_recorded_write(event, foreign) for event in own)
-        return FileHistory(_read_blob(root, own[0].before), own_writes, working_text)
+        return FileHistory(_read_blob(root, own[0].before), own_writes, current_text)
     else:
         return None
 
 
-def is_written_by_others(session_id: str, root: str, path: str) -> bool:
-    """Whether another session's write, unknown write, or running call covers the file since this session wrote it.
+def find_contest_cause(session_id: str, root: str, path: str) -> ContestCause:
+    """What overlapped this session's writes to the file that the record cannot prove.
 
-    Only then can lines the record does not prove be put down to another
-    session; otherwise a person, an editor, or a hook the record does not see
-    made them. Ends are widened by the overlap margin, as for records whose
-    times do not enclose their snapshots, so a doubtful case names the other
-    session rather than deny it. Raises SessionWritesError when a record
-    cannot be read back.
+    Another session's Edit or Write among the overlapping writes may have
+    written the lines; a command of another session, which snapshots the
+    whole repository, only ran meanwhile, so the record cannot tell whose
+    they are. With neither, something the record does not see changed the
+    file. Raises SessionWritesError when a record cannot be read back.
     """
     events = _read_file_events(root, path)
-    first_start = min((event.start for event in _list_own_writes(session_id, events)), default=math.inf)
+    unproven = [event for event in _list_own_writes(session_id, events) if event.exact is not True]
     foreign = _list_foreign_writes(session_id, root, path, events)
+    overlapping = [other for other in foreign if any(_is_overlapping(event, other) for event in unproven)]
 
-    return any(other.end + _OVERLAP_MARGIN_SECONDS >= first_start for other in foreign)
+    if any(_is_editing_write(other) for other in overlapping):
+        return ContestCause.OTHER_EDIT
+    elif overlapping:
+        return ContestCause.OTHER_COMMAND
+    else:
+        return ContestCause.UNRECORDED
+
+
+def describe_contest_cause(cause: ContestCause) -> str:
+    return _CONTEST_CAUSE_TEXTS[cause]
 
 
 def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | None) -> bool:
@@ -462,6 +562,27 @@ def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | No
         return False
 
 
+def has_other_session_writes(session_id: str, root: str, since: float) -> bool:
+    """Whether another session wrote in the repository at or after a time, or has a call there that may still run.
+
+    The commit wrapper asks it about a linked worktree from when the worktree
+    was added. A record or pending file that cannot be read counts as a
+    write, and so does a time before the records' lifetime, whose records
+    may already be gone, so a doubtful case keeps the own-lines check.
+    """
+    try:
+        sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
+        events = [event for session in sessions if session != session_id for event in _read_events(session)]
+    except SessionWritesError:
+        return True
+    else:
+        is_before_records = since < time.time() - _RECORD_LIFETIME_SECONDS
+        written = any(event.root == root and event.end >= since for event in events)
+        running = any(_is_pending_in(pending, root, since) for pending in _list_other_pendings(session_id))
+
+        return is_before_records or written or running
+
+
 def is_line_tracked(root: str, path: str) -> bool:
     """Whether the file is a regular text file small enough to separate line by line."""
     file = Path(root, path)
@@ -474,17 +595,18 @@ def is_line_tracked(root: str, path: str) -> bool:
         return True
 
 
-def list_unproven_lines(session_id: str, root: str, path: str) -> list[str]:
-    """The file's uncommitted changes this session's record does not show as its own, as `+ text` and `- text`.
+def list_unproven_lines(session_id: str, root: str, path: str, blob: str | None) -> list[str]:
+    """The changes in a stored content of the file that this session's record does not show as its own.
 
-    These are what --include-unrecorded commits beyond the session's own
-    lines; every change counts when the session recorded no write to the
-    file. Raises SessionWritesError when the record cannot be read back.
+    They come as `+ text` and `- text`, and are what --include-unrecorded
+    commits beyond the session's own lines; every change counts when the
+    session recorded no write to the file. `blob` is the content the shell
+    guard's dialog shows, None for a file that is gone. Raises
+    SessionWritesError when the record cannot be read back.
     """
     base = _read_blob(root, _read_committed_blob(root, _HEAD_REVISION, path))
-    history = load_file_history(session_id, root, path)
-    working_tree = Path(root, path)
-    working_text = decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
+    working_text = _read_blob(root, blob)
+    history = load_file_history(session_id, root, path, working_text)
     own = build_own_content(base, history).text if history is not None else base
 
     return [f"{line.kind.value} {line.text}" for line in list_foreign_lines(base, working_text, own)]
@@ -501,38 +623,53 @@ def find_repository_paths(cwd: str, paths: Sequence[str]) -> tuple[str, list[str
         return None
 
 
-def add_include_approval(session_id: str, root: str, paths: Sequence[str]) -> None:
-    """Keep that the user let this session commit these files' unrecorded lines, as the files are now.
+def add_include_offer(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
+    """Keep the files' contents as the shell guard's dialog is about to show them, and return them.
+
+    The guard counts the lines it lists from these contents, and the commit
+    wrapper commits exactly them, so what the user approves is what lands.
+    A session without a record folder keeps nothing, and its wrapper then
+    takes the files as they are when it starts. Raises SessionWritesError
+    when a file cannot be stored.
+    """
+    blobs = _store_files(root, paths)
+
+    _append_include_entry(session_id, _OFFERS_FILE, root, blobs)
+    return blobs
+
+
+def approve_include(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
+    """Keep that the user let this session commit these files' unrecorded lines, and return the contents approved.
 
     The commit wrapper calls it as it starts with --include-unrecorded: the
     shell guard asks before every such call, and a call the user declines
-    never runs, so the wrapper running is the approval. An approval that
-    already covers the files as they are keeps its time, so a chain of
-    retries does not stretch it. A session without a record folder keeps
-    nothing, so its next such call is asked again.
+    never runs, so the wrapper running is the approval of what the newest
+    dialog for these files showed. A file that differs from it raises
+    IncludeChangedError, since the user has not seen it. Without such a
+    dialog, the files as they are now. An approval that already covers the
+    contents keeps its time, so a chain of retries does not stretch it.
     """
-    directory = get_record_directory() / session_id
     blobs = _store_files(root, paths)
-    entry = {_ROOT_FIELD: root, _BLOBS_FIELD: blobs, _TIME_FIELD: time.time()}
+    offer = _find_latest_include_offer(session_id, root, paths)
+    changed = [path for path in paths if offer is not None and offer.blobs[path] != blobs[path]]
 
-    if directory.is_dir() and _find_include_approval(session_id, root, blobs) is None:
-        with (directory / _APPROVALS_FILE).open("a", encoding=_TEXT_ENCODING) as file:
-            file.write(json.dumps(entry, ensure_ascii=False) + _RECORD_LINE_END)
+    if changed:
+        raise IncludeChangedError(changed)
+    else:
+        _keep_include_approval(session_id, root, blobs)
+        return blobs
 
 
-def is_include_approved(session_id: str, root: str, paths: Sequence[str]) -> bool:
-    """Whether the user let this session commit these files, exactly as they are now, in the last half hour.
+def is_include_approved(session_id: str, root: str, blobs: dict[str, str | None]) -> bool:
+    """Whether the user let this session commit these contents of the files in the last half hour.
 
     Like sudo's timestamp, an approval covers a retry of the same commit,
-    such as one after HEAD moved. Comparing contents also catches changes
-    no record shows (an editor, another tool), and another session's call
-    still running over a file could change it any moment, so either one
-    asks again. Raises SessionWritesError when a file cannot be read.
+    such as one after HEAD moved. The wrapper commits the contents the dialog
+    showed, so a call still running over a file cannot slip a later change
+    in, and only a file whose content differs from the approval is asked
+    again, whoever changed it.
     """
-    blobs = _store_files(root, paths)
-    running = [call for path in paths for call in _read_running_calls(session_id, root, path)]
-
-    return _find_include_approval(session_id, root, blobs) is not None and not running
+    return _find_include_approval(session_id, root, blobs) is not None
 
 
 def decode_content(content: bytes) -> str:
@@ -581,27 +718,55 @@ def _describe_file(session_id: str, absolute_path: str) -> str:
 
 
 def _describe_contested_lines(session_id: str, root: str, path: str, contested: Sequence[ContestedLine]) -> str:
-    """Name another session only when the record holds one's write to the file."""
+    """Name another session only for what overlapped the session's unproven writes."""
     unsure = "".join(f"\n  ? {line.kind.value} {line.text.rstrip()}" for line in contested)
-    reason = (
-        "could not be proven by the record, and another session also wrote this file since this session did"
-        if is_written_by_others(session_id, root, path)
-        else "could not be proven by the record, and no other session's write to this file is recorded"
-    )
+    reason = describe_contest_cause(find_contest_cause(session_id, root, path))
 
-    return f"\n{len(contested)} changes {reason}, so they may be this session's:{unsure}"
+    return f"\n{len(contested)} changes the record cannot prove: {reason}; they may be this session's:{unsure}"
+
+
+def _read_working_text(root: str, path: str) -> str:
+    working_tree = Path(root, path)
+
+    return decode_content(working_tree.read_bytes()) if working_tree.is_file() else ""
+
+
+def _is_editing_write(event: WriteEvent | UnknownWrite) -> bool:
+    """Whether a write came from a tool that changes the one file it names, unlike a command's repository snapshot."""
+    return isinstance(event, WriteEvent) and event.tool in _EDITING_TOOLS
+
+
+def _keep_include_approval(session_id: str, root: str, blobs: dict[str, str | None]) -> None:
+    if _find_include_approval(session_id, root, blobs) is None:
+        _append_include_entry(session_id, _APPROVALS_FILE, root, blobs)
+
+
+def _append_include_entry(session_id: str, name: str, root: str, blobs: dict[str, str | None]) -> None:
+    """Add a dialog's or an approval's contents to the session's folder, which a session without a record lacks."""
+    directory = get_record_directory() / session_id
+    entry = {_ROOT_FIELD: root, _BLOBS_FIELD: blobs, _TIME_FIELD: time.time()}
+
+    if directory.is_dir():
+        with (directory / name).open("a", encoding=_TEXT_ENCODING) as file:
+            file.write(json.dumps(entry, ensure_ascii=False) + _RECORD_LINE_END)
+
+
+def _find_latest_include_offer(session_id: str, root: str, paths: Sequence[str]) -> _IncludeApproval | None:
+    """The newest dialog the shell guard showed for exactly these files, which is the one the user just answered."""
+    offers = _read_include_entries(session_id, _OFFERS_FILE)
+    matching = [offer for offer in offers if offer.root == root and set(offer.blobs) == set(paths)]
+
+    return matching[-1] if matching else None
 
 
 def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | None]) -> _IncludeApproval | None:
     """The session's approval in the last half hour that holds every one of these files with this content."""
-    record = get_record_directory() / session_id / _APPROVALS_FILE
     limit = time.time() - _APPROVAL_LIFETIME_SECONDS
-    approvals = [_parse_approval(line) for line in _read_record_text(record).split(_RECORD_LINE_END) if line.strip()]
+    approvals = _read_include_entries(session_id, _APPROVALS_FILE)
     covering = [
         approval
         for approval in approvals
-        if approval is not None
-        and approval.root == root
+        if approval.root == root
         and approval.time >= limit
         and all(path in approval.blobs and approval.blobs[path] == blob for path, blob in blobs.items())
     ]
@@ -609,8 +774,16 @@ def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | No
     return covering[0] if covering else None
 
 
+def _read_include_entries(session_id: str, name: str) -> list[_IncludeApproval]:
+    """A session's dialog or approval entries, oldest first, without lines that do not read as one."""
+    record = get_record_directory() / session_id / name
+    entries = [_parse_approval(line) for line in _read_record_text(record).split(_RECORD_LINE_END) if line.strip()]
+
+    return [entry for entry in entries if entry is not None]
+
+
 def _parse_approval(line: str) -> _IncludeApproval | None:
-    """A kept approval, or None for a line that does not read as one."""
+    """A kept dialog or approval entry, or None for a line that does not read as one."""
     try:
         entry = json.loads(line)
         blobs = {str(path): None if blob is None else str(blob) for path, blob in dict(entry[_BLOBS_FIELD]).items()}
@@ -802,18 +975,38 @@ def _read_running_calls(session_id: str, root: str, path: str) -> list[UnknownWr
     """Other sessions' calls still running whose snapshots cover the file, as unknown writes that have not ended.
 
     A pending file that does not parse counts as covering it from when it was
-    written. Calls pending longer than the pending lifetime are taken as left
-    by a session that ended.
+    written.
     """
+    calls = [_read_running_call(pending, root, path) for pending in _list_other_pendings(session_id)]
+
+    return [call for call in calls if call is not None]
+
+
+def _list_other_pendings(session_id: str) -> list[Path]:
+    """Other sessions' pending files; calls pending longer than the pending lifetime are taken as left by a session
+    that ended."""
     limit = time.time() - _PENDING_LIFETIME_SECONDS
-    pendings = [
+
+    return [
         pending
         for pending in get_record_directory().glob(f"*/*{_PENDING_SUFFIX}")
         if pending.parent.name != session_id and (_read_modified_time(pending) or 0.0) >= limit
     ]
-    calls = [_read_running_call(pending, root, path) for pending in pendings]
 
-    return [call for call in calls if call is not None]
+
+def _is_pending_in(pending: Path, root: str, since: float) -> bool:
+    """Whether a pending call snapshots the repository and ran at or after a time; one that does not parse does."""
+    try:
+        call = _parse_pending_call(pending.read_text(encoding=_TEXT_ENCODING))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return True
+    else:
+        roots = {scope.root for scope in [*(snapshot.get_scope() for snapshot in call.snapshots), *call.unknown]}
+        never_ran_at = _find_never_ran_time(pending.parent.name, pending.name[: -len(_PENDING_SUFFIX)])
+
+        return root in roots and (never_ran_at is None or never_ran_at >= since)
 
 
 def _read_running_call(pending: Path, root: str, path: str) -> UnknownWrite | None:
@@ -1034,23 +1227,34 @@ def _expand_known_command(command: str, cwd: str | None) -> list[CommandCall] | 
 
 
 def _is_tree_keeping(call: CommandCall) -> bool:
-    """Whether a call leaves every working tree as it was, judged only from programs whose effect is known."""
-    if call.writes_file or call.dynamic_name or not _is_git_environment_safe(call):
+    """Whether a call leaves every working tree as it was, judged only from programs whose effect is known.
+
+    A call that sets or exports where git and gh read their configuration
+    does not count, since a push or gh call it reaches may then run what
+    that configuration names.
+    """
+    moves_configuration = any(name in _CONFIGURATION_LOCATION_VARIABLES for name, _ in _list_call_variables(call))
+
+    if call.writes_file or call.dynamic_name or moves_configuration or not _is_git_environment_safe(call):
         return False
     elif call.argv:
-        return _is_tree_keeping_program(call.argv, call.cwd)
+        return _is_tree_keeping_program(call)
     else:
         return True
 
 
-def _is_tree_keeping_program(argv: list[str], cwd: str | None) -> bool:
+def _is_tree_keeping_program(call: CommandCall) -> bool:
     """A local script can carry a reading program's name, so a program counts by its bare name, and the
     commit wrapper and the report only as the installed scripts beside this module."""
+    argv = call.argv
+    cwd = call.cwd
     git_command = parse_git_command(argv, cwd)
     script, script_arguments = _read_installed_script(argv, cwd)
 
     if git_command is not None:
         return _is_tree_keeping_git(git_command) and os.sep not in argv[0]
+    elif argv[0] == _GH_PROGRAM:
+        return _is_tree_keeping_gh(call)
     elif script == _COMMIT_WRAPPER_NAME:
         return cwd is not None
     elif script == _SESSION_WRITES_NAME:
@@ -1068,8 +1272,122 @@ def _is_tree_keeping_git(git_command: GitCommand) -> bool:
 
     if subcommand in _TREE_KEEPING_GIT_OPTIONS:
         return is_safe_config and _has_only_options(arguments, _TREE_KEEPING_GIT_OPTIONS[subcommand])
+    elif subcommand == _PUSH_SUBCOMMAND:
+        return is_safe_config and _is_tree_keeping_push(git_command)
     else:
         return is_safe_config and not runs_program and subcommand in _TREE_KEEPING_GIT_SUBCOMMANDS
+
+
+def _is_tree_keeping_push(git_command: GitCommand) -> bool:
+    """Whether a push can run no program on this computer, so it changes only the remote and remote-tracking refs.
+
+    git 2.54's githooks, git-push, and git-config pages name what a push may
+    run here: the pre-push and reference-transaction hooks, the receiving
+    side's hooks when the remote is a local folder, --receive-pack and
+    --exec, a remote helper (`<transport>::`, remote.<name>.vcs), the ssh
+    command, a password prompt program, signing, submodule pushes, and
+    credential helpers. A push that may use any of them, or with options or
+    a remote this does not know, keeps its snapshot.
+    """
+    root = find_repository_root(git_command.work_dir) if git_command.work_dir else None
+    options, positionals = _split_push_arguments(git_command.arguments)
+    has_only_config_options = len(git_command.global_options) == 2 * len(git_command.config_values)
+    config = _read_git_config(root) if root else None
+
+    if root and config is not None:
+        remotes = _list_remote_names(config)
+        defaults = [value for key, values in config.items() if _DEFAULT_REMOTE_KEY.fullmatch(key) for value in values]
+
+        return (
+            has_only_config_options
+            and bool(remotes)
+            and all(option.split("=", 1)[0] in _TREE_KEEPING_PUSH_OPTIONS for option in options)
+            and (not positionals or positionals[0] in remotes)
+            and all(default in remotes for default in defaults)
+            and not _has_hooks(root, _PUSH_HOOK_NAMES)
+            and all(_is_network_remote(root, remote) for remote in remotes)
+            and not _has_program_running_push_config(config)
+        )
+    else:
+        return False
+
+
+def _split_push_arguments(arguments: list[str]) -> tuple[list[str], list[str]]:
+    """A push's options and its repository and refspecs, skipping the values of options that take one."""
+    options: list[str] = []
+    positionals: list[str] = []
+    index = 0
+
+    while index < len(arguments):
+        argument = arguments[index]
+
+        if argument.startswith("-"):
+            options.append(argument)
+            index += 2 if argument in _PUSH_OPTIONS_WITH_ARGUMENT else 1
+        else:
+            positionals.append(argument)
+            index += 1
+    return options, positionals
+
+
+def _read_git_config(root: str) -> dict[str, list[str]] | None:
+    """Every value git reads in the repository, by key, or None when git cannot list them."""
+    output = _try_git(root, "config", "-z", "--list")
+
+    if output is not None:
+        entries = [entry.partition("\n") for entry in decode_content(output).split("\0") if entry]
+        config: dict[str, list[str]] = {}
+
+        for key, _, value in entries:
+            config.setdefault(key, []).append(value)
+        return config
+    else:
+        return None
+
+
+def _list_remote_names(config: dict[str, list[str]]) -> list[str]:
+    return [
+        key[len(_REMOTE_PREFIX) : -len(_REMOTE_URL_SUFFIX)]
+        for key in config
+        if key.startswith(_REMOTE_PREFIX) and key.endswith(_REMOTE_URL_SUFFIX)
+    ]
+
+
+def _is_network_remote(root: str, remote: str) -> bool:
+    """Whether every push address of a remote, after git's rewriting, is a network one and not a remote helper."""
+    output = _try_git(root, "remote", "get-url", "--push", "--all", remote)
+    urls = decode_content(output).split() if output else []
+
+    return bool(urls) and all(_NETWORK_URL_PATTERN.fullmatch(url) and "::" not in url for url in urls)
+
+
+def _has_program_running_push_config(config: dict[str, list[str]]) -> bool:
+    signing = config.get(_PUSH_SIGN_KEY, [])
+    submodules = config.get(_SUBMODULE_PUSH_KEY, [])
+    is_signing = any(value.lower() not in _FALSE_CONFIG_VALUES for value in signing)
+    is_pushing_submodules = any(value.lower() in _SUBMODULE_PUSH_VALUES for value in submodules)
+    has_program_key = any(
+        key in _PROGRAM_RUNNING_PUSH_KEYS
+        or (key.startswith(_REMOTE_PREFIX) and key.endswith(_PROGRAM_RUNNING_REMOTE_SUFFIXES))
+        for key in config
+    )
+    helpers = [value for key, values in config.items() if _CREDENTIAL_HELPER_KEY.fullmatch(key) for value in values]
+
+    return is_signing or is_pushing_submodules or has_program_key or not all(map(_is_known_credential_helper, helpers))
+
+
+def _is_known_credential_helper(helper: str) -> bool:
+    """The helpers git ships, an empty value that resets the list, and GitHub CLI's, which keep credentials only."""
+    return helper in _KNOWN_CREDENTIAL_HELPERS or _GH_CREDENTIAL_HELPER_PATTERN.fullmatch(helper) is not None
+
+
+def _is_tree_keeping_gh(call: CommandCall) -> bool:
+    """GitHub CLI sign-in commands, and commands that only show pull requests and runs, which write only gh's own
+    configuration and the keychain."""
+    group = call.argv[1] if len(call.argv) > 1 else ""
+    command = call.argv[2] if len(call.argv) > 2 else ""
+
+    return group == _GH_AUTH_GROUP or command in _TREE_KEEPING_GH_COMMANDS.get(group, frozenset())
 
 
 def _has_only_options(arguments: list[str], allowed: frozenset[str]) -> bool:
@@ -1079,10 +1397,16 @@ def _has_only_options(arguments: list[str], allowed: frozenset[str]) -> bool:
     return all(option in allowed for option in options if option.startswith("-"))
 
 
+def _list_call_variables(call: CommandCall) -> list[tuple[str, str]]:
+    """The variables a call sets for itself or exports."""
+    exported = [_split_variable(argument) for argument in call.argv[1:]] if call.argv[:1] == ["export"] else []
+
+    return [*call.assignments, *exported]
+
+
 def _is_git_environment_safe(call: CommandCall) -> bool:
     """Whether the git variables a call sets, or exports, only pick an index or a display setting."""
-    exported = [_split_variable(argument) for argument in call.argv[1:]] if call.argv[:1] == ["export"] else []
-    variables = [*call.assignments, *exported]
+    variables = _list_call_variables(call)
     config_keys = [value for name, value in variables if _GIT_CONFIG_KEY_PATTERN.fullmatch(name)]
     unsafe = [
         name
@@ -1124,15 +1448,15 @@ def _find_hooked_commit_root(call: CommandCall) -> str | None:
     is_commit = bool(call.argv) and _read_installed_script(call.argv, call.cwd)[0] == _COMMIT_WRAPPER_NAME
     root = find_repository_root(call.cwd) if is_commit and call.cwd else None
 
-    return root if root and _has_commit_hooks(root) else None
+    return root if root and _has_hooks(root, _COMMIT_HOOK_NAMES) else None
 
 
-def _has_commit_hooks(root: str) -> bool:
-    """Whether git commit may run a hook in the repository; a hooks folder git does not name counts as having one."""
+def _has_hooks(root: str, names: Sequence[str]) -> bool:
+    """Whether git may run one of these hooks in the repository; a hooks folder git cannot name counts as having one."""
     output = _try_git(root, "rev-parse", "--git-path", _HOOKS_DIRECTORY_NAME)
     hooks = Path(root, decode_content(output).strip()) if output is not None else None
 
-    return hooks is None or any(os.access(hooks / name, os.X_OK) for name in _COMMIT_HOOK_NAMES)
+    return hooks is None or any(os.access(hooks / name, os.X_OK) for name in names)
 
 
 def _find_existing_directory(path: str) -> str:

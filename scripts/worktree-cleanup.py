@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
@@ -52,11 +51,11 @@ from integration_commands import (
     NotReadyError,
     git,
     is_ancestor,
+    list_worktree_users,
     print_problems,
     read_current_branch,
     read_json,
     run_command,
-    run_required,
 )
 from workflow_policy import (
     PolicyError,
@@ -73,8 +72,6 @@ STATUS_PATH_START = 3
 STATUS_ENTRY_SEPARATOR = "\0"
 RENAMED_STATUSES = ("R", "C")
 MAX_SHOWN_PATHS = 5
-PROCESS_FIELD = "p"
-NAME_FIELD = "n"
 PULL_REQUEST_FIELDS = "number,url,headRefOid"
 
 
@@ -163,25 +160,12 @@ def list_file_problems(worktree: Path, regenerable: Sequence[str]) -> list[str]:
 
 
 def list_process_problems(worktree: Path) -> list[str]:
-    """Processes whose current folder is inside the worktree, other than the calling session and what it started.
-
-    The calling session's process, and the helpers it started there, may sit
-    in the worktree it is cleaning up; another session's processes there mean
-    the worktree is still in use. A process that ended between the two
-    listings, such as lsof itself, no longer uses it.
-    """
+    """Another session's processes working in the worktree mean it is still in use."""
     try:
-        listed = run_required(["lsof", "-a", "-d", "cwd", "-F", "pn"])
-        parents = parse_parent_processes(run_required(["ps", "-axo", "pid=,ppid="]))
-    except (CommandError, ValueError) as error:
+        users = list_worktree_users(worktree)
+    except CommandError as error:
         return [f"could not list the processes working in it ({error}), so it may still be in use"]
     else:
-        running = set(parents)
-        inside = {
-            pid for pid, folder in parse_process_folders(listed) if pid in running and is_inside(folder, worktree)
-        }
-        users = sorted(inside - list_own_processes(parents, inside))
-
         if users:
             return [f"processes still work in it: {', '.join(str(pid) for pid in users)}"]
         else:
@@ -276,45 +260,6 @@ def parse_status_entries(output: str) -> list[tuple[str, str]]:
     return entries
 
 
-def parse_process_folders(output: str) -> list[tuple[int, Path]]:
-    """Pairs of process ID and current folder from `lsof -F pn`, whose lines start with their field letter."""
-    pairs = []
-    pid = 0
-
-    for line in output.splitlines():
-        if line.startswith(PROCESS_FIELD):
-            pid = int(line[1:])
-        elif line.startswith(NAME_FIELD) and pid:
-            pairs.append((pid, Path(line[1:])))
-    return pairs
-
-
-def parse_parent_processes(output: str) -> dict[int, int]:
-    pairs = (line.split() for line in output.splitlines())
-
-    return {int(pid): int(parent) for pid, parent in pairs}
-
-
-def list_own_processes(parents: dict[int, int], inside: set[int]) -> set[int]:
-    """This script's ancestors, plus everything the highest of them working in the worktree started."""
-    ancestors = list_ancestors(parents, os.getpid())
-    owners = [pid for pid in ancestors if pid in inside]
-    session = owners[-1] if owners else os.getpid()
-    descendants = {pid for pid in parents if session in list_ancestors(parents, pid)}
-
-    return set(ancestors) | descendants
-
-
-def list_ancestors(parents: dict[int, int], pid: int) -> list[int]:
-    """The process and its ancestors, nearest first."""
-    chain = []
-
-    while pid > 1 and pid not in chain:
-        chain.append(pid)
-        pid = parents.get(pid, 0)
-    return chain
-
-
 def show_paths(paths: Sequence[str]) -> str:
     shown = ", ".join(paths[:MAX_SHOWN_PATHS])
 
@@ -325,12 +270,6 @@ def is_regenerable(path: str, patterns: Sequence[str]) -> bool:
     parts = PurePosixPath(path.rstrip("/")).parts
 
     return any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in patterns)
-
-
-def is_inside(folder: Path, worktree: Path) -> bool:
-    resolved = folder.resolve()
-
-    return resolved == worktree or worktree in resolved.parents
 
 
 if __name__ == "__main__":

@@ -29,10 +29,12 @@ letting the call through.
 
 The --include-unrecorded dialog is the only question about those lines
 (user decision, 2026-11-11): it lists them, and the session does not ask
-in chat first. The commit wrapper keeps each such call it runs as
-approved, since it runs only after this dialog, so a retry of the same
-commit with nothing written since, such as one after HEAD moved, is not
-asked again (session_writes.is_include_approved).
+in chat first. It keeps the contents it lists them from, and the commit
+wrapper commits exactly those, refusing a file that changed after the
+dialog. The wrapper keeps each such call it runs as approved, since it
+runs only after this dialog, so a retry whose files still hold the
+approved contents, such as one after HEAD moved, is not asked again,
+whatever else runs meanwhile (session_writes.is_include_approved).
 """
 
 from __future__ import annotations
@@ -56,7 +58,13 @@ from shell_command import (
     join_directory,
     parse_git_command,
 )
-from session_writes import SessionWritesError, find_repository_paths, is_include_approved, list_unproven_lines
+from session_writes import (
+    SessionWritesError,
+    add_include_offer,
+    find_repository_paths,
+    is_include_approved,
+    list_unproven_lines,
+)
 from workflow_policy import WorkflowMode, find_repository_root, read_checkout_policy, read_original_checkout
 
 
@@ -289,6 +297,15 @@ COMPOSE_OPTIONS_WITH_ARGUMENT = frozenset({
     "--parallel",
     "--progress",
 })
+
+
+@dataclass(frozen=True)
+class IncludeOffer:
+    """The contents a --include-unrecorded dialog shows: `paths` in the repository at `root`, in the command's order."""
+
+    root: str
+    paths: list[str]
+    blobs: dict[str, str | None]
 
 
 @dataclass
@@ -547,29 +564,54 @@ def find_unrecorded_include_reasons(calls: list[CommandCall], session_id: str | 
         arguments = read_commit_wrapper_arguments(call.argv)
         included = arguments.included_paths if arguments is not None else ()
 
-        if included and not is_approved_include(call, included, session_id):
-            reasons.append(make_include_reason(call, included, session_id))
+        offer = offer_include(call, included, session_id) if included else None
+
+        if included and not is_approved_offer(offer, session_id):
+            reasons.append(make_include_reason(call, included, offer, session_id))
     return reasons
 
 
-def is_approved_include(call: CommandCall, included: Sequence[str], session_id: str | None) -> bool:
-    scope = find_repository_paths(call.cwd, included) if call.cwd else None
+def offer_include(call: CommandCall, included: Sequence[str], session_id: str | None) -> IncludeOffer | None:
+    """Keep the files' contents as the dialog will show them, which the commit wrapper then commits exactly.
+
+    None outside a Claude session or a repository, or when a file cannot be
+    stored; the dialog then says it could not list the lines.
+    """
+    scope = find_repository_paths(call.cwd, included) if call.cwd and session_id else None
 
     if scope is not None and session_id:
-        return is_include_approved(session_id, *scope)
+        return try_add_include_offer(session_id, *scope)
+    else:
+        return None
+
+
+def try_add_include_offer(session_id: str, root: str, paths: list[str]) -> IncludeOffer | None:
+    try:
+        blobs = add_include_offer(session_id, root, paths)
+    except (SessionWritesError, OSError):
+        return None
+    else:
+        return IncludeOffer(root, paths, blobs)
+
+
+def is_approved_offer(offer: IncludeOffer | None, session_id: str | None) -> bool:
+    if offer is not None and session_id:
+        return is_include_approved(session_id, offer.root, offer.blobs)
     else:
         return False
 
 
-def make_include_reason(call: CommandCall, paths: Sequence[str], session_id: str | None) -> str:
-    listing = "\n".join(describe_unproven_lines(call.cwd, path, session_id) for path in paths)
+def make_include_reason(
+    call: CommandCall, paths: Sequence[str], offer: IncludeOffer | None, session_id: str | None
+) -> str:
+    listing = "\n".join(describe_unproven_lines(offer, index, path, session_id) for index, path in enumerate(paths))
 
     return INCLUDE_UNRECORDED_REASON.format(lines=listing, command=show_command(call), origin=show_origin(call))
 
 
-def describe_unproven_lines(cwd: str | None, path: str, session_id: str | None) -> str:
+def describe_unproven_lines(offer: IncludeOffer | None, index: int, path: str, session_id: str | None) -> str:
     """The lines --include-unrecorded adds for one file as the dialog shows them, or how to list them."""
-    lines = read_unproven_lines(cwd, path, session_id)
+    lines = read_unproven_lines(offer, index, session_id)
 
     if lines is None:
         return INCLUDE_LINES_UNKNOWN.format(path=path)
@@ -588,19 +630,20 @@ def shorten_line(line: str) -> str:
         return line
 
 
-def read_unproven_lines(cwd: str | None, path: str, session_id: str | None) -> list[str] | None:
-    """One file's unproven lines, or None outside a Claude session or a repository, or when the record cannot be read."""
-    scope = find_repository_paths(cwd, [path]) if cwd else None
+def read_unproven_lines(offer: IncludeOffer | None, index: int, session_id: str | None) -> list[str] | None:
+    """One file's unproven lines in the content kept for the dialog, or None without one or when the record
+    cannot be read."""
+    if offer is not None and session_id:
+        path = offer.paths[index]
 
-    if scope is not None and session_id:
-        return try_list_unproven_lines(session_id, scope[0], scope[1][0])
+        return try_list_unproven_lines(session_id, offer.root, path, offer.blobs[path])
     else:
         return None
 
 
-def try_list_unproven_lines(session_id: str, root: str, path: str) -> list[str] | None:
+def try_list_unproven_lines(session_id: str, root: str, path: str, blob: str | None) -> list[str] | None:
     try:
-        return list_unproven_lines(session_id, root, path)
+        return list_unproven_lines(session_id, root, path, blob)
     except (SessionWritesError, OSError):
         return None
 

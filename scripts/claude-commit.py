@@ -47,9 +47,14 @@ hand-built partial file can carry another session's uncommitted lines.
 In a Claude session whose write record covers the whole session
 (session_writes.py), the wrapper refuses staged lines that record does
 not show as the session's own, and --own-lines stages each file as the
-base plus only those lines.
+base plus only those lines. It reads every listed file before refusing,
+so one refusal names them all and one rerun, with one dialog, settles
+the commit.
 --include-unrecorded <file> commits that file whole after the user has
-seen its lines; the shell guard asks before such a call.
+seen its lines; the shell guard asks before such a call and keeps the
+content its dialog showed. The wrapper commits exactly that content, so
+a call still running over the file cannot slip a later change in, and
+refuses a file that changed after the dialog, which the user has not seen.
 
 Sessions that share a checkout commit as the same person, so --amend can
 rewrite a commit another session landed a moment earlier: --expect-head
@@ -69,7 +74,9 @@ Exit codes:
     6  HEAD moved since the index was built (nothing committed)
     7  large code change without --reviewed (nothing committed)
     8  staged lines this session's write record does not show as its own,
-       or own lines that cannot be separated from them (nothing committed)
+       own lines that cannot be separated from them, or an
+       --include-unrecorded file that changed after the shell guard's
+       dialog showed it (nothing committed)
     9  --amend of a commit this session did not make, or one already
        pushed (nothing committed)
 """
@@ -86,6 +93,7 @@ import sys
 import tempfile
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import NoReturn
 
 from commit_arguments import (
@@ -97,23 +105,29 @@ from commit_arguments import (
     CommitArgumentsError,
     parse_commit_arguments,
 )
-from own_lines import ContestedLine, FileHistory, OwnCommitContent, build_own_content, list_foreign_lines
+from integration_commands import CommandError, list_worktree_users
+from own_lines import ContestedLine, OwnCommitContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
 from session_commits import add_session_commit, is_session_commit
 from session_writes import (
+    ContestCause,
+    IncludeChangedError,
     SessionWritesError,
-    add_include_approval,
+    approve_include,
     decode_content,
+    describe_contest_cause,
+    find_contest_cause,
     find_repository_paths,
+    has_other_session_writes,
     has_record,
     is_line_tracked,
     is_record_complete,
     is_whole_file_own,
-    is_written_by_others,
     load_file_history,
     read_session_id,
     store_text,
 )
+from workflow_policy import read_worktree_creation_time
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 PRIVATE_INDEX_PREFIX = "claude-commit-index-"
@@ -161,12 +175,31 @@ SEQUENCER_STATE_FILES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
 REGULAR_FILE_MODE = "100644"
 EXECUTABLE_FILE_MODE = "100755"
 MAX_SHOWN_FOREIGN_LINES = 12
+OWN_WORKTREE_NOTE = "this session's own worktree: no other session or process works in it"
 
 
 @dataclass(frozen=True)
 class ReflogEntry:
     commit: str
     message: str
+
+
+@dataclass(frozen=True)
+class ApprovedContent:
+    """An --include-unrecorded file's content as the shell guard's dialog showed it, and its path in the repository,
+    which `git update-index --cacheinfo` takes from the repository's top folder whatever the current folder is."""
+
+    repository_path: str
+    blob: str | None
+
+
+@dataclass(frozen=True)
+class OwnLinesReading:
+    """One file's own content, or why the write record cannot separate it."""
+
+    path: str
+    content: OwnCommitContent | None
+    problem: str | None
 
 
 @dataclass(frozen=True)
@@ -260,10 +293,12 @@ def print_header() -> None:
     print("====================")
 
 
-def stage_files(files: Sequence[str]) -> None:
+def stage_files(files: Sequence[str], approved: dict[str, ApprovedContent]) -> None:
+    root = read_repository_root()
+
     print("=== Staging files ===")
     for path in files:
-        stage_file(path)
+        stage_listed_file(root, path, approved, {})
 
 
 def stage_file(path: str) -> None:
@@ -413,23 +448,61 @@ def check_private_index_arguments(expected_head_argument: str | None, files: Seq
         fail("\n".join(usage_lines), EXIT_USAGE)
 
 
-def keep_include_approval(included_paths: Sequence[str]) -> None:
-    """The shell guard asks before every --include-unrecorded call, so this run is the user's approval.
+def approve_included_files(arguments: CommitArguments) -> dict[str, ApprovedContent]:
+    """The contents of the --include-unrecorded files the user approved, by the path given on the command line.
 
-    One that cannot be kept only means a retry is asked again.
+    The shell guard asks before every such call, so this run is the user's
+    approval of what its dialog showed, and the wrapper commits those
+    contents rather than the files as they are when staged. A session
+    without a record folder has no dialog contents kept, so the files count
+    as they are now. It is empty outside a session, with --no-stage, whose
+    prepared index is committed as it is, and when the approval cannot be
+    kept; the files are then staged as they are. Only regular files and
+    removed ones are staged from a content: a folder, a link, or a submodule
+    is staged by `git add` as before.
     """
     session_id = read_session_id()
-    scope = find_repository_paths(os.getcwd(), included_paths) if session_id and included_paths else None
+    included = [] if arguments.no_stage else list(arguments.included_paths)
+    scope = find_repository_paths(os.getcwd(), included) if session_id and included else None
 
     if session_id and scope is not None:
-        try_add_include_approval(session_id, *scope)
+        root, repository_paths = scope
+        blobs = try_approve_include(session_id, root, repository_paths)
+        pairs = zip(included, repository_paths)
+
+        return {
+            argument: ApprovedContent(path, blobs[path])
+            for argument, path in pairs
+            if path in blobs and is_content_stageable(root, path)
+        }
+    else:
+        return {}
 
 
-def try_add_include_approval(session_id: str, root: str, paths: Sequence[str]) -> None:
+def is_content_stageable(root: str, path: str) -> bool:
+    """Whether a file is staged right from its content: a regular file, or one that is gone."""
+    file = os.path.join(root, path)
+
+    return not os.path.lexists(file) or (os.path.isfile(file) and not os.path.islink(file))
+
+
+def try_approve_include(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
     try:
-        add_include_approval(session_id, root, paths)
+        return approve_include(session_id, root, paths)
+    except IncludeChangedError as error:
+        fail(make_changed_include_message(error.paths), EXIT_FOREIGN_LINES)
     except (SessionWritesError, OSError) as error:
         print(f"Note: the approval could not be kept ({error}), so a retry is asked again.", file=sys.stderr)
+        return {}
+
+
+def make_changed_include_message(paths: Sequence[str]) -> str:
+    lines = [
+        f"FAIL: {', '.join(paths)} changed after the shell guard's dialog showed them, so the user has not seen what would be committed. Nothing was committed.",
+        "Resolve: rerun the same command without asking in chat first: the shell guard shows the files as they are now and asks there.",
+    ]
+
+    return "\n".join(lines)
 
 
 def check_private_index_environment(private_index: bool) -> None:
@@ -671,7 +744,8 @@ def read_base_blob(expected_head: str | None, path: str) -> str | None:
 
 
 def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnCommitContent | None:
-    history = read_file_history(session_id, root, path)
+    """Raises SessionWritesError when the record cannot be read back."""
+    history = load_file_history(session_id, root, path)
 
     if history is not None:
         return build_own_content(base, history)
@@ -679,31 +753,46 @@ def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnCom
         return None
 
 
-def read_file_history(session_id: str, root: str, path: str) -> FileHistory | None:
+def read_own_lines(session_id: str, root: str, path: str, expected_head: str | None) -> OwnLinesReading:
+    """One file's own content, or the problem that keeps it out, so every file is read before any is refused."""
     try:
-        return load_file_history(session_id, root, path)
+        own = read_own_content(session_id, root, path, read_base_text(expected_head, path))
+        problem = describe_own_content_problem(session_id, root, path, own)
     except SessionWritesError as error:
-        fail(make_unreadable_record_message(path, error), EXIT_FOREIGN_LINES)
+        return OwnLinesReading(path, None, make_unreadable_record_message(path, error))
+    else:
+        return OwnLinesReading(path, own, problem)
 
 
-def read_written_by_others(session_id: str, root: str, path: str) -> bool:
-    try:
-        return is_written_by_others(session_id, root, path)
-    except SessionWritesError as error:
-        fail(make_unreadable_record_message(path, error), EXIT_FOREIGN_LINES)
+def describe_own_content_problem(
+    session_id: str, root: str, path: str, own: OwnCommitContent | None
+) -> str | None:
+    if own is None:
+        return make_unrecorded_message(path)
+    elif own.entangled:
+        return make_entangled_message(path, own.entangled)
+    elif own.contested:
+        return make_contested_message(path, own.contested, find_contest_cause(session_id, root, path))
+    else:
+        return None
 
 
 def make_unreadable_record_message(path: str, error: SessionWritesError) -> str:
-    lines = [
-        f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart.",
-        f"Resolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there.",
-    ]
+    return f"FAIL: the write record for {path} cannot be read back ({error}), so its lines cannot be told apart."
 
-    return "\n".join(lines)
+
+def make_foreign_lines_report(problems: Sequence[str], paths: Sequence[str], suggest_own_lines: bool) -> str:
+    """Every file's problem, then one way to resolve them all, so the user sees one dialog for the commit."""
+    flags = " ".join(f"{INCLUDE_UNRECORDED_OPTION} {path}" for path in paths)
+    own_lines = f"rerun with {OWN_LINES_OPTION} to stage only your lines, or " if suggest_own_lines else ""
+    resolve = f"Resolve: {own_lines}rerun once with {flags} without asking in chat first: the shell guard shows the user every listed file's lines in one dialog and asks there. If another session wrote tangled lines and can commit first, message it and wait. If the user declines, leave those files out."
+
+    return "\n".join([*problems, resolve])
 
 
 def read_index_mode(root: str, path: str) -> str:
-    entry = run_git(["ls-files", "-s", "--", path], capture_output=True).stdout.split()
+    """The mode of a path in the repository, read from the index or, for a new file, from the file."""
+    entry = run_git(["-C", root, "ls-files", "-s", "--", path], capture_output=True).stdout.split()
 
     if entry:
         return entry[0]
@@ -711,13 +800,16 @@ def read_index_mode(root: str, path: str) -> str:
         return EXECUTABLE_FILE_MODE if os.access(os.path.join(root, path), os.X_OK) else REGULAR_FILE_MODE
 
 
-def stage_changes(arguments: CommitArguments, expected_head: str | None) -> None:
+def stage_changes(arguments: CommitArguments, expected_head: str | None, approved: dict[str, ApprovedContent]) -> None:
     session_id = read_session_id()
 
     if arguments.no_stage:
         print("=== Staging skipped (--no-stage) ===")
+    elif arguments.own_lines and session_id is not None and is_own_worktree(session_id, read_repository_root()):
+        print(f"=== {OWN_WORKTREE_NOTE}: {OWN_LINES_OPTION} stages whole files ===")
+        stage_files(arguments.files, approved)
     elif arguments.own_lines and session_id is not None and is_record_complete(session_id):
-        stage_own_lines(session_id, arguments.files, arguments.included_paths, expected_head)
+        stage_own_lines(session_id, arguments.files, arguments.included_paths, approved, expected_head)
     elif arguments.own_lines:
         fail(
             f"FAIL: {OWN_LINES_OPTION} needs a write record that covers this whole session, which only sessions started after the record hook was installed have.\n"
@@ -725,44 +817,69 @@ def stage_changes(arguments: CommitArguments, expected_head: str | None) -> None
             EXIT_USAGE,
         )
     else:
-        stage_files(arguments.files)
+        stage_files(arguments.files, approved)
     print("=== Staged changes ===")
     run_git([*READABLE_PATHS_OPTIONS, "diff", "--cached", "--stat"])
 
 
-def stage_own_lines(session_id: str, files: Sequence[str], included: Sequence[str], expected_head: str | None) -> None:
+def stage_own_lines(
+    session_id: str,
+    files: Sequence[str],
+    included: Sequence[str],
+    approved: dict[str, ApprovedContent],
+    expected_head: str | None,
+) -> None:
+    """Read every file's own lines first and refuse them all at once, so one rerun and one dialog settle the commit."""
     root = read_repository_root()
+    separated = [path for path in files if path not in included and is_line_tracked(root, path)]
+    readings = [read_own_lines(session_id, root, path, expected_head) for path in separated]
+    problems = [reading.problem for reading in readings if reading.problem]
+    unproven_paths = [reading.path for reading in readings if reading.problem]
+    own_contents = {reading.path: reading.content for reading in readings if reading.content is not None}
 
-    print("=== Staging own lines ===")
-    for path in files:
-        if path in included or not is_line_tracked(root, path):
-            stage_file(path)
-        else:
-            stage_own_content(session_id, root, path, read_base_text(expected_head, path))
-
-
-def stage_own_content(session_id: str, root: str, path: str, base: str) -> None:
-    own = read_own_content(session_id, root, path, base)
-
-    if own is None:
-        fail(make_unrecorded_message(path), EXIT_FOREIGN_LINES)
-    elif own.entangled:
-        fail(make_entangled_message(path, own.entangled), EXIT_FOREIGN_LINES)
-    elif own.contested:
-        written_by_others = read_written_by_others(session_id, root, path)
-
-        fail(make_contested_message(path, own.contested, written_by_others), EXIT_FOREIGN_LINES)
-    elif own.text == "" and not os.path.exists(os.path.join(root, path)):
-        run_git(["update-index", "--force-remove", "--", path])
-        print(f"  - {path} (removed)")
+    if problems:
+        fail(make_foreign_lines_report(problems, unproven_paths, suggest_own_lines=False), EXIT_FOREIGN_LINES)
     else:
-        cacheinfo = f"{read_index_mode(root, path)},{store_text(root, own.text)},{path}"
-        result = run_git(["update-index", "--add", "--cacheinfo", cacheinfo])
+        print("=== Staging own lines ===")
+        for path in files:
+            stage_listed_file(root, path, approved, own_contents)
 
-        if result.returncode == 0:
-            print(f"  + {path} (own lines)")
-        else:
-            fail(f"FAIL: git update-index failed for {path}", EXIT_GIT_ERROR)
+
+def stage_listed_file(
+    root: str, path: str, approved: dict[str, ApprovedContent], own_contents: dict[str, OwnCommitContent]
+) -> None:
+    """Stage one listed file: as the dialog showed it, as its own lines, or whole as it is now."""
+    if path in approved:
+        stage_content(root, approved[path].repository_path, approved[path].blob, "as the dialog showed")
+    elif path in own_contents:
+        stage_own_text(root, path, own_contents[path].text)
+    else:
+        stage_file(path)
+
+
+def stage_own_text(root: str, path: str, text: str) -> None:
+    is_removed = text == "" and not os.path.exists(os.path.join(root, path))
+
+    stage_content(root, path, None if is_removed else store_text(root, text), "own lines")
+
+
+def stage_content(root: str, path: str, blob: str | None, note: str) -> None:
+    """Put a stored content in the index at a path in the repository, or remove the path for None."""
+    if blob is None:
+        run_git(["-C", root, "update-index", "--force-remove", "--", path])
+        print(f"  - {path} (removed, {note})")
+    else:
+        stage_blob(root, path, blob, note)
+
+
+def stage_blob(root: str, path: str, blob: str, note: str) -> None:
+    cacheinfo = f"{read_index_mode(root, path)},{blob},{path}"
+    result = run_git(["-C", root, "update-index", "--add", "--cacheinfo", cacheinfo])
+
+    if result.returncode == 0:
+        print(f"  + {path} ({note})")
+    else:
+        fail(f"FAIL: git update-index failed for {path}", EXIT_GIT_ERROR)
 
 
 def find_own_lines_skip_reason() -> str | None:
@@ -778,8 +895,37 @@ def find_own_lines_skip_reason() -> str | None:
         return "not checked (write record started mid-session: new sessions are checked)"
     elif any(os.path.exists(os.path.join(git_directory, name)) for name in SEQUENCER_STATE_FILES):
         return "not checked (merge in progress)"
+    elif is_own_worktree(session_id, read_repository_root()):
+        return f"not checked ({OWN_WORKTREE_NOTE})"
     else:
         return None
+
+
+@functools.cache
+def is_own_worktree(session_id: str, root: str) -> bool:
+    """Whether the commit runs in a linked worktree that no other session has written and no other process works in.
+
+    Every change there is the task's, as worktree-cleanup.py judges a
+    worktree still in use, so a project hook's or the user's edit there is
+    the task's too. A check that cannot run counts as not, so the own-lines
+    check stays; an original checkout is never one.
+    """
+    worktree = Path(root).resolve()
+    created = read_worktree_creation_time(worktree)
+
+    if created is not None:
+        return is_unused_by_others(session_id, worktree, created)
+    else:
+        return False
+
+
+def is_unused_by_others(session_id: str, worktree: Path, created: float) -> bool:
+    try:
+        users = list_worktree_users(worktree)
+    except CommandError:
+        return False
+    else:
+        return not users and not has_other_session_writes(session_id, str(worktree), created)
 
 
 def check_staged_lines(included: Sequence[str], expected_head: str | None) -> None:
@@ -787,15 +933,23 @@ def check_staged_lines(included: Sequence[str], expected_head: str | None) -> No
     root = read_repository_root()
     staged_output = run_git(["diff", "--cached", "--name-only", "-z", "--no-renames"], capture_output=True).stdout
     staged_paths = split_path_list(staged_output)
-    problems = [describe_foreign_lines(session_id, root, path, expected_head) for path in staged_paths if path not in included]
-    shown = [problem for problem in problems if problem]
+    checked = [path for path in staged_paths if path not in included]
+    problems = {path: describe_staged_problem(session_id, root, path, expected_head) for path in checked}
+    shown = {path: problem for path, problem in problems.items() if problem}
 
     if shown:
-        resolve = f"Resolve: rerun with {OWN_LINES_OPTION} to stage only your lines, or rerun with {INCLUDE_UNRECORDED_OPTION} <file> without asking in chat first: the shell guard shows the user these lines and asks there."
-        fail("\n".join([*shown, resolve]), EXIT_FOREIGN_LINES)
+        fail(make_foreign_lines_report(list(shown.values()), list(shown), suggest_own_lines=True), EXIT_FOREIGN_LINES)
+
+
+def describe_staged_problem(session_id: str, root: str, path: str, expected_head: str | None) -> str | None:
+    try:
+        return describe_foreign_lines(session_id, root, path, expected_head)
+    except SessionWritesError as error:
+        return make_unreadable_record_message(path, error)
 
 
 def describe_foreign_lines(session_id: str, root: str, path: str, expected_head: str | None) -> str | None:
+    """Raises SessionWritesError when the record cannot be read back."""
     staged = read_staged_content(path)
 
     if staged is None or not is_line_tracked(root, path) or not is_utf8(staged):
@@ -814,8 +968,7 @@ def describe_foreign_lines(session_id: str, root: str, path: str, expected_head:
         if entangled:
             return make_entangled_message(path, entangled)
         elif foreign_message and contested:
-            written_by_others = read_written_by_others(session_id, root, path)
-            contested_message = make_contested_message(path, contested, written_by_others)
+            contested_message = make_contested_message(path, contested, find_contest_cause(session_id, root, path))
 
             return f"{foreign_message}\n{contested_message}"
         else:
@@ -830,35 +983,22 @@ def describe_whole_file(session_id: str, root: str, path: str, expected_head: st
 
 
 def make_unrecorded_message(path: str) -> str:
-    return f"FAIL: this session has no recorded writes to {path}, so none of its changes are known to be yours.\nResolve: leave it out, or rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there."
+    return f"FAIL: this session has no recorded writes to {path}, so none of its changes are known to be yours."
 
 
 def make_entangled_message(path: str, entangled: Sequence[str]) -> str:
     shown = [f"  ! {line.rstrip()}" for line in entangled[:MAX_SHOWN_FOREIGN_LINES]]
-    lines = [
-        f"FAIL: in {path}, {len(entangled)} of your changes are tangled with uncommitted lines this session's write record does not show as its own (another session's, a person's, or a command the record did not see): your line changes or splits them, or they changed your replacement, so they cannot be committed apart:",
-        *shown,
-        f"Resolve: if another session wrote them and can commit first, message it and wait; otherwise rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
-    ]
+    header = f"FAIL: in {path}, {len(entangled)} of your changes are tangled with uncommitted lines this session's write record does not show as its own (another session's, a person's, or a command the record did not see): your line changes or splits them, or they changed your replacement, so they cannot be committed apart:"
 
-    return "\n".join(lines)
+    return "\n".join([header, *shown])
 
 
-def make_contested_message(path: str, contested: Sequence[ContestedLine], written_by_others: bool) -> str:
-    """Name another session only when the record holds one's write to the file; otherwise say what the record lacks."""
+def make_contested_message(path: str, contested: Sequence[ContestedLine], cause: ContestCause) -> str:
+    """Say what overlapped the unproven writes: another session's edit, only its command, or neither."""
     shown = [f"  ? {line.kind.value} {line.text.rstrip()}" for line in contested[:MAX_SHOWN_FOREIGN_LINES]]
-    header = (
-        f"FAIL: in {path}, the record could not prove {len(contested)} changes are yours, and another session also wrote this file since you did, so they may be its:"
-        if written_by_others
-        else f"FAIL: in {path}, the record could not prove {len(contested)} changes are yours. No other session's write to this file is recorded, so a person, an editor, a project hook, or a command the record did not see may have changed the file around them:"
-    )
-    lines = [
-        header,
-        *shown,
-        f"Resolve: rerun with {INCLUDE_UNRECORDED_OPTION} {path} without asking in chat first: the shell guard shows the user these lines and asks there. If the user declines, leave the file out.",
-    ]
+    header = f"FAIL: in {path}, the record could not prove {len(contested)} changes are yours: {describe_contest_cause(cause)}:"
 
-    return "\n".join(lines)
+    return "\n".join([header, *shown])
 
 
 def is_utf8(content: bytes) -> bool:
@@ -973,7 +1113,7 @@ def main(argv: list[str]) -> None:
     files = arguments.files
 
     print_header()
-    keep_include_approval(arguments.included_paths)
+    approved = approve_included_files(arguments)
     metrics = validate_message(arguments.message)
     check_private_index_environment(arguments.private_index)
     check_private_index_arguments(arguments.expected_head, files)
@@ -984,17 +1124,20 @@ def main(argv: list[str]) -> None:
     run_git(["log", "--oneline", "-3"])
     if arguments.private_index:
         with use_private_index(expected_head, files):
-            made = stage_and_commit(arguments, expected_head, metrics)
+            made = stage_and_commit(arguments, expected_head, approved, metrics)
     else:
-        made = stage_and_commit(arguments, expected_head, metrics)
+        made = stage_and_commit(arguments, expected_head, approved, metrics)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1", made.commit])
 
 
 def stage_and_commit(
-    arguments: CommitArguments, expected_head: str | None, metrics: tuple[int, int, int, int]
+    arguments: CommitArguments,
+    expected_head: str | None,
+    approved: dict[str, ApprovedContent],
+    metrics: tuple[int, int, int, int],
 ) -> MadeCommit:
-    stage_changes(arguments, expected_head)
+    stage_changes(arguments, expected_head, approved)
     if arguments.files:
         verify_staging(arguments.files)
     check_credential_files()

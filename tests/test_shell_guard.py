@@ -974,6 +974,9 @@ MINE_1 = "\n## mine 1\nmy text\n"
 THEIRS = "\n## theirs\ntheir text\n"
 MINE_2 = "\n## mine 2\nmore\n"
 MINE_3 = "\n## mine 3\nlast\n"
+NOTES_FILE = "notes.md"
+GITHUB_URL = "https://github.com/example/repository.git"
+NO_OVERLAP_TEXT = "no other session's call overlapped your writes"
 MY_TEXT = "my text\n"
 MY_EDITED_TEXT = "my edited text\n"
 BASE_TEXT = "\ntext\n"
@@ -1856,16 +1859,27 @@ class SessionWritesFixture:
         return result.stdout + result.stderr
 
     def run_wrapper(
-        self, *arguments: str, session: str | None = OWN_SESSION, index: Path | None = None
+        self,
+        *arguments: str,
+        session: str | None = OWN_SESSION,
+        index: Path | None = None,
+        cwd: Path | None = None,
     ) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, str(COMMIT_WRAPPER), *arguments],
             env=self.environment(session, index),
-            cwd=self.repository,
+            cwd=cwd or self.repository,
             capture_output=True,
             text=True,
             check=False,
         )
+
+    def create_worktree(self, name: str) -> Path:
+        """A linked worktree of the fixture's repository on a new branch, as a task's worktree."""
+        worktree = self.root / name
+
+        self.run_git("worktree", "add", "-q", "-b", name, str(worktree))
+        return worktree
 
     def run_own_lines_commit(
         self, *arguments: str, session: str | None = OWN_SESSION
@@ -2361,37 +2375,54 @@ class SessionWritesTest(unittest.TestCase):
         self.assertIs(self.fixture.read_events(OWN_SESSION)[-1]["exact"], False)
         self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
         self.assertIn("the record could not prove", result.stderr)
-        self.assertNotIn("another session also wrote", result.stderr)
-        self.assertIn("could not be proven by the record", report)
-        self.assertNotIn("another session also wrote", report)
+        self.assertIn(NO_OVERLAP_TEXT, result.stderr)
+        self.assertNotIn("another session edited", result.stderr)
+        self.assertNotIn("command was running", result.stderr)
+        self.assertIn(NO_OVERLAP_TEXT, report)
+        self.assertNotIn("another session", report)
 
-    def test_other_sessions_write_counts_from_just_before_my_first_write(self) -> None:
-        """Only another session's write from about when this session began on the file is named in the message."""
+    def test_cause_names_only_what_overlapped_my_unproven_writes(self) -> None:
+        """Another session's edit, only its command, or neither, judged by what overlaps this session's writes."""
         record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
         root = str(self.fixture.repository)
         cases = (
-            ("ended long before", 100.0, False),
-            ("ended within the overlap margin", 1.0, True),
-            ("ran after", -5.0, True),
+            ("command overlapping", 1.0, BASH_TOOL, session_writes.ContestCause.OTHER_COMMAND),
+            ("edit overlapping", 1.0, EDIT_TOOL, session_writes.ContestCause.OTHER_EDIT),
+            ("command that ended before", -100.0, BASH_TOOL, session_writes.ContestCause.UNRECORDED),
         )
 
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
         own = self.fixture.read_events(OWN_SESSION)[0]
 
-        for name, ended_before, expected in cases:
+        for name, overlap, tool, expected in cases:
             with self.subTest(case=name), mock.patch.dict(os.environ, self.fixture.environment(None)):
-                other = {**own, "start": own["start"] - ended_before - 1, "end": own["start"] - ended_before}
+                other = {**own, "start": own["start"] - 200.0, "end": own["start"] + overlap, "tool": tool}
 
                 record.write_text(json.dumps(other) + "\n")
-                self.assertIs(session_writes.is_written_by_others(OWN_SESSION, root, LOG_FILE), expected)
+                self.assertIs(session_writes.find_contest_cause(OWN_SESSION, root, LOG_FILE), expected)
 
-    def test_running_call_of_another_session_counts_as_writing(self) -> None:
+    def test_cause_of_an_unexplained_edit_names_the_overlapping_edit(self) -> None:
+        own_record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OWN_SESSION}.jsonl"
+        other_record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+        root = str(self.fixture.repository)
+
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
-        self.fixture.start_command(OTHER_SESSION)
+        own = {**self.fixture.read_events(OWN_SESSION)[0], "tool": EDIT_TOOL, "exact": False}
+        other = {**own, "start": own["start"] - 1.0, "end": own["end"] + 1.0, "exact": True}
+        own_record.write_text(json.dumps(own) + "\n")
+        other_record.write_text(json.dumps(other) + "\n")
         with mock.patch.dict(os.environ, self.fixture.environment(None)):
-            written = session_writes.is_written_by_others(OWN_SESSION, str(self.fixture.repository), LOG_FILE)
+            cause = session_writes.find_contest_cause(OWN_SESSION, root, LOG_FILE)
 
-        self.assertIs(written, True)
+        self.assertIs(cause, session_writes.ContestCause.OTHER_EDIT)
+
+    def test_running_call_of_another_session_counts_as_its_command(self) -> None:
+        self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        with mock.patch.dict(os.environ, self.fixture.environment(None)):
+            cause = session_writes.find_contest_cause(OWN_SESSION, str(self.fixture.repository), LOG_FILE)
+
+        self.assertIs(cause, session_writes.ContestCause.OTHER_COMMAND)
 
     def test_edit_inside_another_sessions_command_stays_mine(self) -> None:
         started = self.fixture.start_command(OTHER_SESSION)
@@ -2427,7 +2458,35 @@ class SessionWritesTest(unittest.TestCase):
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
 
         self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("another session edited this file while you wrote it", result.stderr)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_every_unproven_file_is_refused_at_once(self) -> None:
+        """One refusal names every file and one rerun covers them, so the commit needs one dialog."""
+        started = self.fixture.start_command(OTHER_SESSION)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.append(NOTES_FILE, MY_TEXT)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE, NOTES_FILE)
+
+        self.fixture.finish_command(started)
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn(f"in {LOG_FILE}, the record could not prove", result.stderr)
+        self.assertIn(f"no recorded writes to {NOTES_FILE}", result.stderr)
+        self.assertEqual(result.stderr.count("Resolve:"), 1, result.stderr)
+        self.assertIn(f"--include-unrecorded {LOG_FILE} --include-unrecorded {NOTES_FILE}", result.stderr)
+
+    def test_unreadable_record_does_not_stop_at_the_first_file(self) -> None:
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        record.write_text("not a record line\n")
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE, NOTES_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn(f"write record for {LOG_FILE} cannot be read back", result.stderr)
+        self.assertIn(f"write record for {NOTES_FILE} cannot be read back", result.stderr)
+        self.assertEqual(result.stderr.count("Resolve:"), 1, result.stderr)
 
     def test_waiting_command_does_not_hold_up_the_editor(self) -> None:
         started = self.fixture.start_command(OWN_SESSION)
@@ -2463,7 +2522,7 @@ class SessionWritesTest(unittest.TestCase):
         report = self.fixture.report(OWN_SESSION, LOG_FILE)
 
         self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
-        self.assertIn("another session also wrote this file", result.stderr)
+        self.assertIn("another session's command was running in this repository while you wrote", result.stderr)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
         self.assertIn("may be this session's", report)
 
@@ -2919,11 +2978,91 @@ class CommandScopeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
+    def test_push_and_gh_calls_that_cannot_touch_files_take_no_snapshot(self) -> None:
+        repository = self.make_push_repository("plain")
+        kept = [
+            "git push",
+            "git push -u origin main",
+            "git push --force-with-lease=main:abc origin main",
+            "git -c core.quotepath=false push -q",
+            "gh auth refresh -s delete_repo",
+            "gh auth status",
+            "gh pr checks 12 --watch",
+            "gh run watch 34",
+        ]
+
+        self.assertEqual({command: self.find_roots_in(repository, command) for command in kept}, dict.fromkeys(kept, []))
+
+    def test_push_or_gh_call_that_may_run_a_program_keeps_its_snapshot(self) -> None:
+        cases = {
+            "pre-push hook": ("git push", ["hook", "pre-push"]),
+            "reference-transaction hook": ("git push", ["hook", "reference-transaction"]),
+            "local folder remote": ("git push", ["git", "remote", "add", "backup", "/tmp/backup.git"]),
+            "remote helper": ("git push", ["git", "remote", "set-url", "--push", "origin", "ext::sh -c x"]),
+            "receive-pack option": ("git push --receive-pack=x origin main", []),
+            "submodule option": ("git push --recurse-submodules=on-demand", []),
+            "address instead of a remote": (f"git push {GITHUB_URL} main", []),
+            "unknown credential helper": ("git push", ["git", "config", "credential.helper", "!/bin/my-helper"]),
+            "ssh command": ("git push", ["git", "config", "core.sshCommand", "ssh -i key"]),
+            "signed push": ("git push", ["git", "config", "push.gpgSign", "true"]),
+            "git folder option": ("git --git-dir=/tmp/x push", []),
+            "git proxy": ("git push", ["git", "config", "core.gitProxy", "/bin/my-proxy"]),
+            "default remote of this repository": ("git push", ["git", "config", "branch.main.remote", "."]),
+            "no remote": ("git push", ["git", "remote", "remove", "origin"]),
+            "moved home": ("HOME=/tmp/elsewhere git push", []),
+            "exported gh configuration": ("export GH_CONFIG_DIR=/tmp/gh; gh auth login", []),
+            "download": ("gh run download 34", []),
+            "checkout": ("gh pr checkout 12", []),
+            "moved gh configuration": ("GH_CONFIG_DIR=/tmp/gh gh auth status", []),
+        }
+
+        for name, (command, setup) in cases.items():
+            with self.subTest(case=name):
+                repository = self.make_push_repository(name.replace(" ", "-"))
+
+                self.apply_setup(repository, setup)
+                self.assertEqual(self.find_roots_in(repository, command), [str(repository)])
+
+    def test_another_sessions_push_holds_up_no_one(self) -> None:
+        command = {"command": "git push -u origin main"}
+
+        self.fixture.run_git("remote", "add", "origin", GITHUB_URL)
+        self.fixture.run_record_hook(OTHER_SESSION, PRE_TOOL_USE, "push-1", command)
+        self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_record_hook(OTHER_SESSION, POST_TOOL_USE, "push-1", command, {})
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.fixture.has_events(OTHER_SESSION))
+
     def find_roots(self, command: str) -> list[str]:
         with mock.patch.dict(os.environ, {CONFIG_DIRECTORY_VARIABLE: str(self.fixture.config_directory)}):
             roots: list[str] = session_writes.find_command_roots("unit-session", command, str(self.fixture.repository))
 
         return roots
+
+    def find_roots_in(self, repository: Path, command: str) -> list[str]:
+        """The roots with the fixture's own git configuration, so this computer's credential helpers do not count."""
+        with mock.patch.dict(os.environ, self.fixture.environment(None)):
+            roots: list[str] = session_writes.find_command_roots("unit-session", command, str(repository))
+
+        return roots
+
+    def make_push_repository(self, name: str) -> Path:
+        repository = self.fixture.create_side_repository(name)
+
+        self.apply_setup(repository, ["git", "remote", "add", "origin", GITHUB_URL])
+        return repository
+
+    def apply_setup(self, repository: Path, setup: list[str]) -> None:
+        """Run a git command in the repository, or with ["hook", <name>] add an executable hook."""
+        if setup[:1] == ["hook"]:
+            hook = repository / ".git" / "hooks" / setup[1]
+
+            hook.write_text("#!/bin/sh\nexit 0\n")
+            hook.chmod(0o755)
+        elif setup:
+            subprocess.run(setup, env=self.fixture.environment(None), cwd=repository, capture_output=True, check=True)
 
     def make_commit_command(self) -> str:
         return f'cd {self.fixture.repository} && {COMMIT_WRAPPER} --private-index --expect-head abc --own-lines "{HEAD_COMMIT_SUBJECT}" other.md'
@@ -3017,6 +3156,178 @@ class IncludeDialogTest(unittest.TestCase):
         result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
 
         self.assertEqual(json.loads(result.stdout)["hookSpecificOutput"]["permissionDecision"], ASK, result.stderr)
+
+    def test_wrapper_commits_what_the_dialog_showed(self) -> None:
+        arguments = self.make_committing_arguments()
+
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.make_command(arguments))
+        result = self.fixture.run_approved_wrapper(OWN_SESSION, *arguments)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("as the dialog showed", result.stdout)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE + MINE_1)
+
+    def test_dialog_lists_the_lines_of_the_content_it_keeps(self) -> None:
+        offers = self.fixture.config_directory / RECORD_DIRECTORY_NAME / OWN_SESSION / "offered-includes.jsonl"
+
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+        offer = json.loads(offers.read_text().splitlines()[-1])
+
+        self.assertIn("+ ## mine 1", json.loads(result.stdout)["hookSpecificOutput"]["permissionDecisionReason"])
+
+        self.assertEqual(offer["blobs"], {LOG_FILE: self.fixture.run_git("hash-object", LOG_FILE)})
+
+    def test_file_changed_after_the_dialog_is_not_committed(self) -> None:
+        arguments = self.make_committing_arguments()
+        command = self.make_command(arguments)
+        head = self.fixture.run_git("rev-parse", "HEAD")
+
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
+        self.fixture.append(LOG_FILE, MINE_2)
+        result = self.fixture.run_approved_wrapper(OWN_SESSION, *arguments)
+        retry = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
+        decision = json.loads(retry.stdout)["hookSpecificOutput"]
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("changed after the shell guard's dialog showed them", result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+        self.assertEqual(decision["permissionDecision"], ASK, retry.stderr)
+        self.assertIn("+ ## mine 2", decision["permissionDecisionReason"])
+
+    def test_included_file_named_from_a_subfolder_is_staged_at_its_own_path(self) -> None:
+        """Content is staged at the file's path in the repository, never at a same-named path at its top."""
+        folder = self.fixture.repository / "docs"
+        head = self.fixture.run_git("rev-parse", "HEAD")
+        arguments = ("--private-index", "--expect-head", head, "--include-unrecorded", "a.md", HEAD_COMMIT_MESSAGE, "a.md")
+
+        folder.mkdir()
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        (folder / "a.md").write_text(MY_TEXT)
+        result = self.fixture.run_wrapper(*arguments, cwd=folder)
+
+        self.assertIn("+ docs/a.md (as the dialog showed)", result.stdout)
+        self.assertEqual(result.returncode, STAGING_MISMATCH_EXIT, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
+
+    def test_approved_retry_is_not_asked_again_while_another_command_runs(self) -> None:
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_approved_wrapper(OWN_SESSION, *self.wrapper_arguments)
+        self.fixture.start_command(OTHER_SESSION)
+        result = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.command)
+
+        self.assertEqual(result.stdout, "", result.stderr)
+
+    def make_committing_arguments(self) -> tuple[str, ...]:
+        base = self.fixture.run_git("rev-parse", "HEAD")
+
+        return ("--private-index", "--expect-head", base, "--include-unrecorded", LOG_FILE, HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+    def make_command(self, arguments: tuple[str, ...]) -> str:
+        shown = " ".join(f'"{argument}"' if " " in argument or "\n" in argument else argument for argument in arguments)
+
+        return f"cd {self.fixture.repository} && ~/.claude/scripts/claude-commit.py {shown}"
+
+
+class OwnWorktreeTest(unittest.TestCase):
+    """In a linked worktree no other session or process works in, every change is the task's, so lines are not proven."""
+
+    fixture: SessionWritesFixture
+
+    def setUp(self) -> None:
+        self.fixture = SessionWritesFixture()
+        self.fixture.create()
+        self.worktree = self.fixture.create_worktree("task")
+        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "read-1", {"command": "git status"})
+        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "read-1", {"command": "git status"}, {})
+
+    def tearDown(self) -> None:
+        self.fixture.directory.cleanup()
+
+    def test_lines_outside_the_record_are_committed_in_an_own_worktree(self) -> None:
+        self.append_as_a_project_hook()
+        result = self.commit_in_worktree()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("this session's own worktree", result.stdout)
+        self.assertEqual(self.read_worktree_commit(), LOG_BASE + MINE_1)
+
+    def test_other_sessions_write_before_the_worktree_was_added_does_not_count(self) -> None:
+        self.add_other_session_event(ended_ago=10_000.0)
+        self.append_as_a_project_hook()
+        result = self.commit_in_worktree()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_other_sessions_write_in_the_worktree_keeps_the_check(self) -> None:
+        self.add_other_session_event(ended_ago=0.0)
+        self.append_as_a_project_hook()
+        result = self.commit_in_worktree()
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_another_process_working_in_the_worktree_keeps_the_check(self) -> None:
+        sleeper = subprocess.Popen(["sleep", "30"], cwd=self.worktree)
+
+        try:
+            self.append_as_a_project_hook()
+            result = self.commit_in_worktree()
+        finally:
+            sleeper.kill()
+            sleeper.wait()
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_worktree_older_than_the_records_keeps_the_check(self) -> None:
+        common_directory = Path(self.fixture.run_git("-C", str(self.worktree), "rev-parse", "--absolute-git-dir"))
+        long_ago = time.time() - 15 * 24 * 60 * 60
+
+        os.utime(common_directory / "commondir", (long_ago, long_ago))
+        self.append_as_a_project_hook()
+        result = self.commit_in_worktree()
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def test_original_checkout_keeps_the_check(self) -> None:
+        self.fixture.append(LOG_FILE, MINE_1)
+        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+
+    def append_as_a_project_hook(self) -> None:
+        """Change a file the way a formatting hook does, with no record of the write."""
+        with (self.worktree / LOG_FILE).open("a", newline="") as file:
+            file.write(MINE_1)
+
+    def commit_in_worktree(self) -> subprocess.CompletedProcess[str]:
+        base = self.fixture.run_git("rev-parse", "HEAD")
+        arguments = ("--private-index", "--expect-head", base, "--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        return self.fixture.run_wrapper(*arguments, cwd=self.worktree)
+
+    def read_worktree_commit(self) -> str:
+        return self.fixture.run_git("-C", str(self.worktree), "show", f"HEAD:{LOG_FILE}") + "\n"
+
+    def add_other_session_event(self, ended_ago: float) -> None:
+        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
+        now = time.time()
+        event = {
+            "root": str(self.worktree),
+            "path": NOTES_FILE,
+            "before": None,
+            "after": None,
+            "start": now - ended_ago - 1.0,
+            "end": now - ended_ago,
+            "tool": BASH_TOOL,
+            "record_format": 2,
+        }
+
+        record.parent.mkdir(parents=True, exist_ok=True)
+        record.write_text(json.dumps(event) + "\n")
 
 
 class CommitWrapperAmendTest(unittest.TestCase):
