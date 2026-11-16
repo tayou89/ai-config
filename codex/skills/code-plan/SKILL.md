@@ -63,7 +63,7 @@ For a revision, state what the prior version missed and why. Check existing rule
 
 ## Language
 
-Plan content (headings, descriptions, steps) must be written in **Korean**.
+Plan content (headings, descriptions, steps) is written in the language `work-principles` "Language" sets for what the user reads.
 Filenames stay English kebab-case (filesystem convention).
 Commit messages follow git-commit skill rules separately.
 
@@ -116,7 +116,7 @@ Failure → revise the plan before requesting approval. Don't defer this to impl
 
 ## 6a. Style Compliance Check (mandatory before approval)
 
-Before requesting plan approval, audit every diff block line-by-line against `code-style` and language-specific skill rules. Verify common violations: early void return / guard throw, blank-line placement after const block, truthy vs nullish check default, consecutive try-catch in same scope, useless `await` on non-thenable, `.catch()` chaining, type assertions, named-export style, type/interface section blanks. Record result in plan body — `Style compliance: passed (rules audited: ...)` or `Style compliance: failed (reason → fixed)`. Failure → revise diff before approval; don't carry violations into implementation.
+Before requesting plan approval, audit every diff block line-by-line against every rule of `code-style` and the language skill, not a subset. Record result in plan body — `Style compliance: passed (rules audited: ...)` or `Style compliance: failed (reason → fixed)`. Failure → revise diff before approval; don't carry violations into implementation.
 
 **Formatter check**: When the project uses or the plan adopts an auto-formatter or a linter with automatic fixes, run them in the project's order (fixes, then formatting) over sample code that exercises every wrapping and layout rule the plan keeps: a wrapped condition, a long signature and call, multi-item collections and imports, and blank lines between definitions. Sample code without those cases passes trivially and hides conflicts. Formatter output overrides hand style; where they differ, follow the formatter and record which one wins in the language skill, not only in the plan. Record `Formatter check: passed (<tool> <version>, cases exercised)` or the differences found and how they were resolved.
 
