@@ -108,7 +108,7 @@ When the plan changes generic signatures, interface contracts, callback signatur
 3. **Run the language's type checker** — `tsc --noEmit` for TypeScript, `mypy` for Python with type hints, `cargo check` for Rust, etc. Verify it passes against the stubbed environment.
 4. **Map variance positions** of every generic parameter in the plan (covariant / contravariant / invariant). Confirm the variance is what the plan assumes — sibling-generic assignability often fails silently when a callback puts `T` in argument position. See `typescript` skill "Generic Variance — Plan-Time Check" for details.
 5. **Trace internal call chains**. If method A calls method B, and B's signature changes, A must still compile. Map A→B→C... chains explicitly.
-6. **Record result in the plan body** — `Mock feasibility: passed` (with brief notes on what was stubbed) or `Mock feasibility: failed (reason)`.
+6. **Record result in the plan body** — `Mock feasibility: passed` (with brief notes on what was stubbed) or `Mock feasibility: failed (reason)`. Record what was actually checked; do not fabricate a pass or hide unresolved assumptions. If evidence needs an experiment, specify the experiment and possible outcomes.
 
 Failure → revise the plan before requesting approval. Don't defer this to implementation — implementation surprises ("the plan compiled in isolation but the whole project doesn't") almost always trace back to skipping this step.
 
@@ -126,12 +126,13 @@ Show a concrete plan and obtain explicit approval when scope or design still req
 
 ## 8. After Approval
 
-Mark version as `APPROVED` and begin implementation.
+Mark version as `APPROVED` and begin implementation. Follow applicable skills even when the plan omits them.
 
 ## 9. Mid-Implementation Changes
 
 **Material design changes** outside the approved behavior or scope: write a new version, mark the old one SUPERSEDED, and obtain the missing decision. Implementation refinements within approved scope do not require renewed approval.
 **Minor fixes** (params, typos, user-directed): inline edit in current version, no separate approval needed.
+**Plan-implementation gap**: When three or more unanticipated type/signature/cast changes appear, pause the affected implementation and revisit the design instead of accumulating workarounds. Continue independent authorized work.
 
 ## 10. Commit Granularity
 
@@ -148,3 +149,7 @@ Verification with high setup cost (live runtime, simulator startup, external ser
 Batch-together signals: shared external system, shared simulator/harness setup, shared operator-driven flow, same pattern being introduced across multiple plans (validation, retry, caching, etc.). Don't batch unrelated topics — a problem in one section blocks the whole batch.
 
 When deferring verification, record in the plan **what other plans the verification will batch with** so the deferral isn't forgotten and individual plans don't get pushed without coverage.
+
+## 12. After Each Commit
+
+After a commit, update the relevant plan and status records with the hash. Mark a plan complete only when all required work and verification are done; retain unresolved items and update references if the plan is renamed. Preserve a useful handover record when needed.

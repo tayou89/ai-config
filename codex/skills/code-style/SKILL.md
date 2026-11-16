@@ -9,6 +9,13 @@ Follow the current user request, applicable project instructions, and Codex perm
 
 Apply these conventions to implementation code and relevant code examples in plans or explanations. Syntax-specific rules (braces, strict equality, imports, class access, and TypeScript types) apply only to languages that support them; use the target language and project conventions elsewhere. For `.py` files the python skill overrides these conventions where they conflict. Do not rewrite unrelated existing code solely to impose this style. During type-only migration, preserve runtime behavior and defer cosmetic refactoring.
 
+## Design and Ownership
+
+- Before structural changes, search for 2–3 analogous local patterns and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
+- Compare at least two viable designs for a substantive change, using the code-plan skill for deeper structural alternatives, and do not label necessary separation or existing patterns as over-engineering.
+- Fix incorrect types, schemas, contracts, and ownership at their source rather than hiding them with casts, suppressions, loose types, or symptom-only wrappers.
+- Define and export shared types, interfaces, constants, and enums from their provider or genuine shared owner. Reuse definitions; keep derived values local for one consumer and shared when multiple consumers need them.
+
 ## Control Flow Braces
 
 All control statements (`if`, `else`, `for`, `while`, `do`) MUST use braces `{}` with body on a new line. Never omit braces or write single-line bodies.

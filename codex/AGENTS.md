@@ -2,23 +2,11 @@
 
 Apply these reusable preferences across projects. Follow system/developer instructions, the current user request, and more specific project instructions. Keep project details in the project. Existing authorization for an action remains valid; these rules do not create extra permission gates or authorize unrelated external actions.
 
-## Engineering and Design
-
-- Before structural changes, search for 2–3 analogous local patterns and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
-- Compare at least two viable designs for a substantive change, using the code-plan skill for deeper structural alternatives, and do not label necessary separation or existing patterns as over-engineering.
-- Fix incorrect types, schemas, contracts, and ownership at their source rather than hiding them with casts, suppressions, loose types, or symptom-only wrappers.
-- Define and export shared types, interfaces, constants, and enums from their provider or genuine shared owner. Reuse definitions; keep derived values local for one consumer and shared when multiple consumers need them.
-- Repeated guard/query/narrowing boilerplate against an owner's internals belongs in an appropriate owner API. Resource cleanup belongs with resource ownership. Keep behavior policy separate from payload data.
-
-## Planning, Verification, and Completion
+## Approvals and Tools
 
 - Before creating or modifying files, discuss the affected files and concrete changes and obtain user approval. Do not automatically persist exploratory discussions or review conclusions to planning documents or other project files. A direct instruction to apply a specific, already described change counts as approval; do not ask again for routine edits and verification within that approved scope. Read-only investigation and proposals in chat may proceed without approval.
-- For substantial work, inspect dependencies and uncertainties and prepare a concrete plan. Honor user-requested design/review checkpoints. Existing approval for a concrete implementation covers routine choices and verification within that scope.
-- Validate proposed shared type/signature changes with minimal consumer/provider examples and the project's compiler before treating feasibility as established. Record what was actually checked; do not fabricate a pass or hide unresolved assumptions. If evidence needs an experiment, specify the experiment and possible outcomes.
-- Follow applicable skills even when a plan omits them. When three or more unanticipated type/signature/cast changes appear, pause the affected implementation and revisit the design instead of accumulating workarounds. Continue independent authorized work.
 - Drive a browser through `ego-browser nodejs -e '<script>'`, or `ego-browser nodejs -e 'await import("<absolute path>")'` for a longer script file, which the command rules run outside the sandbox; do not start Chrome or another Chromium directly, since inside the macOS sandbox it aborts at startup and shows the user a crash dialog, and if a task needs one anyway, request escalated permissions on its first run (user decision, 2026-11-11).
 - Show the concrete change before an unapproved output-generating build or publication. Do not repeat approval already given for that action; ordinary read-only checks and reversible work within an authorized task proceed without extra confirmation.
-- After a commit, update the relevant plan and status records with the hash. Mark a plan complete only when all required work and verification are done; retain unresolved items and update references if the plan is renamed. Preserve a useful handover record when needed.
 
 ## Git, Files, and Security
 
@@ -30,8 +18,6 @@ Apply these reusable preferences across projects. Follow system/developer instru
 ## Task-Specific Skills
 
 Read the matching skill below before the task: a skill named `name` is at `skills/name/SKILL.md` beside this file, where the installer places it. Only load task-relevant skills. These are instruction workflows; Claude settings, hooks, model names, slash commands, commit wrapper, Discord forwarding, and automatic settings-repository pulls are not installed.
-
-The Skill Triggers, Core Work, Core Collaboration, and Shared Writing sections below and the decisions-and-collaboration, product-planning, report-writing, rule-writing, and ux-design skills are generated from the repository's `shared-rules/`; edit the source and regenerate instead of editing installed copies.
 
 ## Skill Triggers
 
@@ -129,7 +115,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 ### Shared files and sessions
 
-- Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. When sessions share one working folder, prepare each commit in a staging area of your own built from a commit you record, commit only while the branch still points to that commit (otherwise rebuild from the new one), bring the shared staging area up to date for the committed files right after committing, and confirm the commit holds only your files under your message; otherwise a simultaneous commit by another session can take what you staged, a staging area built before its commit can revert it, or its next commit can silently undo yours. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
+- Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. When sessions share one working folder, stage and commit as `git-commit` describes, so another session's commit can neither take nor undo yours. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
 - When sessions share one working folder, change files with the file-editing tool rather than shell commands or scripts wherever it can make the change, leaving generated files to their generator: only its writes can be shown to be your session's at commit time, so a script's write that overlaps another session's work stops the commit for the user's approval (user decision, 2026-11-11).
 - Let only one writer use a checkout, a file in it, or a shared resource (index, test database, port) at a time, and agree the order with the user when work overlaps; a clean status is not a lock (user decision, 2026-11-13). A scheduled run that edits a shared folder follows this rule too: it takes the folder's edit lock and, when another editor holds it or uncommitted changes exist, skips the run and reports why.
 - Read the `decisions-and-collaboration` skill before you start another session or take on work outside your session's area, and once you become the main session: it holds the rules for running sessions (user decision, 2026-11-12).
