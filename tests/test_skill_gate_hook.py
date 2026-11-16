@@ -184,6 +184,19 @@ class SkillGateHookTest(unittest.TestCase):
             self.assertEqual(requirement.skills if requirement else None, (UX_DESIGN,), name)
         self.assertIsNone(skill_gate_hook.find_requirement("mcp__figma-server__get_screenshot", {}, "/tmp"))
 
+    def test_figma_code_of_several_lines_also_needs_the_code_skills(self) -> None:
+        program = {"code": "const page = figma.currentPage;\nreturn page.name;"}
+        cases = [
+            ("use_figma", program, (UX_DESIGN, *TYPESCRIPT_SKILLS)),
+            ("use_figma", {"code": "return figma.currentPage.name;"}, (UX_DESIGN,)),
+            ("upload_assets", program, (UX_DESIGN,)),
+        ]
+
+        for name, tool_input, skills in cases:
+            requirement = skill_gate_hook.find_requirement(f"mcp__figma-server__{name}", tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, name)
+
     def test_edit_is_refused_until_its_skills_load(self) -> None:
         self.assertEqual(
             self._read_reason(self._decide()),

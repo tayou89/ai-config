@@ -106,7 +106,9 @@ _SHELL_TOOLS = frozenset({"Bash", "Monitor", "mcp__terminal__run_in_terminal"})
 _COMMAND_KEY = "command"
 _MCP_PREFIX = "mcp__"
 _MCP_SEPARATOR = "__"
-_DESIGN_TOOL_NAMES = frozenset({"use_figma", "upload_assets", "create_new_file", "send_code_to_figma"})
+_DESIGN_CODE_TOOL = "use_figma"
+_DESIGN_CODE_KEY = "code"
+_DESIGN_TOOL_NAMES = frozenset({_DESIGN_CODE_TOOL, "upload_assets", "create_new_file", "send_code_to_figma"})
 _SHORT_OPTION_CLUSTER = re.compile(r"-[A-Za-z]{2,}")
 _OPTION_PREFIX = "-"
 _STANDARD_INPUT = "-"
@@ -197,9 +199,19 @@ def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None
     elif tool_name in _SHELL_TOOLS:
         return _find_command_requirement(str(tool_input.get(_COMMAND_KEY) or ""), cwd)
     elif _is_design_tool(tool_name):
-        return _make_requirement(f"with `{tool_name.rsplit(_MCP_SEPARATOR, 1)[-1]}`", [_UX_DESIGN])
+        design_tool = tool_name.rsplit(_MCP_SEPARATOR, 1)[-1]
+
+        return _make_requirement(f"with `{design_tool}`", _list_design_tool_skills(design_tool, tool_input))
     else:
         return None
+
+
+def _list_design_tool_skills(design_tool: str, tool_input: dict[str, Any]) -> list[str]:
+    """A design write needs `ux-design`; plugin code of several lines is a one-off JavaScript program too."""
+    code = tool_input.get(_DESIGN_CODE_KEY)
+    is_code_program = design_tool == _DESIGN_CODE_TOOL and isinstance(code, str) and _is_multi_line(code)
+
+    return [_UX_DESIGN, *_JAVASCRIPT_RULES.skills] if is_code_program else [_UX_DESIGN]
 
 
 def list_file_skills(path: str) -> list[str]:
