@@ -31,3 +31,6 @@ plugins/installed_plugins.json
 
 # 채널 데이터 (토큰, 접근 정보)
 channels/
+
+# macOS 폴더 보기 설정 파일
+.DS_Store
