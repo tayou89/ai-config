@@ -3,7 +3,9 @@
 
 A SessionStart hook. The Completeness check in CLAUDE.md asks each task to
 say how it serves the project's goal, recorded in one or two sentences under
-a goal heading in the project rules (user decision, 2026-11-12). When the
+a goal heading in the project rules (user decision, 2026-11-12), with security
+and failure-handling goals for a product other people use (user decision,
+2026-11-13). When the
 session's folder belongs to a project whose rules files exist but hold no
 such heading, the hook adds a short notice to the session's context. It is
 silent outside a project: a folder with no git repository, a repository
@@ -35,8 +37,9 @@ _SILENT_SOURCES = ("compact",)
 _HOOK_EVENT = "SessionStart"
 _NOTICE = (
     '[PROJECT GOAL] The project rules in {root} ({files}) have no goal section: a "## Goal" heading with one or two '
-    "sentences on what the project is for. The Completeness check in CLAUDE.md asks the user for that goal before the "
-    "first task and records the answer under that heading."
+    "sentences on what the project is for and, for a product other people use, its security and failure-handling "
+    "goals. The Completeness check in CLAUDE.md asks the user for that goal before the first task and records the "
+    "answer under that heading."
 )
 
 
