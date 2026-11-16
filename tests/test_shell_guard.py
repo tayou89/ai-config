@@ -81,6 +81,7 @@ PUSH_BRANCH = "main"
 PUSH_LOCATIONS = ("pushing", "matching", "guarded", "detached")
 WORKFLOW_POLICY_TEXT = '{"mode": "pull-request", "base": "main", "requiredChecks": ["checks"]}'
 SEED_FILES = ("a.txt", "b.txt", "shared.txt")
+REGULAR_FILE_MODE = "100644"
 OTHER_SESSION_SUBJECT = "Feat: land the other session's change"
 HEAD_COMMIT_SUBJECT = "Feat: commit this session's change"
 HEAD_COMMIT_MESSAGE = f"{HEAD_COMMIT_SUBJECT}\n\n- one\n- two\n- three"
@@ -676,6 +677,17 @@ class WrapperHeadFixture:
         self.run_git("update-index", "--add", "--", *paths, index=self.private_index)
         return base
 
+    def build_partial_index(self, path: str, text: str) -> str:
+        """An index read from HEAD whose entry for path holds text, as a session builds one for part of a file."""
+        base = self.read_head()
+        content = self.root / "partial-content"
+
+        content.write_text(text)
+        blob = self.run_git("hash-object", "-w", str(content))
+        self.run_git("read-tree", base, index=self.private_index)
+        self.run_git("update-index", "--cacheinfo", f"{REGULAR_FILE_MODE},{blob},{path}", index=self.private_index)
+        return base
+
     def commit_other_session(self, path: str) -> str:
         parent = self.read_head()
 
@@ -761,6 +773,32 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
         self.assertEqual(self.fixture.run_git("diff", "--name-only", "HEAD^", "HEAD"), "b.txt")
+
+    def test_hand_built_index_commit_leaves_shared_index_current(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("status", "--porcelain"), "")
+
+    def test_hand_built_partial_commit_leaves_only_other_lines_unstaged(self) -> None:
+        self.fixture.edit("b.txt", "mine\nthe other session's line\n")
+        base = self.fixture.build_partial_index("b.txt", "b.txt\nmine\n")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("show", "HEAD:b.txt"), "b.txt\nmine")
+        self.assertEqual(self.fixture.run_git("diff", "--cached", "--name-only"), "")
+        self.assertEqual(self.fixture.run_git("diff", "--name-only"), "b.txt")
+
+    def test_hand_built_index_is_left_to_its_caller(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.fixture.private_index.is_file())
 
     def test_no_stage_still_checks_listed_files(self) -> None:
         self.fixture.edit("a.txt", "mine\n")

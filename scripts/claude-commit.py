@@ -27,8 +27,9 @@ in their old state, and committing it reverts them. --expect-head names
 the commit the index was built from; the wrapper refuses when HEAD is
 another commit, like `git update-ref <ref> <new> <old>` and
 `git push --force-with-lease=<ref>:<expect>`. A private index
-(GIT_INDEX_FILE) requires it and the file list. After committing, the
-wrapper checks that git commit replaced the expected HEAD and undoes the
+(GIT_INDEX_FILE) requires it and the file list. After committing from
+it, the wrapper points the shared index's entries for those files at the
+new commit, as --private-index does. After committing, the wrapper checks that git commit replaced the expected HEAD and undoes the
 commit with the same compare-and-swap when HEAD moved while it started.
 Another session can commit the moment git commit returns, so reading HEAD
 again could name that session's commit and undo it. So the wrapper marks
@@ -91,7 +92,7 @@ import secrets
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -215,8 +216,12 @@ def fail(message: str, code: int) -> NoReturn:
     sys.exit(code)
 
 
-def run_git(args: Sequence[str], capture_output: bool = False) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["git", *args], check=False, text=True, capture_output=capture_output)
+def run_git(
+    args: Sequence[str],
+    capture_output: bool = False,
+    environment: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["git", *args], check=False, text=True, capture_output=capture_output, env=environment)
 
 
 def contains_internal_term(text: str) -> bool:
@@ -537,6 +542,32 @@ def use_private_index(base: str | None, files: Sequence[str]) -> Iterator[None]:
         refresh_shared_index(files)
 
 
+@contextlib.contextmanager
+def use_caller_index(files: Sequence[str]) -> Iterator[None]:
+    """Commit from the index the caller built, then refresh the shared index as use_private_index does.
+
+    Git updates only the index a commit is made from, so without this the
+    shared index keeps the committed files' old contents and `git status`
+    shows them as changed both staged and unstaged until someone resets them.
+    """
+    try:
+        yield
+    finally:
+        refresh_shared_index(files)
+
+
+def use_commit_index(
+    arguments: CommitArguments,
+    expected_head: str | None,
+) -> contextlib.AbstractContextManager[None]:
+    if arguments.private_index:
+        return use_private_index(expected_head, arguments.files)
+    elif PRIVATE_INDEX_VARIABLE in os.environ:
+        return use_caller_index(arguments.files)
+    else:
+        return contextlib.nullcontext()
+
+
 def read_index_base(base: str | None) -> None:
     read_tree_proc = run_git(["read-tree", base] if base else ["read-tree", "--empty"], capture_output=True)
 
@@ -546,7 +577,8 @@ def read_index_base(base: str | None) -> None:
 
 def refresh_shared_index(files: Sequence[str]) -> None:
     """A shared index left at the old commit makes the next commit from it revert these files."""
-    reset_proc = run_git(["reset", "-q", "--", *files], capture_output=True)
+    shared_environment = {name: value for name, value in os.environ.items() if name != PRIVATE_INDEX_VARIABLE}
+    reset_proc = run_git(["reset", "-q", "--", *files], capture_output=True, environment=shared_environment)
 
     if reset_proc.returncode != 0:
         print(
@@ -1122,10 +1154,7 @@ def main(argv: list[str]) -> None:
     check_amend_target(arguments.amend, expected_head)
     print("=== Recent commits ===")
     run_git(["log", "--oneline", "-3"])
-    if arguments.private_index:
-        with use_private_index(expected_head, files):
-            made = stage_and_commit(arguments, expected_head, approved, metrics)
-    else:
+    with use_commit_index(arguments, expected_head):
         made = stage_and_commit(arguments, expected_head, approved, metrics)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1", made.commit])
