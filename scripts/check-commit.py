@@ -7,10 +7,14 @@ git commit alike. Commits need no user approval (user decision,
 2026-11-09), so these checks stand where that review was.
 
 Several sessions share one checkout, so the working tree can hold other
-sessions' unfinished edits. The check copies out the index being
-committed (the private one when GIT_INDEX_FILE is set) and runs the
-checks on that copy, with every GIT_ variable removed so the tests'
-own repositories never touch the index being committed.
+sessions' unfinished edits. The hook runs this script from a copy of the
+index being committed (the private one when GIT_INDEX_FILE is set), so
+the list of checks and the token scan are the committed ones too. The
+script copies the index out again and runs the checks on that copy, with
+every GIT_ variable removed so the tests' own repositories never touch
+the index being committed; the second copy takes a fraction of a second
+and keeps a run by hand, or an older copy of this script that a commit
+still holds, checking the index as well.
 
 With --against <commit>, as the GitHub Actions `checks` job runs it on
 every pull request and push, it runs the same checks on the checked-out

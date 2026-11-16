@@ -90,7 +90,7 @@ def print_problems(heading: str, problems: Sequence[str]) -> None:
 
 
 def announce_wait() -> None:
-    print("Another integration in this repository is running; waiting for it to finish.", flush=True)
+    print("Another commit or integration in this checkout is running; waiting for it to finish.", flush=True)
 
 
 def has_tracked_changes(root: Path) -> bool:

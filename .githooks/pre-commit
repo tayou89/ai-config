@@ -1,3 +1,9 @@
 #!/bin/sh
 # Runs this repository's pre-commit check; install.py points core.hooksPath here.
-exec python3 scripts/check-commit.py
+# Git reads only this file from the working tree. The check runner, its list of checks, and their inputs all
+# come from the index being committed, so another session's unfinished edit to them cannot decide this commit.
+copy=$(mktemp -d "${TMPDIR:-/tmp}/ai-config-commit-check.XXXXXX") || exit 1
+trap 'rm -rf "$copy"' EXIT
+trap 'exit 1' HUP INT TERM
+git checkout-index --all --prefix="$copy/" || exit 1
+python3 "$copy/scripts/check-commit.py"

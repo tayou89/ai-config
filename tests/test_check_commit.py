@@ -24,6 +24,10 @@ FAKE_GITHUB_TOKEN = "gh" + "p_" + "B" * 36
 PASSING_STAND_IN = "import sys\nsys.exit(0)\n"
 FAILING_STAND_IN = "import sys\nsys.exit(1)\n"
 STAND_IN_SCRIPTS = ("sync-shared-rules.py", "check-references.py", "check-rule-size.py")
+RUNNER = "scripts/check-commit.py"
+TESTS_CHECK_LINE = '    ("tests",'
+ADDED_CHECK_NAME = "a check only the edited runner lists"
+ADDED_CHECK_LINE = f'    ("{ADDED_CHECK_NAME}", ["scripts/added-check.py"]),\n'
 SAMPLE_TEST = '''import os
 import unittest
 from pathlib import Path
@@ -44,9 +48,11 @@ class CheckCommitFixture:
         self.repository = self.root / "repository"
         self.private_index = self.root / "private-index"
         self.git_config = self.root / "gitconfig"
+        self.temporary = self.root / "tmp"
 
     def create(self) -> None:
         self.git_config.write_text("[user]\n\tname = Check Test\n\temail = check@example.com\n")
+        self.temporary.mkdir()
         for relative in COPIED_FILES:
             target = self.repository / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -64,7 +70,9 @@ class CheckCommitFixture:
     def environment(self, index: Path | None = None) -> dict[str, str]:
         environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
 
-        environment.update({"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1"})
+        environment.update(
+            {"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1", "TMPDIR": str(self.temporary)},
+        )
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
         return environment
@@ -89,6 +97,11 @@ class CheckCommitFixture:
 
     def read_head(self) -> str:
         return self.run_git("rev-parse", "HEAD").stdout.strip()
+
+    def make_runner_with_added_check(self) -> str:
+        runner = (self.repository / RUNNER).read_text()
+
+        return runner.replace(TESTS_CHECK_LINE, ADDED_CHECK_LINE + TESTS_CHECK_LINE, 1)
 
     def commit_private_index(self, path: str, text: str) -> subprocess.CompletedProcess[str]:
         blob = subprocess.run(
@@ -121,6 +134,29 @@ class CheckCommitTest(unittest.TestCase):
         result = self.fixture.commit_private_index("other.txt", "another session's line\n")
 
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_runner_edit_left_in_the_working_tree_does_not_decide_the_checks(self) -> None:
+        self.fixture.write(RUNNER, self.fixture.make_runner_with_added_check())
+        result = self.fixture.commit_private_index("other.txt", "another session's line\n")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn(ADDED_CHECK_NAME, result.stderr)
+
+    def test_committed_runner_decides_the_checks(self) -> None:
+        base = self.fixture.read_head()
+        result = self.fixture.commit_private_index(RUNNER, self.fixture.make_runner_with_added_check())
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(ADDED_CHECK_NAME, result.stderr)
+        self.assertEqual(self.fixture.read_head(), base)
+
+    def test_hook_leaves_no_copy_behind(self) -> None:
+        passed = self.fixture.commit_private_index("other.txt", "fine\n")
+        failed = self.fixture.commit_private_index("value.txt", BAD_VALUE)
+
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertEqual(list(self.fixture.temporary.iterdir()), [])
 
     def test_failing_content_stops_the_commit(self) -> None:
         base = self.fixture.read_head()

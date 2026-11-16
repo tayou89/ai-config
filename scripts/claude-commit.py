@@ -37,6 +37,19 @@ its git commit with GIT_REFLOG_ACTION, as git's own rebase and pull do,
 reads the commit from the reflog entry that carries the mark and the
 subject, and moves HEAD back only while HEAD is still that commit.
 
+A pre-commit check can run for minutes, and git commit refuses to move
+HEAD when another commit landed meanwhile, so the slower of two sessions
+used to throw its check away. The wrapper therefore holds this
+checkout's lock (integration_lock.py; in the original checkout it is the
+lock the integration tools hold) from the HEAD check until its commit
+has landed, as a commit queue does: a later commit waits instead of
+checking a base about to be replaced. When the commits that landed
+meanwhile sit on top of the expected HEAD on the same branch and leave
+the listed files as they were, the wrapper rebuilds the private index on the new HEAD (a
+hand-built one by git's own three-way index merge) and commits there,
+so the check runs once, on the tree that is committed, as a merge queue
+checks the combined result. Otherwise it refuses as before.
+
 Commits need no user approval (user decision, 2026-11-09), so a large
 change gets a checklist review instead: when the staged change touches
 LARGE_COMMIT_LINES or more lines outside documents and lock files, the
@@ -72,7 +85,9 @@ Exit codes:
     3  staging mismatch
     4  usage error
     5  credential file or live-looking token staged
-    6  HEAD moved since the index was built (nothing committed)
+    6  HEAD moved since the index was built, and the commits since change
+       a listed file or the index cannot be rebuilt on them (nothing
+       committed)
     7  large code change without --reviewed (nothing committed)
     8  staged lines this session's write record does not show as its own,
        own lines that cannot be separated from them, or an
@@ -80,6 +95,8 @@ Exit codes:
        dialog showed it (nothing committed)
     9  --amend of a commit this session did not make, or one already
        pushed (nothing committed)
+   10  another commit or integration held this checkout's lock longer
+       than the wrapper waits (nothing committed)
 """
 
 from __future__ import annotations
@@ -106,7 +123,8 @@ from commit_arguments import (
     CommitArgumentsError,
     parse_commit_arguments,
 )
-from integration_commands import CommandError, list_worktree_users
+from integration_commands import CommandError, announce_wait, is_ancestor, list_worktree_users
+from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integration_lock
 from own_lines import ContestedLine, OwnCommitContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
 from session_commits import add_session_commit, is_session_commit
@@ -169,6 +187,8 @@ EXIT_HEAD_MOVED = 6
 EXIT_REVIEW_MISSING = 7
 EXIT_FOREIGN_LINES = 8
 EXIT_AMEND_TARGET = 9
+EXIT_LOCK_TIMEOUT = 10
+MOVED_BASE_NOTE = "HEAD moved from {old} to {new}; the commits since leave your files as they were, so the index is rebuilt on {new} and checked there"
 REMOTE_BRANCH_FORMAT = "--format=%(if)%(symref)%(then)%(else)%(refname:short)%(end)"
 NO_SESSION_REASON = "cannot be shown to be this session's: only a Claude session lists the commits it makes"
 OTHER_COMMIT_REASON = "this session did not make through this wrapper (another session's or a person's commit, or one made before the wrapper listed commits)"
@@ -201,6 +221,14 @@ class OwnLinesReading:
     path: str
     content: OwnCommitContent | None
     problem: str | None
+
+
+@dataclass(frozen=True)
+class MovedBase:
+    """The HEAD the index was built from, and the newer HEAD the wrapper commits on instead."""
+
+    old: str
+    new: str
 
 
 @dataclass(frozen=True)
@@ -587,17 +615,142 @@ def refresh_shared_index(files: Sequence[str]) -> None:
         )
 
 
+@contextlib.contextmanager
+def hold_commit_lock() -> Iterator[None]:
+    """Hold this checkout's lock from the HEAD check until the commit has landed, as a commit queue does.
+
+    A commit that waits here runs its check once, on the HEAD it then commits on, instead of on a base another commit
+    is about to replace. Each checkout has its own Git folder, so worktrees on other branches never wait for each other.
+    """
+    try:
+        with hold_integration_lock(read_git_directory(), DEFAULT_WAIT_SECONDS, announce_wait):
+            yield
+    except LockTimeoutError as error:
+        fail(f"FAIL: {error}. Nothing was committed.", EXIT_LOCK_TIMEOUT)
+
+
+def read_git_directory() -> Path:
+    git_directory_proc = run_git(["rev-parse", "--absolute-git-dir"], capture_output=True)
+
+    if git_directory_proc.returncode == 0:
+        return Path(git_directory_proc.stdout.strip())
+    else:
+        fail(
+            "FAIL: git could not find this checkout's Git folder, so the commit lock could not be taken", EXIT_GIT_ERROR
+        )
+
+
+def read_head_branch() -> str | None:
+    branch_proc = run_git(["symbolic-ref", "--quiet", HEAD_REVISION], capture_output=True)
+
+    if branch_proc.returncode == 0:
+        return branch_proc.stdout.strip()
+    else:
+        return None
+
+
+def find_commit_base(arguments: CommitArguments, expected_head: str | None, starting_branch: str | None) -> str | None:
+    """The HEAD to commit on: the expected one, or a newer one on the same branch that leaves the listed files alone."""
+    moved_base = find_moved_base(arguments, expected_head, starting_branch)
+
+    if moved_base is not None:
+        move_index_base(arguments, moved_base)
+        print(f"=== {MOVED_BASE_NOTE.format(old=shorten(moved_base.old), new=shorten(moved_base.new))} ===")
+        return moved_base.new
+    else:
+        check_head_unchanged(expected_head, arguments.files)
+        return expected_head
+
+
+def find_moved_base(
+    arguments: CommitArguments,
+    expected_head: str | None,
+    starting_branch: str | None,
+) -> MovedBase | None:
+    current_head = read_revision(HEAD_REVISION)
+
+    if (
+        expected_head is not None
+        and current_head is not None
+        and read_head_branch() == starting_branch
+        and is_index_movable(arguments, expected_head, current_head)
+    ):
+        return MovedBase(expected_head, current_head)
+    else:
+        return None
+
+
+def move_index_base(arguments: CommitArguments, moved_base: MovedBase) -> None:
+    """The wrapper reads its own index from the new base later; a caller-built index is moved here."""
+    if not arguments.private_index:
+        move_caller_index(moved_base, arguments.files)
+
+
+def move_caller_index(moved_base: MovedBase, files: Sequence[str]) -> None:
+    tree_proc = run_git(["write-tree"], capture_output=True)
+    caller_tree = tree_proc.stdout.strip()
+
+    if tree_proc.returncode != 0:
+        fail_head_moved(moved_base.old, moved_base.new, files)
+    elif not merge_index_onto(moved_base, caller_tree):
+        run_git(["read-tree", caller_tree], capture_output=True)
+        fail_head_moved(moved_base.old, moved_base.new, files)
+
+
+def merge_index_onto(moved_base: MovedBase, tree: str) -> bool:
+    """Git's three-way index merge takes each path from the side that changed it, leaving one both changed unmerged.
+
+    It needs the index to match the new base first, and -i keeps it from looking at the working tree, which holds
+    other sessions' edits.
+    """
+    reset_proc = run_git(["read-tree", moved_base.new], capture_output=True)
+    merge_arguments = ["read-tree", "-m", "-i", "--aggressive", moved_base.old, moved_base.new, tree]
+    merge_proc = run_git(merge_arguments, capture_output=True) if reset_proc.returncode == 0 else reset_proc
+    unmerged_proc = run_git(["ls-files", "--unmerged"], capture_output=True)
+
+    return merge_proc.returncode == 0 and unmerged_proc.returncode == 0 and not unmerged_proc.stdout
+
+
 def check_head_unchanged(expected_head: str | None, files: Sequence[str]) -> None:
     current_head = read_revision(HEAD_REVISION)
 
     if current_head is not None and current_head != expected_head:
-        moved_summary = (
-            f"FAIL: HEAD moved from {shorten(expected_head)} to {shorten(current_head)} after the index was built"
-        )
-
-        fail(make_moved_head_message([moved_summary], expected_head, current_head, files), EXIT_HEAD_MOVED)
+        fail_head_moved(expected_head, current_head, files)
     elif current_head is None and expected_head is not None:
         fail(f"FAIL: HEAD no longer points to a commit (expected {shorten(expected_head)})", EXIT_HEAD_MOVED)
+
+
+def fail_head_moved(expected_head: str | None, current_head: str, files: Sequence[str]) -> NoReturn:
+    moved_summary = (
+        f"FAIL: HEAD moved from {shorten(expected_head)} to {shorten(current_head)} after the index was built"
+    )
+
+    fail(make_moved_head_message([moved_summary], expected_head, current_head, files), EXIT_HEAD_MOVED)
+
+
+def list_net_changed_files(old: str, new: str, files: Sequence[str]) -> list[str]:
+    """The listed files the newer commit holds differently, merges included, which a log of each commit can miss."""
+    diff_proc = run_git(["diff", "--name-only", "-z", old, new, "--", *files], capture_output=True)
+
+    if diff_proc.returncode == 0:
+        return split_path_list(diff_proc.stdout)
+    else:
+        return list(files)
+
+
+def is_index_movable(arguments: CommitArguments, expected_head: str, current_head: str) -> bool:
+    """Only a new commit on commits that leave the listed files as they were, from an index of this commit alone.
+
+    An amend replaces the expected HEAD itself, and the shared index may hold what a merge or cherry-pick prepared.
+    """
+    return (
+        current_head != expected_head
+        and not arguments.amend
+        and bool(arguments.files)
+        and (arguments.private_index or PRIVATE_INDEX_VARIABLE in os.environ)
+        and is_ancestor(Path(read_repository_root()), expected_head, current_head)
+        and not list_net_changed_files(expected_head, current_head, arguments.files)
+    )
 
 
 def check_commit_base(made: MadeCommit, expected_head: str | None, amend: bool, files: Sequence[str]) -> None:
@@ -1070,7 +1223,8 @@ def print_verification(
     print(f"| {'Amends own unpushed commit':<30} | {'OK' if amend else 'n/a (new commit)'}")
 
 
-def do_commit(message: str, amend: bool) -> MadeCommit:
+def do_commit(message: str, amend: bool, expected_head: str | None, files: Sequence[str]) -> MadeCommit:
+    """Git commit itself refuses to move HEAD when another commit landed while the pre-commit check ran."""
     reflog_action = make_reflog_action(amend)
     env = os.environ.copy()
     env["CLAUDE_SKILL_GIT_COMMIT"] = "1"
@@ -1086,6 +1240,7 @@ def do_commit(message: str, amend: bool) -> MadeCommit:
         check=False,
     )
     if commit_proc.returncode != 0:
+        check_head_unchanged(expected_head, files)
         sys.exit(EXIT_GIT_ERROR)
     return find_made_commit(make_commit_reflog_message(reflog_action, message))
 
@@ -1149,13 +1304,16 @@ def main(argv: list[str]) -> None:
     metrics = validate_message(arguments.message)
     check_private_index_environment(arguments.private_index)
     check_private_index_arguments(arguments.expected_head, files)
-    expected_head = resolve_expected_head(arguments.expected_head)
-    check_head_unchanged(expected_head, files)
-    check_amend_target(arguments.amend, expected_head)
-    print("=== Recent commits ===")
-    run_git(["log", "--oneline", "-3"])
-    with use_commit_index(arguments, expected_head):
-        made = stage_and_commit(arguments, expected_head, approved, metrics)
+    requested_head = resolve_expected_head(arguments.expected_head)
+    starting_branch = read_head_branch()
+    with hold_commit_lock():
+        expected_head = requested_head if arguments.expected_head is not None else read_revision(HEAD_REVISION)
+        base = find_commit_base(arguments, expected_head, starting_branch)
+        check_amend_target(arguments.amend, base)
+        print("=== Recent commits ===")
+        run_git(["log", "--oneline", "-3"])
+        with use_commit_index(arguments, base):
+            made = stage_and_commit(arguments, base, approved, metrics)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1", made.commit])
 
@@ -1178,7 +1336,7 @@ def stage_and_commit(
     check_large_commit_reviewed(code_lines, arguments.reviewed)
     print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK", arguments.amend)
     print("=== Committing ===")
-    made = do_commit(arguments.message, arguments.amend)
+    made = do_commit(arguments.message, arguments.amend, expected_head, arguments.files)
     check_commit_base(made, expected_head, arguments.amend, arguments.files)
     record_session_commit(made.commit)
     return made

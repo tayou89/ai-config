@@ -132,6 +132,23 @@ case "${landing_variable}" in *before*) land_other_commit ;; esac
 "{real_git}" "$@" || exit
 case "${landing_variable}" in *after*) land_other_commit ;; esac
 """
+MOVING_PRE_COMMIT_HOOK_TEXT = """#!/bin/sh
+# Lands another session's commit while the pre-commit check runs, as a slow check lets one in.
+parent=$(env -u GIT_INDEX_FILE git rev-parse HEAD)
+other=$(env -u GIT_INDEX_FILE git commit-tree "$parent^{{tree}}" -p "$parent" -m "{subject}")
+env -u GIT_INDEX_FILE -u GIT_REFLOG_ACTION git update-ref -m "commit: {subject}" HEAD "$other" "$parent"
+"""
+REBUILT_NOTE = "the index is rebuilt on"
+HEAD_MOVED_NOTE = "HEAD moved from"
+LOCK_WAIT_NOTE = "Another commit or integration in this checkout is running"
+LOCK_WAIT_DEADLINE_SECONDS = 30
+LOCK_POLL_SECONDS = 0.1
+UNRELATED_HISTORY_SUBJECT = "Chore: start a history of its own"
+OTHER_BRANCH = "other-work"
+INTEGRATION_LOCK_MODULE = SCRIPTS_DIRECTORY / "integration_lock.py"
+INTEGRATION_LOCK_SPECIFICATION = importlib.util.spec_from_file_location("integration_lock", INTEGRATION_LOCK_MODULE)
+integration_lock = importlib.util.module_from_spec(INTEGRATION_LOCK_SPECIFICATION)
+INTEGRATION_LOCK_SPECIFICATION.loader.exec_module(integration_lock)
 
 EDIT_TOOL = "Edit"
 WRITE_TOOL = "Write"
@@ -655,15 +672,51 @@ class WrapperHeadFixture:
             check=False,
         )
 
+    def run_wrapper_with_own_index(self, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(COMMIT_WRAPPER), *arguments],
+            env=self.environment(),
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    def start_wrapper(self, output: Path, index: Path | None, *arguments: str) -> subprocess.Popen[str]:
+        with output.open("w") as output_file:
+            return subprocess.Popen(
+                [sys.executable, str(COMMIT_WRAPPER), *arguments],
+                env=self.environment(index),
+                cwd=self.repository,
+                stdout=output_file,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+
+    def add_moving_pre_commit_hook(self) -> None:
+        self.add_hook(PRE_COMMIT_HOOK, MOVING_PRE_COMMIT_HOOK_TEXT.format(subject=OTHER_SESSION_SUBJECT))
+
     def read_head(self) -> str:
         return self.run_git("rev-parse", "HEAD")
 
     def read_subject(self, revision: str) -> str:
         return self.run_git("log", "-1", "--format=%s", revision)
 
+    def read_committed(self, path: str) -> str:
+        return self.run_git("show", f"HEAD:{path}")
+
     def edit(self, path: str, text: str) -> None:
         with (self.repository / path).open("a") as file:
             file.write(text)
+
+    def start_unrelated_history(self) -> str:
+        """Point HEAD at a commit that does not descend from the old one, as a reset to other work would."""
+        previous = self.read_head()
+        tree = self.run_git("rev-parse", f"{previous}^{{tree}}")
+        commit = self.run_git("commit-tree", tree, "-m", UNRELATED_HISTORY_SUBJECT)
+
+        self.run_git("update-ref", "HEAD", commit, previous)
+        return commit
 
     def read_listed_commits(self, session: str) -> list[str]:
         commit_list = self.config_directory / RECORD_DIRECTORY_NAME / f"{session}{COMMIT_LIST_SUFFIX}"
@@ -675,6 +728,13 @@ class WrapperHeadFixture:
 
         self.run_git("read-tree", base, index=self.private_index)
         self.run_git("update-index", "--add", "--", *paths, index=self.private_index)
+        return base
+
+    def build_deleting_index(self, path: str) -> str:
+        base = self.read_head()
+
+        self.run_git("read-tree", base, index=self.private_index)
+        self.run_git("update-index", "--force-remove", "--", path, index=self.private_index)
         return base
 
     def build_partial_index(self, path: str, text: str) -> str:
@@ -725,16 +785,146 @@ class CommitWrapperHeadTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
 
-    def test_stale_private_index_is_refused(self) -> None:
+    def test_index_built_before_a_commit_on_other_files_is_rebuilt_on_it(self) -> None:
         self.fixture.edit("b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
         other = self.fixture.commit_other_session("a.txt")
         result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
 
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(REBUILT_NOTE, result.stdout)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), other)
+        self.assertEqual(self.fixture.run_git("diff", "--name-only", "HEAD^", "HEAD"), "b.txt")
+        self.assertIn("the other session's line", self.fixture.read_committed("a.txt"))
+        self.assertEqual(self.fixture.run_git("status", "--porcelain", "--", "b.txt"), "")
+
+    def test_own_private_index_is_read_from_the_newer_head(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.read_head()
+        other = self.fixture.commit_other_session("a.txt")
+        arguments = ["--private-index", "--expect-head", base, HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper_with_own_index(*arguments)
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), other)
+        self.assertEqual(self.fixture.run_git("diff", "--name-only", "HEAD^", "HEAD"), "b.txt")
+        self.assertIn("the other session's line", self.fixture.read_committed("a.txt"))
+
+    def test_deletion_in_a_rebuilt_index_is_committed(self) -> None:
+        (self.fixture.repository / "b.txt").unlink()
+        base = self.fixture.build_deleting_index("b.txt")
+        other = self.fixture.commit_other_session("a.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), other)
+        self.assertEqual(self.fixture.run_git("ls-tree", "--name-only", "HEAD", "b.txt"), "")
+        self.assertIn("the other session's line", self.fixture.read_committed("a.txt"))
+
+    def test_head_on_an_unrelated_history_is_refused(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        unrelated = self.fixture.start_unrelated_history()
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.read_head(), unrelated)
+
+    def test_amend_after_a_commit_on_other_files_is_refused(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        first_base = self.fixture.build_private_index("b.txt")
+        first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
+        mine = self.fixture.read_head()
+        self.fixture.edit("b.txt", "more of mine\n")
+        self.fixture.build_private_index("b.txt")
+        other = self.fixture.commit_other_session("a.txt")
+        amend_arguments = ["--amend", "--expect-head", mine, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+        result = self.fixture.run_wrapper(*amend_arguments, session=OWN_SESSION)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
         self.assertEqual(self.fixture.read_head(), other)
-        self.assertIn(OTHER_SESSION_SUBJECT, result.stderr)
-        self.assertIn("also commit: none", result.stderr)
+
+    def test_commit_waits_for_the_checkout_lock_and_lands_on_the_newer_head(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        output = self.fixture.root / "wrapper-output"
+        git_directory = self.fixture.repository / ".git"
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+
+        with integration_lock.hold_integration_lock(git_directory, LOCK_WAIT_DEADLINE_SECONDS, lambda: None):
+            wrapper = self.fixture.start_wrapper(output, self.fixture.private_index, *arguments)
+            self.wait_for_output(output, LOCK_WAIT_NOTE)
+            other = self.fixture.commit_other_session("a.txt")
+        returncode = wrapper.wait(timeout=LOCK_WAIT_DEADLINE_SECONDS)
+
+        self.assertEqual(returncode, 0, output.read_text())
+        self.assertIn(REBUILT_NOTE, output.read_text())
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), other)
+
+    def test_commit_from_the_shared_index_reads_head_after_waiting(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        output = self.fixture.root / "wrapper-output"
+        git_directory = self.fixture.repository / ".git"
+
+        with integration_lock.hold_integration_lock(git_directory, LOCK_WAIT_DEADLINE_SECONDS, lambda: None):
+            wrapper = self.fixture.start_wrapper(output, None, HEAD_COMMIT_MESSAGE, "b.txt")
+            self.wait_for_output(output, LOCK_WAIT_NOTE)
+            other = self.fixture.commit_other_session("a.txt")
+            self.fixture.run_git("reset", "-q", "--", "a.txt")
+        returncode = wrapper.wait(timeout=LOCK_WAIT_DEADLINE_SECONDS)
+
+        self.assertEqual(returncode, 0, output.read_text())
+        self.assertNotIn(REBUILT_NOTE, output.read_text())
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), other)
+        self.assertEqual(self.fixture.run_git("diff", "--name-only", "HEAD^", "HEAD"), "b.txt")
+
+    def test_branch_switched_while_waiting_is_refused(self) -> None:
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        output = self.fixture.root / "wrapper-output"
+        git_directory = self.fixture.repository / ".git"
+        arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
+
+        with integration_lock.hold_integration_lock(git_directory, LOCK_WAIT_DEADLINE_SECONDS, lambda: None):
+            wrapper = self.fixture.start_wrapper(output, self.fixture.private_index, *arguments)
+            self.wait_for_output(output, LOCK_WAIT_NOTE)
+            self.fixture.run_git("checkout", "-q", "-b", OTHER_BRANCH)
+            other = self.fixture.commit_other_session("a.txt")
+        returncode = wrapper.wait(timeout=LOCK_WAIT_DEADLINE_SECONDS)
+
+        self.assertEqual(returncode, HEAD_MOVED_EXIT, output.read_text())
+        self.assertEqual(self.fixture.read_head(), other)
+
+    def test_caller_index_is_restored_when_the_rebuild_conflicts(self) -> None:
+        self.fixture.edit("a.txt", "mine\n")
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("a.txt", "b.txt")
+        caller_tree = self.fixture.run_git("write-tree", index=self.fixture.private_index)
+        self.fixture.commit_other_session("a.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertEqual(self.fixture.run_git("write-tree", index=self.fixture.private_index), caller_tree)
+
+    def test_head_moving_while_the_check_runs_is_reported_as_moved(self) -> None:
+        self.fixture.add_moving_pre_commit_hook()
+        self.fixture.edit("b.txt", "mine\n")
+        base = self.fixture.build_private_index("b.txt")
+        result = self.fixture.run_wrapper("--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt")
+
+        self.assertEqual(result.returncode, HEAD_MOVED_EXIT, result.stderr)
+        self.assertIn(HEAD_MOVED_NOTE, result.stderr)
+        self.assertEqual(self.fixture.read_subject("HEAD"), OTHER_SESSION_SUBJECT)
+        self.assertEqual(self.fixture.run_git("rev-parse", "HEAD^"), base)
+
+    def wait_for_output(self, output: Path, text: str) -> None:
+        deadline = time.monotonic() + LOCK_WAIT_DEADLINE_SECONDS
+
+        while text not in output.read_text():
+            self.assertLess(time.monotonic(), deadline, output.read_text())
+            time.sleep(LOCK_POLL_SECONDS)
 
     def test_stale_private_index_names_shared_file(self) -> None:
         self.fixture.edit("shared.txt", "mine\n")
