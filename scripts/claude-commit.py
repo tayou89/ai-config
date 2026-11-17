@@ -78,6 +78,12 @@ the wrapper adds each commit it makes to its session's list
 on no remote-tracking branch, as Perforce lets only a changelist's owner
 change it and Mercurial refuses to amend a public changeset.
 
+A repository must say how its work reaches its base branch before anything
+is committed there, or sessions fall back to committing straight to it
+unseen (user decision, 2026-11-17). So the wrapper commits nothing in a
+checkout without a readable .agent-workflow.json (workflow_policy.py) and
+tells the session to ask the user which mode the repository uses.
+
 Exit codes:
     0  success (commit created)
     1  git error
@@ -97,6 +103,8 @@ Exit codes:
        pushed (nothing committed)
    10  another commit or integration held this checkout's lock longer
        than the wrapper waits (nothing committed)
+   11  the repository records no Git workflow, or its .agent-workflow.json
+       cannot be read (nothing committed)
 """
 
 from __future__ import annotations
@@ -146,7 +154,15 @@ from session_writes import (
     read_session_id,
     store_text,
 )
-from workflow_policy import read_worktree_creation_time
+from workflow_policy import (
+    POLICY_FILE,
+    PolicyError,
+    WorkflowMode,
+    WorkflowPolicy,
+    read_checkout_policy,
+    read_original_checkout,
+    read_worktree_creation_time,
+)
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
 PRIVATE_INDEX_PREFIX = "claude-commit-index-"
@@ -188,6 +204,10 @@ EXIT_REVIEW_MISSING = 7
 EXIT_FOREIGN_LINES = 8
 EXIT_AMEND_TARGET = 9
 EXIT_LOCK_TIMEOUT = 10
+EXIT_NO_WORKFLOW = 11
+NO_WORKFLOW_MESSAGE = "{root} records no Git workflow in {file}, so nothing was committed. Ask the user which workflow this repository uses and record it there as the git-commit skill's 'Repository Workflow' describes: {modes}."
+UNREADABLE_WORKFLOW_MESSAGE = "{error}; nothing was committed. Fix {path}, then commit again."
+NOT_REPOSITORY_MESSAGE = "FAIL: this folder is not inside a Git repository, so nothing was committed"
 MOVED_BASE_NOTE = "HEAD moved from {old} to {new}; the commits since leave your files as they were, so the index is rebuilt on {new} and checked there"
 REMOTE_BRANCH_FORMAT = "--format=%(if)%(symref)%(then)%(else)%(refname:short)%(end)"
 NO_SESSION_REASON = "cannot be shown to be this session's: only a Claude session lists the commits it makes"
@@ -916,6 +936,39 @@ def read_repository_root() -> str:
     return run_git(["rev-parse", "--show-toplevel"], capture_output=True).stdout.strip()
 
 
+def check_workflow_recorded() -> None:
+    root = read_repository_root()
+
+    if root:
+        check_workflow_file(Path(root))
+    else:
+        fail(NOT_REPOSITORY_MESSAGE, EXIT_GIT_ERROR)
+
+
+def check_workflow_file(root: Path) -> None:
+    """The checkout's own copy counts, so the commit that first records a workflow, or a team's untracked one, passes."""
+    modes = ", ".join(mode.value for mode in WorkflowMode)
+
+    try:
+        policy = read_recorded_policy(root)
+    except PolicyError as error:
+        fail(UNREADABLE_WORKFLOW_MESSAGE.format(error=error, path=root / POLICY_FILE), EXIT_NO_WORKFLOW)
+    else:
+        if policy is None:
+            fail(NO_WORKFLOW_MESSAGE.format(root=root, file=POLICY_FILE, modes=modes), EXIT_NO_WORKFLOW)
+
+
+def read_recorded_policy(root: Path) -> WorkflowPolicy | None:
+    """A worktree of a team's repository has no copy of the untracked file, so the original checkout's copy counts too."""
+    policy = read_checkout_policy(root)
+    original = read_original_checkout(root)
+
+    if policy is None and original is not None:
+        return read_checkout_policy(original)
+    else:
+        return policy
+
+
 def read_base_text(expected_head: str | None, path: str) -> str:
     """Base content as text that keeps its line endings and bytes, matching session_writes."""
     base_args = ["git", "cat-file", "blob", f"{expected_head}:{path}"]
@@ -1300,6 +1353,7 @@ def main(argv: list[str]) -> None:
     files = arguments.files
 
     print_header()
+    check_workflow_recorded()
     approved = approve_included_files(arguments)
     metrics = validate_message(arguments.message)
     check_private_index_environment(arguments.private_index)
