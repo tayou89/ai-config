@@ -132,6 +132,7 @@ MAINTENANCE_SCRIPTS = (
     "check-commit.py",
     "check-references.py",
     "check-rule-size.py",
+    "check-codex-skills.py",
 )
 HOOKS_PATH_KEY = "core.hooksPath"
 COMMIT_HOOKS_DIRECTORY = ".githooks"

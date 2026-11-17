@@ -3,6 +3,8 @@ name: resolve-conflict
 description: Resolve Git merge, rebase, cherry-pick, or push-divergence conflicts while preserving both sides and the current operation.
 ---
 
+<!-- Adapted from skills/resolve-conflict/SKILL.md at bb490d7be25407e8a7f99a4355465939e93c718a -->
+
 # Resolve Conflict Workflow
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

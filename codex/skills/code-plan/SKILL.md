@@ -3,6 +3,8 @@ name: code-plan
 description: Prepare evidence-based plans for substantial features, structural changes, or complex fixes; skip trivial edits and already settled planning.
 ---
 
+<!-- Adapted from skills/code-plan/SKILL.md at 1795b7fa82b5663ce5c674d9202a341c47ff022f -->
+
 # Plan Workflow
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

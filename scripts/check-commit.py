@@ -43,6 +43,7 @@ CHECKS = (
     ("generated rule copies match shared-rules/", ["scripts/sync-shared-rules.py", "--check"]),
     ("references in the rule files resolve", ["scripts/check-references.py"]),
     ("always-loaded rules within their size budgets", ["scripts/check-rule-size.py"]),
+    ("adapted Codex skills name their current Claude sources", ["scripts/check-codex-skills.py"]),
     ("tests", ["-m", "unittest", "discover", "-s", "tests", "-q"]),
 )
 GIT_VARIABLE_PREFIX = "GIT_"

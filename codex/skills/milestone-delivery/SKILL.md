@@ -3,6 +3,8 @@ name: milestone-delivery
 description: Milestone workflow for a project whose rules explicitly adopt milestone delivery: a planning report at each planning-scope approval, approved designs and milestone plan with a versioned feature list, automatic checks between demos, an always-ask list, and a milestone-end report. Do not apply it in other projects.
 ---
 
+<!-- Adapted from skills/milestone-delivery/SKILL.md at 4d64d1458712b586a29c0c83ae32a44d9227d485 -->
+
 # Milestone Delivery
 
 Apply only after a project's rules explicitly adopt milestone delivery (user decision, 2026-11-11); other projects keep the plain `code-plan` flow. The adoption record in the project rules holds where it applies and from when, a link to this skill, the project's document locations and decision record, its learning goal if it keeps one, and the deviations the user approved, without copying this skill or the vault templates: this skill owns the workflow and approvals, and the vault owns template formats and what its report collection requires (user decision, 2026-11-12). Templates come from the knowledge vault, which Codex only reads (`knowledge-vault`).

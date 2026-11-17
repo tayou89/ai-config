@@ -3,6 +3,8 @@ name: typescript
 description: Apply personal TypeScript and TSX conventions for type safety, module interoperability, ownership, and verification.
 ---
 
+<!-- Adapted from skills/typescript/SKILL.md at 04887ad46a0df96101ff4ff85db228e3a75c841c, skills/typescript/references/examples-and-procedures.md at f9bd78d17cb5c3374c8c7b7d9d7c3785757f0c8a -->
+
 # TypeScript Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

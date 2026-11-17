@@ -3,6 +3,8 @@ name: pr-create
 description: Create or update GitHub PRs with purpose, background, changes, and accurate verification; honor authorization and repository conventions.
 ---
 
+<!-- Adapted from skills/pr-create/SKILL.md at f5fbc1b4f357827da827fc63c3d87d5171a1427f -->
+
 # PR Creation Workflow
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

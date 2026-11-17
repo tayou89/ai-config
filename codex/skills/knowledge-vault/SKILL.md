@@ -3,6 +3,8 @@ name: knowledge-vault
 description: Read, never write, the user's central knowledge vault (cross-project planning and delivery lessons, vetted stack catalog, quality criteria, design taste, templates) before planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report.
 ---
 
+<!-- Adapted from skills/knowledge-vault/SKILL.md at 7bb23dac13cb5218a64113c293113426430ccfbb -->
+
 # Knowledge Vault
 
 The vault is the folder in the `KNOWLEDGE_VAULT_DIR` environment variable, a per-computer value that the Codex `config.toml` sets under `[shell_environment_policy.set]`; read it with `printenv KNOWLEDGE_VAULT_DIR`.

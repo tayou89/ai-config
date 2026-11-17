@@ -3,6 +3,8 @@ name: code-style
 description: Apply personal coding conventions when writing or editing code, including code examples; honor language syntax and project conventions.
 ---
 
+<!-- Adapted from skills/code-style/SKILL.md at 9f47f5b08216923702bbac732a9c16032d7695dc, skills/code-style/references/examples-and-procedures.md at cd1632743deb04a0cd4b9bff3e7c604d5d133787 -->
+
 # Coding Style Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

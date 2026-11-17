@@ -3,6 +3,8 @@ name: typescript-migration
 description: Preserve runtime behavior while converting JavaScript to TypeScript; use only for JS-to-TS migration.
 ---
 
+<!-- Adapted from skills/typescript-migration/SKILL.md at a364ddfbf2465906ff86a4fb1c16965847c0a4ce -->
+
 # JS → TS Conversion Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

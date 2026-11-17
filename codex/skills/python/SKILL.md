@@ -3,6 +3,8 @@ name: python
 description: Apply personal Python conventions for PEP 8 naming, formatter-owned layout, uv, ruff, and mypy tooling, and asyncio task handling.
 ---
 
+<!-- Adapted from skills/python/SKILL.md at 0de0df5805a6f3b52ad5334a481c63d13550f932 -->
+
 # Python Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

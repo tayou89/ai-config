@@ -3,6 +3,8 @@ name: integration-testing
 description: Run authorized integration or runtime tests with external services, simulators, databases, or brokers; diagnose prerequisites and preserve test evidence.
 ---
 
+<!-- Adapted from skills/integration-testing/SKILL.md at c5defd3a4f27b077ad685913d5ff840e66f9b228 -->
+
 # Integration Testing Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.

@@ -3,6 +3,8 @@ name: config-files
 description: Design or refactor application configuration modules, environment files, and env-driven setup.
 ---
 
+<!-- Adapted from skills/config-files/SKILL.md at 695374c3b7dd58721a15fbd54e191ca6c9793aa2 -->
+
 # Config & Env File Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.
