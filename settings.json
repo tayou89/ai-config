@@ -133,6 +133,11 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/plain-words-hook.py\"",
+            "timeout": 10
           }
         ]
       },
