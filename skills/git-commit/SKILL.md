@@ -74,7 +74,7 @@ Check on your own, in this order, and fix what fails before running the wrapper:
 
 Stop and ask the user only when a check fails and cannot be fixed within the task, or when the shell guard asks. When the wrapper refuses lines it cannot show as yours (exit 8: lines marked `?` or `!`, or listed as not this session's), do not ask in chat: if another session can commit its tangled lines first, message it and wait; otherwise rerun once with `--include-unrecorded <file>` for every file the refusal lists, and the shell guard's one dialog, which lists those lines, is the user's decision (user decisions, 2026-11-11 and 2026-11-16). If the user declines it, commit without that file and say so. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
 
-After pushing, report each commit in one line of your closing message: short hash, subject, file count, and the other sessions' lines `--own-lines` left out (file and line count), if any.
+After pushing, say in the closing message what each commit changed, in everyday words, with its file count and any other session's lines `--own-lines` left out; give the short hash only where a reader looks it up, such as a report or the session bulletin (user decision, 2026-11-17).
 
 ## 6. Run the Wrapper
 

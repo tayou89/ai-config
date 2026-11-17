@@ -3,7 +3,7 @@ name: git-commit
 description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
-<!-- Adapted from skills/git-commit/SKILL.md at 2f47213e96334820e7dab3ab7ddf3530462ae2d3, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 5daa657c1efa2e47226d08bed634a2b13f4d291a -->
+<!-- Adapted from skills/git-commit/SKILL.md at 11027df7a1d94a238a7bc327a1499fa5d5955d8b, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 5daa657c1efa2e47226d08bed634a2b13f4d291a -->
 
 # Commit Workflow
 
@@ -41,7 +41,7 @@ For release preparation, use `Chore: release vX.Y.Z` and bundle the files for th
 
 ## Authorization and Execution
 
-Commit and push each completed unit of work without asking (user decision, 2026-11-09): the checks in this skill and the repository's pre-commit hook stand where that approval was. Before committing, check on your own: the staged files are exactly the ones you changed, listed by name rather than from `git status` output; no credentials or live-looking tokens; type, lint, and test runs pass when code changed; and the message follows the rules above. For a change of 200 or more lines outside documents and lock files, first get a checklist review of the staged diff from a separate reviewer run and fix what it finds. Stop and ask only when a check fails and cannot be fixed within the task, or when your change cannot be separated from another session's edits in a file. Changes to rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit and push it without asking again. After pushing, report each commit in one line: short hash, subject, and file count.
+Commit and push each completed unit of work without asking (user decision, 2026-11-09): the checks in this skill and the repository's pre-commit hook stand where that approval was. Before committing, check on your own: the staged files are exactly the ones you changed, listed by name rather than from `git status` output; no credentials or live-looking tokens; type, lint, and test runs pass when code changed; and the message follows the rules above. For a change of 200 or more lines outside documents and lock files, first get a checklist review of the staged diff from a separate reviewer run and fix what it finds. Stop and ask only when a check fails and cannot be fixed within the task, or when your change cannot be separated from another session's edits in a file. Changes to rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit and push it without asking again. After pushing, say what each commit changed, in everyday words, with its file count; give the short hash only where a reader looks it up, such as a report (user decision, 2026-11-17).
 
 Write the exact message to a temporary file and run `git commit --file <message-file>` after verifying the staged scope.
 
