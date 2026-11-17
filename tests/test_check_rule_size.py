@@ -114,21 +114,37 @@ class CheckRuleSizeTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("Claude always-loaded rules", result.stderr)
 
-    def test_codex_total_over_default_limit_warns(self) -> None:
-        project = self.fixture.add_project("medium", {"AGENTS.md": check_rule_size.CODEX_WARNING_BYTES})
+    def test_codex_project_over_default_limit_warns(self) -> None:
+        project = self.fixture.add_project("medium", {"AGENTS.md": check_rule_size.CODEX_DEFAULT_LIMIT_BYTES + 1})
         self.fixture.add_session(project)
         result = self.fixture.run()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn(f"warning: Codex instructions in {project}", result.stdout)
+        self.assertIn(f"warning: Codex project instructions in {project}", result.stdout)
 
-    def test_codex_total_over_failure_share_fails(self) -> None:
-        project = self.fixture.add_project("large", {"AGENTS.md": FAILURE_BYTES - GLOBAL_BYTES + 1})
+    def test_codex_project_over_failure_share_fails(self) -> None:
+        project = self.fixture.add_project("large", {"AGENTS.md": FAILURE_BYTES + 1})
         self.fixture.add_session(project)
         result = self.fixture.run()
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"Codex instructions in {project}", result.stderr)
+        self.assertIn(f"Codex project instructions in {project}", result.stderr)
+
+    def test_codex_global_is_not_added_to_the_project_limit(self) -> None:
+        self.fixture.write_bytes("codex/AGENTS.md", check_rule_size.CODEX_GLOBAL_BUDGET_BYTES)
+        project = self.fixture.add_project("beside", {"AGENTS.md": check_rule_size.CODEX_DEFAULT_LIMIT_BYTES})
+        self.fixture.add_session(project)
+        result = self.fixture.run()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("warning", result.stdout)
+
+    def test_codex_global_over_budget_fails(self) -> None:
+        self.fixture.write_bytes("codex/AGENTS.md", check_rule_size.CODEX_GLOBAL_BUDGET_BYTES + 1)
+        result = self.fixture.run()
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Codex global instructions", result.stderr)
 
     def test_counts_one_file_per_directory_from_root_to_folder(self) -> None:
         sizes = {
@@ -143,7 +159,7 @@ class CheckRuleSizeTest(unittest.TestCase):
         result = self.fixture.run()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("largest project 3,000", result.stdout)
+        self.assertIn("largest 3,000 bytes", result.stdout)
 
     def test_ignores_old_sessions_and_missing_folders(self) -> None:
         project = self.fixture.add_project("old", {"AGENTS.md": FAILURE_BYTES})
@@ -152,10 +168,10 @@ class CheckRuleSizeTest(unittest.TestCase):
         result = self.fixture.run()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("largest project 0", result.stdout)
+        self.assertIn("largest 0 bytes", result.stdout)
 
     def test_reports_each_project_once(self) -> None:
-        project = self.fixture.add_project("shared", {"AGENTS.md": check_rule_size.CODEX_WARNING_BYTES})
+        project = self.fixture.add_project("shared", {"AGENTS.md": check_rule_size.CODEX_DEFAULT_LIMIT_BYTES + 1})
         (project / "a").mkdir()
         (project / "b").mkdir()
         self.fixture.add_session(project / "a")
@@ -175,7 +191,7 @@ class CheckRuleSizeTest(unittest.TestCase):
         result = self.fixture.run()
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("largest project 5,000", result.stdout)
+        self.assertIn("largest 5,000 bytes", result.stdout)
 
     @unittest.skipIf(os.geteuid() == 0, "root can read a file without read permission")
     def test_skips_a_log_without_read_permission(self) -> None:

@@ -9,13 +9,15 @@ others for the model's attention, so the commit check measures the
 always-loaded files in bytes (user decision, 2026-11-12):
 
 - Claude loads CLAUDE.md and every file in rules/ in every session.
-- Codex loads codex/AGENTS.md and then, in the folder it runs in, one
-  project instruction file per directory from the project root down to that
-  folder, and stops adding them at project_doc_max_bytes. The folders are
-  the working folders of the Codex sessions of the last 30 days, read from
-  the first line of each session log under CODEX_HOME (default ~/.codex).
-  A log that cannot be read or parsed is skipped, so one bad log never
-  stops a commit.
+- Codex loads codex/AGENTS.md whole, outside any limit, so it gets a byte
+  budget of its own. In the folder it runs in, it then adds one project
+  instruction file per directory from the project root down to that folder
+  and cuts their end at project_doc_max_bytes, a limit that covers project
+  files only (codex-rs/core/src/agents_md.rs; tested with codex-cli 0.163.0
+  on 2026-11-17). The folders are the working folders of the Codex sessions
+  of the last 30 days, read from the first line of each session log under
+  CODEX_HOME (default ~/.codex). A log that cannot be read or parsed is
+  skipped, so one bad log never stops a commit.
 
 Exit codes:
     0  every total is within its budget (warnings may be printed)
@@ -34,8 +36,9 @@ from typing import Any, NamedTuple
 CODEX_HOME_VARIABLE = "CODEX_HOME"
 CODEX_SESSIONS_DIRECTORY = "sessions"
 CODEX_LIMIT_KEY = "project_doc_max_bytes"
-CODEX_WARNING_BYTES = 32 * 1024
+CODEX_DEFAULT_LIMIT_BYTES = 32 * 1024
 CODEX_FAILURE_SHARE = 0.85
+CODEX_GLOBAL_BUDGET_BYTES = 32 * 1024
 CLAUDE_BUDGET_BYTES = 32 * 1024
 SESSION_WINDOW_SECONDS = 30 * 24 * 60 * 60
 _ROOT = Path(__file__).resolve().parent.parent
@@ -43,21 +46,24 @@ _CLAUDE_INSTRUCTION_PATH = _ROOT / "CLAUDE.md"
 _CLAUDE_RULES_DIRECTORY = _ROOT / "rules"
 _CODEX_AGENTS_PATH = _ROOT / "codex" / "AGENTS.md"
 _CODEX_SETTINGS_PATH = _ROOT / "codex" / "settings.json"
-_CODEX_DEFAULT_LIMIT_BYTES = 32 * 1024
 _PROJECT_ROOT_MARKER = ".git"
 _PROJECT_INSTRUCTION_NAMES = ("AGENTS.override.md", "AGENTS.md")
 _CLAUDE_FAILURE = (
     "Claude always-loaded rules are {total:,} bytes, over the {budget:,}-byte budget:"
     " remove or move text to a skill as the rule-writing skill describes"
 )
+_CODEX_GLOBAL_FAILURE = (
+    "Codex global instructions are {total:,} bytes, over the {budget:,}-byte budget:"
+    " remove or move text to a skill as the rule-writing skill describes"
+)
 _CODEX_WARNING = (
-    "Codex instructions in {root} are {total:,} bytes (global {global_bytes:,} + project {project_bytes:,}),"
-    " over the {warning:,}-byte default limit"
+    "Codex project instructions in {root} are {total:,} bytes, over the {warning:,}-byte default"
+    " project_doc_max_bytes: a computer without the raised limit cuts their end"
 )
 _CODEX_FAILURE = (
-    "Codex instructions in {root} are {total:,} bytes (global {global_bytes:,} + project {project_bytes:,}),"
-    " over {failure:,} bytes ({share:.0%} of project_doc_max_bytes {limit:,}):"
-    " shrink codex/AGENTS.md here or that project's AGENTS.md in its own session"
+    "Codex project instructions in {root} are {total:,} bytes, over {failure:,} bytes"
+    " ({share:.0%} of project_doc_max_bytes {limit:,}), past which Codex cuts their end:"
+    " shrink that project's AGENTS.md in its own session"
 )
 _EXIT_PASSED = 0
 _EXIT_FAILED = 1
@@ -74,11 +80,16 @@ def main() -> int:
     limit = _read_codex_limit()
     projects = _collect_codex_projects()
     largest = max((project.project_bytes for project in projects), default=0)
-    failures = _find_claude_failures(claude_total) + _find_codex_failures(global_bytes, limit, projects)
+    failures = (
+        _find_claude_failures(claude_total)
+        + _find_codex_global_failures(global_bytes)
+        + _find_codex_project_failures(limit, projects)
+    )
 
     print(f"Claude always-loaded rules: {claude_total:,} of {CLAUDE_BUDGET_BYTES:,} bytes")
-    print(f"Codex instructions: global {global_bytes:,} bytes, largest project {largest:,}, limit {limit:,}")
-    for warning in _find_codex_warnings(global_bytes, limit, projects):
+    print(f"Codex global instructions: {global_bytes:,} of {CODEX_GLOBAL_BUDGET_BYTES:,} bytes")
+    print(f"Codex project instructions: largest {largest:,} bytes, limit {limit:,}")
+    for warning in _find_codex_project_warnings(limit, projects):
         print(f"warning: {warning}")
     if failures:
         print("rule size check failed:\n" + "\n".join(f"  - {failure}" for failure in failures), file=sys.stderr)
@@ -95,7 +106,7 @@ def _measure_claude_rules() -> int:
 
 def _read_codex_limit() -> int:
     settings = json.loads(_CODEX_SETTINGS_PATH.read_text(encoding="utf-8"))
-    limit = settings.get("config", {}).get(CODEX_LIMIT_KEY, _CODEX_DEFAULT_LIMIT_BYTES)
+    limit = settings.get("config", {}).get(CODEX_LIMIT_KEY, CODEX_DEFAULT_LIMIT_BYTES)
 
     return int(limit)
 
@@ -183,13 +194,21 @@ def _find_claude_failures(total: int) -> list[str]:
         return []
 
 
-def _find_codex_failures(global_bytes: int, limit: int, projects: list[_CodexProject]) -> list[str]:
+def _find_codex_global_failures(total: int) -> list[str]:
+    if total > CODEX_GLOBAL_BUDGET_BYTES:
+        return [_CODEX_GLOBAL_FAILURE.format(total=total, budget=CODEX_GLOBAL_BUDGET_BYTES)]
+    else:
+        return []
+
+
+def _find_codex_project_failures(limit: int, projects: list[_CodexProject]) -> list[str]:
     failure = int(limit * CODEX_FAILURE_SHARE)
-    over = [project for project in projects if global_bytes + project.project_bytes > failure]
+    over = [project for project in projects if project.project_bytes > failure]
 
     return [
         _CODEX_FAILURE.format(
-            **_describe_codex_total(global_bytes, project),
+            root=project.root,
+            total=project.project_bytes,
             failure=failure,
             share=CODEX_FAILURE_SHARE,
             limit=limit,
@@ -198,23 +217,14 @@ def _find_codex_failures(global_bytes: int, limit: int, projects: list[_CodexPro
     ]
 
 
-def _find_codex_warnings(global_bytes: int, limit: int, projects: list[_CodexProject]) -> list[str]:
+def _find_codex_project_warnings(limit: int, projects: list[_CodexProject]) -> list[str]:
     failure = int(limit * CODEX_FAILURE_SHARE)
-    warned = [project for project in projects if CODEX_WARNING_BYTES < global_bytes + project.project_bytes <= failure]
+    warned = [project for project in projects if CODEX_DEFAULT_LIMIT_BYTES < project.project_bytes <= failure]
 
     return [
-        _CODEX_WARNING.format(**_describe_codex_total(global_bytes, project), warning=CODEX_WARNING_BYTES)
+        _CODEX_WARNING.format(root=project.root, total=project.project_bytes, warning=CODEX_DEFAULT_LIMIT_BYTES)
         for project in warned
     ]
-
-
-def _describe_codex_total(global_bytes: int, project: _CodexProject) -> dict[str, Any]:
-    return {
-        "root": project.root,
-        "total": global_bytes + project.project_bytes,
-        "global_bytes": global_bytes,
-        "project_bytes": project.project_bytes,
-    }
 
 
 if __name__ == "__main__":
