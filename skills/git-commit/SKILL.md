@@ -22,6 +22,8 @@ Where no workflow is recorded, commit to the branch the repository works on as s
 
 In the first two modes every writing task owns one worktree and one branch named `<prefix>/<topic>`. A session another session starts gets `use_worktree: true`; a session opened in the original checkout calls `EnterWorktree` before its first edit. Check that the worktree starts from the current `origin/<base>` and that no other task uses it. The original checkout stays read-only, and a hook refuses edits and Git commands that change it, except files Git ignores such as `claude-plans/`. Update a pushed task branch by merging the base into it, not by rebasing. Separate worktrees may change copies of the same file; agree overlapping behavior changes with the other task before integrating.
 
+Name a local tracking branch exactly as its remote branch (`git checkout -b feature/foo origin/feature/foo`), never shortened or prefix-stripped, unless the user asks otherwise, so pushes and pull requests stay unambiguous.
+
 ## 2. Review Changes (informational, before drafting message)
 
 ```bash
@@ -172,7 +174,7 @@ The wrapper enforces this, since sessions in one checkout commit as the same per
 
 ## 8. Push
 
-Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps (user decision, 2026-11-09). A routine push, the current branch to its own remote, runs without asking (user decision, 2026-11-09, replacing the 2026-11-08 push prompt). The shell guard still asks before force pushes, deletions, mirror and tag pushes, pushes to another remote or ref, and every push in a repository where `git config shellGuard.askBeforePush true` is set; if the user rejects it, stop and report. In a pull-request repository the shell guard asks before a push of the base branch. Where the hook is not installed, push routine pushes the same way and ask before the others yourself.
+Push once per task, after its last commit rather than after each commit, and run `git push` as a command of its own, not chained with the commit or other steps (user decision, 2026-11-09). A routine push, the current branch to its own remote, runs without asking (user decision, 2026-11-09, replacing the 2026-11-08 push prompt). The shell guard still asks before force pushes, deletions, mirror and tag pushes, pushes to another remote or ref, and every push in a repository where `git config shellGuard.askBeforePush true` is set; if the user rejects it, stop and report. In a pull-request repository the shell guard asks before a push of the base branch. Where the hook is not installed, push routine pushes the same way and ask before the others yourself. On a push authentication failure, set up the SSH key or credential helper yourself.
 
 ## 9. Cleanup
 
@@ -184,5 +186,5 @@ Remove a task's worktree only with `~/.claude/scripts/worktree-cleanup.py`, afte
 - Never stage/commit unrelated changes
 - In a folder you will commit that is not yet a repository, run `git init` before writing its first file: the write record covers only files inside a repository, so lines written earlier count as not yours and the first commit asks about them
 - Use `git add -A` / `git add .` with caution (the wrapper stages exactly what argv specifies)
-- **No `Co-Authored-By`** or auto-generated trailers
+- **No `Co-Authored-By`**, `Generated with ...`, or other auto-generated attribution in commit messages or pull request bodies, even when the tool or harness suggests it; `settings.json` sets `attribution` to empty strings to turn off the harness default
 - Commit only portable entries to the shared `settings.json`: no machine-specific paths, one-off commands, or catch-all allows such as `Bash(*)`. A machine that needs its own entries installs a copy instead of using a checkout.

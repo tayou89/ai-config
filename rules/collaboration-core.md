@@ -2,7 +2,7 @@
 
 # Core Collaboration Principles
 
-Apply in every project and task. The rest of the decision and collaboration principles load as the `decisions-and-collaboration` skill when their task comes up. These generalize feedback the user gave repeatedly during project work. Follow project rules first.
+Follow project rules first.
 
 ## Tools and permissions
 
@@ -20,7 +20,7 @@ Apply in every project and task. The rest of the decision and collaboration prin
 ## Handing over work
 
 - Give links that open in the app the user actually uses: write every file, document, or page you hand over or ask the user to look at as a clickable link in the reply itself, not as code text alone, and wrap a path containing spaces in `<…>`; give a file outside the session's main working folder by its absolute path, since a relative link resolves against that folder (user decision, 2026-11-09). If the chat client cannot open an app-specific link, give it as a one-line shell command that opens it. If it cannot open a result file from a link, for example one outside the session's folders, also send the file itself through the client's file-sending feature (user decisions, 2026-11-06 and 2026-11-08).
-- When you hand over a report, plan, or other long document, also give its gist in the reply itself: the conclusion; when it asks for a decision, every option it weighed in a compact table with a few words per axis of the option rules, plus the recommendation and why; and what the user must decide or do, then the link. Open the document with the same summary, and when relaying another session's report, read and pass on that opening summary rather than only the link (user decision, 2026-11-12).
+- When you hand over a report, plan, or other long document, also give its gist in the reply itself: the conclusion; when it asks for a decision, every option it weighed in a compact table with a few words per axis of the option rules, plus the recommendation and why; and what the user must decide or do, then the link. When relaying another session's report, read and pass on its opening summary rather than only the link (user decision, 2026-11-12).
 - Do not open or switch the user's apps or browser screens on your own to show a result; a task step that runs in an app is one your tools reach. Hand over only the link, the open command, or the file itself, and open it only when the user asks at that moment.
 
 ## Labels and abbreviations
@@ -36,11 +36,11 @@ Apply in every project and task. The rest of the decision and collaboration prin
 
 - When a mistake comes to light, state plainly what you misjudged and record the incorrect proposal as withdrawn; when it broke a rule that applied, find why the rule was not followed and propose the fix that cause calls for, as `rule-writing` "When a rule is not followed" describes, never only a promise to be more careful (user decision, 2026-11-13).
 - When a recorded fact turns out wrong or records disagree, check the authoritative source and correct every record that holds the wrong value instead of marking it unverified or unreconciled; mark it unverified only when no check is possible.
-- Record a user correction or decision at once in the narrowest place that fits, updating the rule that already covers it rather than adding another, tell the user in one line where it went, and follow the `rule-writing` skill whenever you record one or add, change, or remove a rule: it sets what the narrowest place is, how an approved way of working reaches other projects, when a rule may go into an always-loaded global file, and what to remove alongside it (user decisions, 2026-11-12 and 2026-11-13).
+- Record a user correction or decision at once in the narrowest place that fits, following the `rule-writing` skill, and tell the user in one line where it went (user decisions, 2026-11-12 and 2026-11-13).
 
 ## Shared files and sessions
 
-- Check repository status before committing. If another session is editing a file, do not commit the whole file; commit only your own changes. When sessions share one working folder, stage and commit as `git-commit` describes, so another session's commit can neither take nor undo yours. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
+- If another session is editing a file, do not commit the whole file; commit only your own changes. When sessions share one working folder, stage and commit as `git-commit` describes, so another session's commit can neither take nor undo yours. If changes got mixed by mistake, do not delete content; move only your own record to the right place and report it.
 - When sessions share one working folder, change files with the file-editing tool rather than shell commands or scripts wherever it can make the change, leaving generated files to their generator: only its writes can be shown to be your session's at commit time, so a script's write that overlaps another session's work stops the commit for the user's approval (user decision, 2026-11-11).
 - Let only one writer use a checkout, a file in it, or a shared resource (index, test database, port) at a time, and agree the order with the user when work overlaps; a clean status is not a lock (user decision, 2026-11-13). A scheduled run that edits a shared folder follows this rule too: it takes the folder's edit lock and, when another editor holds it or uncommitted changes exist, skips the run and reports why.
 - Read the `decisions-and-collaboration` skill before you start another session or take on work outside your session's area, and once you become the main session: it holds the rules for running sessions (user decision, 2026-11-12).

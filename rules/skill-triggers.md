@@ -2,7 +2,7 @@
 
 # Skill Triggers
 
-- **JS to TS conversion**: Read `typescript-migration` before starting. Grep for external `this.xxx` property access and verify callback values are preserved.
+- **JS to TS conversion**: Read `typescript-migration` before starting.
 - **Code writing/editing**: Read `code-style` before writing or proposing any code change, one-off scripts included, plus `typescript` or `python` for the files each covers.
 - **Non-trivial implementation**: Use `code-plan` to write a plan and wait for explicit approval before coding. Simple Q&A, explanations, or minor fixes (typos, 1-2 line changes) skip this. In a project that adopts `milestone-delivery`, that skill sets which steps need approval.
 - **Knowledge vault**: Read `knowledge-vault` before planning a project or milestone, choosing a stack or vendor, setting design direction, preparing a deploy, or writing a milestone plan or report.

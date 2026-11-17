@@ -20,6 +20,8 @@ Follow the workflow the project's rules record; the repository's `.agent-workflo
 
 In the first two modes every writing task owns one worktree and one uniquely named branch; create it with `git worktree add` from the current `origin/<base>` before the first edit, and never edit or switch branches in the original checkout or in another task's worktree. Update a pushed task branch by merging the base into it, not by rebasing. Remove a finished task's worktree only with `python3 ~/.claude/scripts/worktree-cleanup.py`, which first checks that its work is committed, integrated, and not in use; closing a pull request is not abandonment.
 
+Name a local tracking branch exactly as its remote branch (`git checkout -b feature/foo origin/feature/foo`), never shortened or prefix-stripped, unless the user asks otherwise, so pushes and pull requests stay unambiguous.
+
 ## Review the Change
 
 1. Inspect the current branch, `git status`, recent commits, and the full intended diff. For a base branch, follow the user's requested branch policy or use an appropriate working branch for implementation work. Do not require an extra branch for an explicitly approved configuration update.
