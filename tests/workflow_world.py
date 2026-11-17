@@ -27,6 +27,24 @@ PASSED_CHECK = {"__typename": "CheckRun", "name": "checks", "status": "COMPLETED
 ENCODING = "utf-8"
 
 
+def record_direct_workflow(checkout: Path) -> None:
+    """Record the direct workflow where Git does not track it, so the commit wrapper commits in a disposable checkout."""
+    exclude = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "--path-format=absolute", "--git-path", "info/exclude"],
+        env={name: value for name, value in os.environ.items() if not name.startswith("GIT_")},
+        capture_output=True,
+        text=True,
+        encoding=ENCODING,
+        check=True,
+    )
+    exclude_path = Path(exclude.stdout.strip())
+
+    (checkout / POLICY_FILE).write_text(json.dumps({"mode": "direct", "base": BASE}), encoding=ENCODING)
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    with exclude_path.open("a", encoding=ENCODING) as exclude_file:
+        exclude_file.write(f"\n{POLICY_FILE}\n")
+
+
 def load_script(name: str) -> ModuleType:
     """Import a script whose file name has hyphens, with the scripts folder importable as the hooks have it."""
     if str(SCRIPTS_DIRECTORY) not in sys.path:
