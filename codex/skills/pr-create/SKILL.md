@@ -94,7 +94,7 @@ testing, future refactors. Helps reviewers see what's NOT in this PR.>
 
 Reviewers skim. Optimize every section for scannability.
 
-- Use paragraphs for connected explanations, bullets for independent items, and tables for comparisons. Do not mechanically split a section by line count; follow the shared writing principles.
+- Use paragraphs for connected explanations, bullets for independent items, and tables for comparisons. Do not mechanically split a section by line count; follow the prose principles in the `report-writing` skill.
 - Inline-code mandatory: backtick every identifier, path, command, env var. References use `path:Lnn`.
 - No repetition across sections — each must add what previous sections cannot.
 - Active voice, short verbs. Wrap ~100 chars.
