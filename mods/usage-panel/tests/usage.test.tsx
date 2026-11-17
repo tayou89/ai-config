@@ -5,6 +5,14 @@ import type { CacheOutput, ListedSession, SessionsOutput, SessionsRequest } from
 
 type SessionRow = ListedSession & { isArchived: boolean }
 
+// The mod's own tool, as its schema declares it: the session that laid the
+// types had not registered it yet.
+declare module 'claude-code' {
+  interface McpToolInputs {
+    'mcp__usage-panel__work_estimate': { maker: 'claude' | 'codex'; minutes: number; steps?: number }
+  }
+}
+
 const PANE = {
   plugin: 'usage-panel',
   component: 'Pane',
@@ -59,7 +67,7 @@ const CLAUDE_SHARED = '/Users/t/Library/Caches/usage-panel/claude-limits.json'
 const SHARED = '/Users/t/Library/Caches/usage-panel/'
 const sharedFiles: Record<string, string> = {}
 const sharedReader = { isBusy: false, hold: undefined as Promise<void> | undefined, calls: 0 }
-const LOCAL_KEYS = ['snapshot', 'last', 'working', 'running']
+const LOCAL_KEYS = ['snapshot', 'last', 'working', 'finished', 'running']
 const SERVER_KEYS = ['limits', 'configured', 'error']
 // What the mod did at start: the 7-day counts it ran and the panes it closed.
 const started = { recounts: 0, closed: [] as string[] }
@@ -81,7 +89,11 @@ const app = {
   // How often the agents were listed, and a list held until released.
   agentLists: 0,
   agentsHold: undefined as Promise<void> | undefined,
+  // The tools the mod registered, and the work files on disk, by path.
+  tools: [] as string[],
+  workFiles: {} as Record<string, string>,
 }
+const WORK_FOLDER = '/Users/t/Library/Application Support/usage-panel/work'
 
 const claudeReading = (fiveHour: number): SessionMeasureInput => ({
   context: { tokens: 1, window: 1_000_000, percent: 15 },
@@ -174,7 +186,10 @@ const engine = (
   app.listCalls = []
   app.agentLists = 0
   app.agentsHold = undefined
+  app.tools = []
+  app.workFiles = {}
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
+  on('tool.register', (_, e) => (app.tools.push(e.name), { value: { tool: `mcp__usage-panel__${e.name}` } }))
   on('mcp.call', (_, e) => {
     app.listCalls.push(e.args)
     const content = [{ type: 'text' as const, text: JSON.stringify(app.listed) }]
@@ -217,11 +232,16 @@ const engine = (
         : e.path in sharedFiles || (e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0),
   }))
   on('fs.read', (_, e) => ({
-    value: e.path === CLAUDE_SHARED ? (claudeShared.text ?? '') : (sharedFiles[e.path] ?? ''),
+    value:
+      e.path === CLAUDE_SHARED
+        ? (claudeShared.text ?? '')
+        : (sharedFiles[e.path] ?? app.workFiles[e.path] ?? ''),
   }))
   on('fs.write', (_, e) => {
     if (e.path === CLAUDE_SHARED) {
       claudeShared.text = e.text
+    } else if (e.path.startsWith(WORK_FOLDER)) {
+      app.workFiles[e.path] = e.text
     }
     return { value: undefined }
   })
@@ -232,6 +252,19 @@ const engine = (
     return { value: agents }
   })
   on('fs.list', (_, e) => {
+    if (e.path === WORK_FOLDER) {
+      const mtimeMs = clock.now()
+
+      return {
+        value: Object.keys(app.workFiles).map(path => ({
+          name: path.slice(WORK_FOLDER.length + 1),
+          kind: 'file',
+          size: 1,
+          mtimeMs,
+          isLink: false,
+        })),
+      }
+    }
     if (e.path === APP_STORE) return { value: [{ name: '000003.log', kind: 'file', size: 1, mtimeMs: app.storeAt, isLink: false }] }
     if (e.path === `${APP_SESSIONS}/account/organization`)
       return {
@@ -1104,4 +1137,294 @@ test('past its end the cache goes on from a summary made while idle, and any oth
 
   await $.session.compact({ trigger: 'manual', messages: summary })
   expect(await cacheText(band)).toBeUndefined()
+})
+
+const START = Date.parse('2026-11-04T07:00:00Z')
+const HOUR = 60 * 60_000
+const ESTIMATE = 'mcp__usage-panel__work_estimate'
+const REPLY_USAGE = {
+  model: 'claude-opus-5-5',
+  input_tokens: 2,
+  cache_creation_input_tokens: 2_000,
+  cache_read_input_tokens: 150_000,
+  output_tokens: 1_200,
+}
+
+// Finished work another session wrote, from which the pace is read: each
+// Claude reply 10 steps at a conversation of 100K, each Codex run ten minutes,
+// all alone and each rising the window by two points.
+const pastWork = (maker: 'claude' | 'codex', index: number, finishedAt = START - HOUR) => ({
+  maker,
+  id: `${maker}-${index}`,
+  sessionId: 'other',
+  startedAt: finishedAt - 10 * 60_000,
+  finishedAt,
+  startContext: 100_000,
+  steps: 10,
+  tokens: maker === 'claude' ? 10_000_000 : 1_000_000,
+  weight: maker === 'claude' ? 100_000 : 200_000,
+  isAlone: true,
+  rise: 2,
+})
+
+const seedPastWork = (extra: object[] = []) => {
+  const works = [0, 1, 2].flatMap(i => [pastWork('claude', i), pastWork('codex', i)])
+
+  app.workFiles[`${WORK_FOLDER}/other.json`] = JSON.stringify({ works: [...works, ...extra] })
+}
+
+test('a reply with an estimate shows when it is due, then how late it ended and what it cost', async ($, on) => {
+  const clock = engine(on)
+
+  seedPastWork()
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.turn.start({ text: '작업 시각 만들어줘', turnId: 'w1' })
+  const recorded = await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 20, steps: 10 })
+
+  expect(recorded.result).toBe('Claude 작업을 16:20 끝 예정으로 기록했어요.')
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...ABOVE, surface })
+
+    expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:00 시작 · 예정 16:20 (20분 남음) · 토큰 0/예상 15.1M · 5시간 ≈+0%/예상 +3%')
+    await ui.unmount()
+  }
+
+  await clock.advance(26 * 60_000)
+  await $.turn.complete({ turnId: 'w1', answer: '', durationMs: 1, isAborted: false, reason: 'answer', usage: REPLY_USAGE })
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:26 끝 · 예정 16:20 · 6분 늦음 · 토큰 153K/예상 15.1M · -99% · 5시간 ≈+0.5%/예상 +3%')
+  expect((await ui.find({ type: 'Text', text: / · 6분 늦음$/ }))?.props.color).toBe('warning')
+  expect(await ui.find({ key: 'work-codex-text' })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('the estimate tool refuses an input it cannot record', async ($, on) => {
+  engine(on)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const idle = await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 5, steps: 3 })
+
+  await $.turn.start({ text: '해줘', turnId: 'w2' })
+  const noSteps = await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 5 })
+  const noMinutes = await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 0 })
+
+  expect(idle.deny).toContain('돌고 있는 답이 없어')
+  expect(noSteps.deny).toContain('단계 수(steps')
+  expect(noMinutes.deny).toContain('minutes')
+})
+
+test('work without an estimate shows its start and end, at the end of the first line once picked', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.turn.start({ text: '고쳐줘', turnId: 'w3' })
+  await clock.advance(3 * 60_000)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  await pane.press({ key: 'work-layout-line-end' })
+  await pane.unmount()
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...ABOVE, surface })
+
+    expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:00 시작 · 진행 3분 · 토큰 0')
+    expect((await ui.find({ key: 'where' }))?.text).toContain('Claude · 16:00 시작')
+    await ui.unmount()
+  }
+
+  await $.turn.complete({ turnId: 'w3', answer: '', durationMs: 1, isAborted: false, reason: 'answer', usage: REPLY_USAGE })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const after = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await after.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:03 끝 · 3분 걸림 · 토큰 153K')
+  expect((await after.find({ key: 'where' }))?.text).toContain('Claude · 16:03 끝')
+  await after.unmount()
+
+  const layoutCommand = {
+    command: 'usage-panel',
+    args: 'layout row',
+    origin: { kind: 'composer' },
+    presentation: { isFullscreen: false, columns: 80 },
+  } as const
+
+  await $.command.run(layoutCommand)
+  const back = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await back.find({ key: 'where' }))?.text).not.toContain('Claude ·')
+  expect((await back.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:03 끝 · 3분 걸림 · 토큰 153K')
+  await back.unmount()
+})
+
+test('a Codex run in the background takes its estimate and ends with its record', async ($, on) => {
+  const output: Record<string, unknown> = { running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+
+  seedPastWork()
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const startedAt = clock.now()
+
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 15 })
+  const ran = await $.tool.call({ tool: 'Bash', command: 'codex exec "review"', run_in_background: true })
+  const record = { startedAt: startedAt + 2_000, steps: 30, read: 1_000_000, cached: 800_000, write: 20_000, folder: '/' }
+
+  expect(ran.context ?? []).not.toContain('No Codex estimate was recorded for this run.')
+  output.running = 1
+  output.working = [record]
+  await clock.advance(10_000)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'work-codex-text' }))?.text).toBe('Codex · 16:00 시작 · 예정 16:15 (15분 남음) · 토큰 1M/예상 1.5M · 5시간 ≈+3.8%/예상 +3%')
+  await ui.unmount()
+
+  await clock.advance(12 * 60_000 - 10_000)
+  output.running = 0
+  output.working = []
+  output.finished = [{ ...record, finishedAt: startedAt + 12 * 60_000, rise: 1 }]
+  codexDisk.recordAt = clock.now()
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+  const done = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await done.find({ key: 'work-codex-text' }))?.text).toBe('Codex · 16:12 끝 · 예정 16:15 · 3분 빠름 · 토큰 1M/예상 1.5M · -32% · 5시간 ≈+3.8%/예상 +3%')
+  await done.unmount()
+  codexDisk.recordAt = 0
+})
+
+test('a run or a plan without an estimate tells the session once', async ($, on) => {
+  engine(on)
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: '해줘', turnId: 'w4' })
+
+  const items = [{ content: '고치기', status: 'in_progress' }]
+  const first = await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items })
+  const second = await $.tool.call({ tool: 'mcp__ccd_turn__update_plan', items })
+  const run = await $.tool.call({ tool: 'Bash', command: 'codex exec "fix"' })
+
+  expect(first.context).toContain('No work estimate is recorded for this turn yet.')
+  expect(second.context ?? []).not.toContain('No work estimate is recorded for this turn yet.')
+  expect(run.context).toContain('No Codex estimate was recorded for this run.')
+  expect(app.tools).toEqual(['work_estimate'])
+})
+
+test('the details list the week of work with its estimates and the median miss', async ($, on) => {
+  const clock = engine(on)
+  const old = { ...pastWork('claude', 9, START - 8 * 24 * HOUR), id: 'too-old' }
+
+  seedPastWork([old])
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.turn.start({ text: '해줘', turnId: 'w5' })
+  await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 20, steps: 10 })
+  await clock.advance(26 * 60_000)
+  await $.turn.complete({ turnId: 'w5', answer: '', durationMs: 1, isAborted: false, reason: 'answer', usage: REPLY_USAGE })
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const rows = await pane.findAll({ type: 'Text', text: /^시간 / })
+
+  expect(rows).toHaveLength(7)
+  expect(rows[0]?.text).toBe('시간 26분/20분 · 단계 0/10 · 토큰 153K/15.1M · 5시간 ≈+0.5%/+3%')
+  expect(rows[1]?.text).toBe('시간 10분 · 단계 10 · 토큰 1M · 5시간 ≈+2%')
+  expect((await pane.find({ type: 'Text', text: /^최근 7일/ }))?.text).toBe(
+    '최근 7일, 예정보다 보통 시간 +30% · 단계 -100% · 토큰 -99%',
+  )
+  expect((await pane.find({ key: 'work-layout-row' }))?.text).toBe('✓ 맨 위 작업 줄')
+  await pane.unmount()
+  expect(Object.keys(app.workFiles)).toContain(`${WORK_FOLDER}/cli-1.json`)
+})
+
+test('a command that only names codex exec is no work, and a refused run gives its estimate back', async ($, on) => {
+  const clock = engine(on)
+  const answered = { result: { text: 'OK', isError: false } }
+  on('tool.call', (_, e) => (e.tool === 'Bash' && e.command.includes('refused') ? { deny: '거절됨' } : answered))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: 'Bash', command: 'git commit -m "codex exec 결과 반영"' })
+  await $.tool.call({ tool: 'Bash', command: 'grep -n "codex exec" notes.md' })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec --help' })
+  const none = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(await none.find({ key: 'work-codex-text' })).toBeUndefined()
+  await none.unmount()
+
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10 })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "refused"', run_in_background: true })
+  await $.tool.call({ tool: 'Bash', command: 'cd /tmp && codex exec "review"', run_in_background: true })
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  const row = (await ui.find({ key: 'work-codex-text' }))?.text
+
+  expect(row).toBe('Codex · 16:00 시작 · 예정 16:10 (10분 남음) · 토큰 0')
+  await ui.unmount()
+})
+
+test('a broken work file leaves the other files, and a stopped reply stays out of the median miss', async ($, on) => {
+  const clock = engine(on)
+
+  seedPastWork()
+  app.workFiles[`${WORK_FOLDER}/broken.json`] = '{"works": [{"maker": "claude"'
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.turn.start({ text: '해줘', turnId: 'w6' })
+  await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 20, steps: 10 })
+  await clock.advance(5 * 60_000)
+  const stopped = {
+    turnId: 'w6',
+    answer: '',
+    durationMs: 1,
+    isAborted: true,
+    reason: 'answer',
+    usage: REPLY_USAGE,
+  } as const
+
+  await $.turn.complete(stopped)
+
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+
+  expect(await pane.findAll({ type: 'Text', text: /^시간 / })).toHaveLength(7)
+  expect(await pane.find({ type: 'Text', text: /^최근 7일/ })).toBeUndefined()
+  await pane.unmount()
+})
+
+test('two runs started close together each take their own record', async ($, on) => {
+  const output: Record<string, unknown> = { running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const first = clock.now()
+
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "one"', run_in_background: true })
+  await clock.advance(5_000)
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "two"', run_in_background: true })
+  const one = { startedAt: first + 2_000, steps: 3, read: 1_000_000, cached: 0, write: 0, folder: '/' }
+  const two = { startedAt: first + 7_000, steps: 4, read: 2_000_000, cached: 0, write: 0, folder: '/' }
+
+  output.running = 2
+  output.working = [one]
+  await clock.advance(10_000)
+  output.working = [one, two]
+  await clock.advance(10_000)
+  output.running = 0
+  output.working = []
+  output.finished = [
+    { ...two, finishedAt: first + 3 * 60_000 },
+    { ...one, finishedAt: first + 2 * 60_000 },
+  ]
+  codexDisk.recordAt = clock.now()
+  await clock.advance(10_000)
+  await clock.advance(10_000)
+  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  const rows = (await pane.findAll({ type: 'Text', text: /^시간 / })).map(row => row.text)
+
+  expect(rows).toEqual(['시간 3분 · 단계 4 · 토큰 2M', '시간 2분 · 단계 3 · 토큰 1M'])
+  await pane.unmount()
+  codexDisk.recordAt = 0
 })

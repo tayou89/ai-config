@@ -60,6 +60,10 @@ def _stamp(minutes_ago: int) -> str:
     return moment.isoformat().replace("+00:00", "Z")
 
 
+def _ms(stamp: str) -> int:
+    return int(datetime.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp() * 1000)
+
+
 def _reply(number: int, minutes_ago: int = 1) -> str:
     usage = {"input_tokens": 10, "cache_read_input_tokens": 100, "output_tokens": 5}
     record = {
@@ -227,6 +231,28 @@ class SharedReaderTest(unittest.TestCase):
         self.assertEqual(read_on["last"]["rise"], 4.0)
         self.assertEqual(read_on["last"]["model"], "gpt-6-astra")
         self.assertEqual(read_on, from_start)
+
+    def test_finished_codex_runs_come_with_when_they_started(self) -> None:
+        folder = os.path.join(self._home, ".codex", "sessions", datetime.date.today().strftime("%Y/%m/%d"))
+        head = {"originator": "codex_exec", "source": "exec", "timestamp": _stamp(10), "cwd": "/work"}
+
+        os.makedirs(folder)
+        with open(os.path.join(folder, "rollout-done.jsonl"), "w", encoding="utf-8") as file:
+            file.write(_codex_line("session_meta", head, 10))
+            file.write(_token_count(1000, 10.0))
+            file.write(_token_count(3000, 12.0))
+            file.write(_codex_line("event_msg", {"type": "task_complete"}))
+        with open(os.path.join(folder, "rollout-open.jsonl"), "w", encoding="utf-8") as file:
+            file.write(_codex_line("session_meta", {**head, "timestamp": _stamp(2)}, 2))
+            file.write(_token_count(500, 12.0))
+        finished = self._read_codex()["finished"]
+
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["startedAt"], _ms(head["timestamp"]))
+        self.assertEqual(finished[0]["steps"], 2)
+        self.assertEqual(finished[0]["read"], 3000)
+        self.assertEqual(finished[0]["rise"], 2.0)
+        self.assertGreaterEqual(finished[0]["finishedAt"], finished[0]["startedAt"])
 
 
 if __name__ == "__main__":

@@ -112,6 +112,13 @@ export type CodexRun = CodexTotals & { finishedAt: number }
 // A `codex exec` run still at work, its totals up to its newest step.
 export type CodexWork = CodexTotals & { startedAt: number; steps: number }
 
+// A `codex exec` run that finished lately, by when it started, so a session
+// finds the runs it started among every run on this Mac.
+export type CodexEnded = CodexWork & { finishedAt: number }
+
+// A run's record as the reader found it lately, at work or finished.
+export type CodexRecord = CodexWork & { finishedAt?: number }
+
 // The model and reasoning effort a Codex run works with, as Codex spells them.
 // No `effort` when Codex leaves it to the model's own default.
 export type CodexSetting = { model: string; effort?: string }
@@ -122,6 +129,8 @@ export type CodexLocalOutput = {
   last?: CodexRun
   // The runs at work that keep a record, the most recently written first.
   working: CodexWork[]
+  // The runs that finished within the last two hours, the newest first.
+  finished?: CodexEnded[]
   // Every `codex exec` at work, with or without a record.
   running: number
 }
@@ -148,6 +157,7 @@ export type Codex = {
   serverAt?: number
   last?: CodexRun
   working: CodexWork[]
+  finished?: CodexEnded[]
   configured?: CodexSetting
   configuredAt?: number
   running: number
@@ -195,6 +205,61 @@ export type CacheOutput = { at?: number; ttl?: CacheTtl }
 // by a summary the engine made while the session sat idle.
 export type Cache = { requestAt?: number; ttlMs: number; summaryAt?: number }
 
+export type WorkMaker = 'claude' | 'codex'
+
+// Where the band draws the work rows: on rows of their own at its top, or at
+// the end of its first line. Both stay until the person picks one.
+export type WorkLayout = 'row' | 'line-end'
+
+// What the session said a piece of work would take, when it said so, and the
+// conversation's length then, which each Claude step reads again. Steps only
+// for Claude: a session cannot foresee a Codex run's steps.
+export type WorkEstimate = { minutes: number; steps?: number; setAt: number; dueAt: number; contextTokens?: number }
+
+// One piece of work: a reply of this session, or a codex exec run it started.
+// `isAlone` holds while no other session (or run) worked beside it, so its
+// limit rise is its own; `rise` is how far the 5-hour window rose meanwhile.
+export type Work = {
+  maker: WorkMaker
+  id: string
+  sessionId: string
+  startedAt: number
+  finishedAt?: number
+  estimate?: WorkEstimate
+  firstEstimate?: WorkEstimate
+  startContext?: number
+  steps: number
+  tokens: number
+  weight: number
+  isAlone: boolean
+  rise?: number
+  // What the estimate came to when the work ended, kept as it was then.
+  expected?: WorkLoad
+  // A reply the person stopped, left out of the pace and the median miss.
+  isAborted?: boolean
+  // Set once the session heard it gave no estimate for this work.
+  isTold?: boolean
+  // When the Codex record this run took began, so no other run takes it.
+  recordStartedAt?: number
+}
+
+// What a session's file of finished work holds.
+export type WorkFile = { works: Work[] }
+
+// What the estimates are figured with, from the finished work of the last 7
+// days: Claude by steps times the conversation's length, Codex by minutes.
+export type WorkPace = {
+  weightPerStepContext?: number
+  tokensPerStepContext?: number
+  weightPerMinute?: number
+  tokensPerMinute?: number
+  percentPerWeight?: number
+}
+
+// What a piece of work is expected to cost, or did cost, in tokens, weight and
+// points of the 5-hour window.
+export type WorkLoad = { tokens: number; weight: number; percent?: number }
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-panel': {
@@ -215,6 +280,11 @@ declare module 'claude-code' {
       sessions: Shaped<SessionCounts | null>
       cache: Shaped<Cache>
       cacheTick: Shaped<number>
+      works: Shaped<Work[]>
+      workHistory: Shaped<Work[]>
+      workLayout: Shaped<WorkLayout>
+      pendingCodexEstimate: Shaped<WorkEstimate | null>
+      workTick: Shaped<number>
     }
   }
 }
