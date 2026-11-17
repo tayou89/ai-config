@@ -4,6 +4,8 @@ import type { Engine } from 'claude-code/testing'
 import type { CacheOutput, ListedSession, SessionsOutput, SessionsRequest } from '../types'
 
 type SessionRow = ListedSession & { isArchived: boolean }
+// A drawn surface, as far as finding a Text by its text goes.
+type TextFinder = { find: (query: { type: 'Text'; text: RegExp }) => Promise<{ text?: string } | undefined> }
 
 // The mod's own tool, as its schema declares it: the session that laid the
 // types had not registered it yet.
@@ -352,10 +354,11 @@ test('the line above the prompt sums the limits and opens the details', async ($
     expect((await ui.find({ type: 'Text', text: /^5h / }))?.text).toBe('5h 12%')
     expect((await ui.find({ type: 'Text', text: /^↻20:50$/ }))?.text).toBe('↻20:50')
     expect((await ui.find({ type: 'Text', text: /^Week / }))?.text).toBe('Week 17%')
-    expect((await ui.find({ type: 'Text', text: /^↻Mon 05:00$/ }))?.text).toBe('↻Mon 05:00')
+    expect(await ui.find({ type: 'Text', text: /^↻Mon/ })).toBeUndefined()
     expect((await ui.find({ type: 'Text', text: /^Context / }))?.text).toBe('Context 15%')
-    expect((await ui.find({ type: 'Text', text: /^·151K\/1M$/ }))?.text).toBe('·151K/1M')
+    expect(await ui.find({ type: 'Text', text: /151K\/1M/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^Last/ })).toBeUndefined()
+    expect((await ui.find({ key: 'details' }))?.text).toBe('≡')
     await ui.press({ key: 'details' })
     await ui.unmount()
   }
@@ -376,7 +379,7 @@ test('crossing 80% raises one toast per window and threshold', async ($, on) => 
   expect(toasts).toEqual(['5h limit 85% · resets 20:50', '5h limit 96% · resets 20:50'])
 })
 
-test('the line shows the last reply once one finished', async ($, on) => {
+test('the Claude line shows the last reply of this session once one finished', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: '추천으로 해줘', turnId: 't2' })
@@ -387,7 +390,9 @@ test('the line shows the last reply once one finished', async ($, on) => {
 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...ABOVE, surface })
-    expect((await ui.find({ type: 'Text', text: /^Last/ }))?.text).toBe('Last In 152K·Out 1.2K')
+    expect((await ui.find({ type: 'Text', text: /끝/ }))?.text).toBe('16:00 끝 1분 미만 걸림')
+    expect((await ui.find({ type: 'Text', text: /^153K$/ }))?.text).toBe('153K')
+    expect(await ui.find({ type: 'Text', text: /^Last|^In / })).toBeUndefined()
     await ui.unmount()
   }
 })
@@ -493,12 +498,16 @@ test('a heavy reply leaves a note beside the branch and an insight, until the ne
   await after.unmount()
 })
 
-test('a running reply shows its counts without a Working label', async ($, on) => {
+test('a running reply shows how long it ran and its tokens without a Working label', async ($, on) => {
   engine(on)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await $.turn.start({ text: '진행 중', turnId: 'w1' })
   const band = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
-  expect((await band.find({ type: 'Text', text: /^In / }))?.text).toBe('In 0·Out 0 ×0')
+  const spinners = (await band.findAll({ type: 'Svg' })).filter(svg => svg.props.alt === 'working')
+
+  expect((await band.find({ type: 'Text', text: /^진행/ }))?.text).toBe('진행 1분 미만')
+  expect((await band.find({ type: 'Text', text: /^0 ×0$/ }))?.text).toBe('0 ×0')
+  expect(spinners).toHaveLength(1)
   expect(await band.find({ type: 'Text', text: /Working/ })).toBeUndefined()
   await band.unmount()
 })
@@ -589,7 +598,7 @@ const CODEX = {
   running: 0,
 }
 
-test('a Codex line follows the Claude line with its limits, last run and details', async ($, on) => {
+test('a Codex line follows the Claude line with its limits; its last run waits in the details', async ($, on) => {
   const opened: string[] = []
   const clock = engine(on, opened, undefined, [], true, [], CODEX)
 
@@ -602,7 +611,8 @@ test('a Codex line follows the Claude line with its limits, last run and details
     expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
     expect((await ui.find({ type: 'Text', text: /^↻18:10$/ }))?.text).toBe('↻18:10')
     expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
-    expect((await ui.find({ type: 'Text', text: /^Last/ }))?.text).toBe('Last In 620K·Out 9.4K')
+    expect(await ui.find({ type: 'Text', text: /^Last|^In / })).toBeUndefined()
+    expect((await ui.find({ key: 'codex-details' }))?.text).toBe('≡')
     await ui.press({ key: 'codex-details' })
     await ui.unmount()
   }
@@ -672,7 +682,7 @@ test('the Codex line names the model and effort the next run takes, just before 
     const keys = (line?.children ?? []).map(child => (child as { props?: { key?: string } }).props?.key)
 
     expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
-    expect(keys.slice(-3)).toEqual(['codex-last', 'codex-setting', 'codex-details'])
+    expect(keys.slice(-2)).toEqual(['codex-setting', 'codex-details'])
     await ui.unmount()
   }
 
@@ -683,7 +693,7 @@ test('the Codex line names the model and effort the next run takes, just before 
   await pane.unmount()
 })
 
-test('a Codex run at work shows its totals so far beside a spinner, as the Claude line does', async ($, on) => {
+test("a Codex run another session started shows in the details, not on this session's line", async ($, on) => {
   const work = {
     startedAt: Date.parse('2026-11-04T06:40:00Z'),
     steps: 37,
@@ -701,13 +711,11 @@ test('a Codex run at work shows its totals so far beside a spinner, as the Claud
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
-  const live = await ui.find({ key: 'codex-last' })
   const spinners = (await ui.findAll({ type: 'Svg' })).filter(svg => svg.props.alt === 'working')
-  const first = (live?.children ?? [])[0] as { props?: { alt?: string } } | undefined
 
-  expect(live?.text).toBe('In 5.9M·Out 21.7K ×37 +1 run')
-  expect(spinners).toHaveLength(1)
-  expect(first?.props?.alt).toBe('working')
+  expect(await ui.find({ key: 'work-codex' })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /^In 5.9M/ })).toBeUndefined()
+  expect(spinners).toHaveLength(0)
   expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-sol high')
   await ui.unmount()
 
@@ -726,7 +734,6 @@ test('a Codex run at work shows its totals so far beside a spinner, as the Claud
   const after = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
   const left = (await after.findAll({ type: 'Svg' })).filter(svg => svg.props.alt === 'working')
 
-  expect((await after.find({ key: 'codex-last' }))?.text).toBe('Last In 620K·Out 9.4K')
   expect((await after.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
   expect(left).toHaveLength(0)
   await after.unmount()
@@ -850,7 +857,7 @@ test('a Codex reading another session made since is taken without reading again'
 
   expect(codexReads).toEqual([])
   expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
-  expect((await ui.find({ key: 'codex-last' }))?.text).toBe('Last In 620K·Out 9.4K')
+  expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
   expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
   await ui.unmount()
 })
@@ -885,7 +892,7 @@ test('while another session reads Codex, this one keeps its line and takes that 
   expect(codexReads).toEqual([])
   expect(await ui.find({ type: 'Text', text: /읽지 못했어요/ })).toBeUndefined()
   expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
-  expect((await ui.find({ key: 'codex-last' }))?.text).toBe('Last In 620K·Out 9.4K')
+  expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
   await ui.unmount()
 })
 
@@ -1151,8 +1158,7 @@ const REPLY_USAGE = {
 }
 
 // Finished work another session wrote, from which the pace is read: each
-// Claude reply 10 steps at a conversation of 100K, each Codex run ten minutes,
-// all alone and each rising the window by two points.
+// Claude reply 10 steps at a conversation of 100K, each Codex run ten minutes.
 const pastWork = (maker: 'claude' | 'codex', index: number, finishedAt = START - HOUR) => ({
   maker,
   id: `${maker}-${index}`,
@@ -1163,15 +1169,29 @@ const pastWork = (maker: 'claude' | 'codex', index: number, finishedAt = START -
   steps: 10,
   tokens: maker === 'claude' ? 10_000_000 : 1_000_000,
   weight: maker === 'claude' ? 100_000 : 200_000,
-  isAlone: true,
   rise: 2,
 })
 
-const seedPastWork = (extra: object[] = []) => {
+// The weekly limits as that session saw them rise around the work: Claude's 4
+// points over 300K of weight, Codex's 3 over 600K.
+const CLAUDE_WEEK = '2026-11-08T20:00:00Z'
+const CODEX_WEEK = '2026-11-08T21:00:00Z'
+const PAST_STEPS = [
+  { at: START - 2 * HOUR, maker: 'claude', percentUsed: 13, resetsAt: CLAUDE_WEEK },
+  { at: START - HOUR / 2, maker: 'claude', percentUsed: 17, resetsAt: CLAUDE_WEEK },
+  { at: START - 2 * HOUR, maker: 'codex', percentUsed: 20, resetsAt: CODEX_WEEK },
+  { at: START - HOUR / 2, maker: 'codex', percentUsed: 23, resetsAt: CODEX_WEEK },
+]
+
+const seedPastWork = (extra: object[] = [], limitSteps: object[] = PAST_STEPS) => {
   const works = [0, 1, 2].flatMap(i => [pastWork('claude', i), pastWork('codex', i)])
 
-  app.workFiles[`${WORK_FOLDER}/other.json`] = JSON.stringify({ works: [...works, ...extra] })
+  app.workFiles[`${WORK_FOLDER}/other.json`] = JSON.stringify({ works: [...works, ...extra], limitSteps })
 }
+
+// The band draws each piece of a work as one Text, so a piece is found by its
+// whole text.
+const textOf = async (ui: TextFinder, text: RegExp) => (await ui.find({ type: 'Text', text }))?.text
 
 test('a reply with an estimate shows when it is due, then how late it ended and what it cost', async ($, on) => {
   const clock = engine(on)
@@ -1186,7 +1206,9 @@ test('a reply with an estimate shows when it is due, then how late it ended and 
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...ABOVE, surface })
 
-    expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:00 시작 · 예정 16:20 (20분 남음) · 토큰 0/예상 15.1M · 5시간 ≈+0%/예상 +3%')
+    expect(await textOf(ui, /까지/)).toBe('16:20까지 20분')
+    expect(await textOf(ui, /^0\/예상/)).toBe('0/예상 15.1M ×0')
+    expect(await textOf(ui, /^0\/2%$/)).toBe('0/2%')
     await ui.unmount()
   }
 
@@ -1194,10 +1216,74 @@ test('a reply with an estimate shows when it is due, then how late it ended and 
   await $.turn.complete({ turnId: 'w1', answer: '', durationMs: 1, isAborted: false, reason: 'answer', usage: REPLY_USAGE })
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:26 끝 · 예정 16:20 · 6분 늦음 · 토큰 153K/예상 15.1M · -99% · 5시간 ≈+0.5%/예상 +3%')
-  expect((await ui.find({ type: 'Text', text: / · 6분 늦음$/ }))?.props.color).toBe('warning')
-  expect(await ui.find({ key: 'work-codex-text' })).toBeUndefined()
+  expect(await textOf(ui, /^16:26 끝/)).toBe('16:26 끝 6분 늦음')
+  expect((await ui.find({ type: 'Text', text: /^ 6분 늦음$/ }))?.props.color).toBe('warning')
+  expect(await textOf(ui, /^153K/)).toBe('153K/예상 15.1M -99%')
+  expect(await textOf(ui, /^0\.3\//)).toBe('0.3/2%')
+  expect(await ui.find({ key: 'work-codex' })).toBeUndefined()
   await ui.unmount()
+})
+
+// A reply that estimates 10 steps at this session's conversation, drawn on the
+// band: its share of the week as the rate the steps and the work give.
+const estimatedShare = async ($: Engine, clock: ReturnType<typeof engine>, turnId: string) => {
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.turn.start({ text: '해줘', turnId })
+  await $.tool.call({ tool: ESTIMATE, maker: 'claude', minutes: 20, steps: 10 })
+  const band = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+  const share = await textOf(band, /^0(\/[\d.]+)?%$/)
+
+  await band.unmount()
+  return share
+}
+
+test('the share of the week waits for three points of rise', async ($, on) => {
+  const clock = engine(on)
+  const twoPoints = PAST_STEPS.map(s => (s.maker === 'claude' && s.percentUsed === 13 ? { ...s, percentUsed: 15 } : s))
+
+  seedPastWork([], twoPoints)
+  expect(await estimatedShare($, clock, 'p1')).toBeUndefined()
+})
+
+test('the share of the week starts over where the percent falls, and passes a malformed step', async ($, on) => {
+  const clock = engine(on)
+  const lastWeek = [
+    { at: START - 3 * HOUR, maker: 'claude', percentUsed: 40, resetsAt: CLAUDE_WEEK },
+    { at: START - 2.5 * HOUR, maker: 'claude', percentUsed: 44, resetsAt: CLAUDE_WEEK },
+    { at: 'soon', maker: 'claude', percentUsed: 99 },
+  ]
+
+  seedPastWork([], [...lastWeek, ...PAST_STEPS])
+  expect(await estimatedShare($, clock, 'p2')).toBe('0/2%')
+})
+
+test('the share of the week starts over with a new week even when the percent did not fall', async ($, on) => {
+  const clock = engine(on)
+  const lastWeek = [{ at: START - 3 * HOUR, maker: 'claude', percentUsed: 10, resetsAt: '2026-11-01T20:00:00Z' }]
+
+  seedPastWork([], [...lastWeek, ...PAST_STEPS])
+  expect(await estimatedShare($, clock, 'p3')).toBe('0/2%')
+})
+
+test('the share of the week sums the work of every session, and each session saves the steps it saw', async ($, on) => {
+  const clock = engine(on)
+  const works = [0, 1, 2].map(i => ({ ...pastWork('claude', i), sessionId: `other-${i}` }))
+
+  for (const [i, work] of works.entries()) {
+    const limitSteps = i === 0 ? PAST_STEPS : []
+
+    app.workFiles[`${WORK_FOLDER}/other-${i}.json`] = JSON.stringify({ works: [work], limitSteps })
+  }
+  expect(await estimatedShare($, clock, 'p4')).toBe('0/2%')
+  await clock.advance(60_000)
+
+  const own = JSON.parse(app.workFiles[`${WORK_FOLDER}/cli-1.json`] ?? '{}') as {
+    limitSteps?: { maker: string; percentUsed: number; resetsAt?: string }[]
+  }
+  const seen = (own.limitSteps ?? []).map(step => [step.maker, step.percentUsed, step.resetsAt])
+
+  expect(seen).toContainEqual(['claude', 17, CLAUDE_WEEK])
 })
 
 test('the estimate tool refuses an input it cannot record', async ($, on) => {
@@ -1215,23 +1301,18 @@ test('the estimate tool refuses an input it cannot record', async ($, on) => {
   expect(noMinutes.deny).toContain('minutes')
 })
 
-test('work without an estimate shows its start and end, at the end of the first line once picked', async ($, on) => {
+test('work without an estimate shows how long it ran, and how long it took once it ended', async ($, on) => {
   const clock = engine(on)
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
   await $.turn.start({ text: '고쳐줘', turnId: 'w3' })
   await clock.advance(3 * 60_000)
-
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
-
-  await pane.press({ key: 'work-layout-line-end' })
-  await pane.unmount()
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...ABOVE, surface })
 
-    expect((await ui.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:00 시작 · 진행 3분 · 토큰 0')
-    expect((await ui.find({ key: 'where' }))?.text).toContain('Claude · 16:00 시작')
+    expect(await textOf(ui, /^진행/)).toBe('진행 3분')
+    expect(await textOf(ui, /^0 ×0$/)).toBe('0 ×0')
     await ui.unmount()
   }
 
@@ -1239,23 +1320,9 @@ test('work without an estimate shows its start and end, at the end of the first 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   const after = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect((await after.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:03 끝 · 3분 걸림 · 토큰 153K')
-  expect((await after.find({ key: 'where' }))?.text).toContain('Claude · 16:03 끝')
+  expect(await textOf(after, /끝/)).toBe('16:03 끝 3분 걸림')
+  expect(await textOf(after, /^153K$/)).toBe('153K')
   await after.unmount()
-
-  const layoutCommand = {
-    command: 'usage-panel',
-    args: 'layout row',
-    origin: { kind: 'composer' },
-    presentation: { isFullscreen: false, columns: 80 },
-  } as const
-
-  await $.command.run(layoutCommand)
-  const back = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
-
-  expect((await back.find({ key: 'where' }))?.text).not.toContain('Claude ·')
-  expect((await back.find({ key: 'work-claude-text' }))?.text).toBe('Claude · 16:03 끝 · 3분 걸림 · 토큰 153K')
-  await back.unmount()
 })
 
 test('a Codex run in the background takes its estimate and ends with its record', async ($, on) => {
@@ -1278,7 +1345,9 @@ test('a Codex run in the background takes its estimate and ends with its record'
   await clock.advance(10_000)
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect((await ui.find({ key: 'work-codex-text' }))?.text).toBe('Codex · 16:00 시작 · 예정 16:15 (15분 남음) · 토큰 1M/예상 1.5M · 5시간 ≈+3.8%/예상 +3%')
+  expect(await textOf(ui, /까지/)).toBe('16:15까지 15분')
+  expect(await textOf(ui, /^1M\/예상/)).toBe('1M/예상 1.5M ×30')
+  expect(await textOf(ui, /^1\.9\//)).toBe('1.9/1.5%')
   await ui.unmount()
 
   await clock.advance(12 * 60_000 - 10_000)
@@ -1290,7 +1359,9 @@ test('a Codex run in the background takes its estimate and ends with its record'
   await clock.advance(10_000)
   const done = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect((await done.find({ key: 'work-codex-text' }))?.text).toBe('Codex · 16:12 끝 · 예정 16:15 · 3분 빠름 · 토큰 1M/예상 1.5M · -32% · 5시간 ≈+3.8%/예상 +3%')
+  expect(await textOf(done, /^16:12 끝/)).toBe('16:12 끝 3분 빠름')
+  expect(await textOf(done, /^1M\/예상/)).toBe('1M/예상 1.5M -32%')
+  expect(await textOf(done, /^1\.9\//)).toBe('1.9/1.5%')
   await done.unmount()
   codexDisk.recordAt = 0
 })
@@ -1328,12 +1399,12 @@ test('the details list the week of work with its estimates and the median miss',
   const rows = await pane.findAll({ type: 'Text', text: /^시간 / })
 
   expect(rows).toHaveLength(7)
-  expect(rows[0]?.text).toBe('시간 26분/20분 · 단계 0/10 · 토큰 153K/15.1M · 5시간 ≈+0.5%/+3%')
-  expect(rows[1]?.text).toBe('시간 10분 · 단계 10 · 토큰 1M · 5시간 ≈+2%')
+  expect(rows[0]?.text).toBe('시간 26분/20분 · 단계 0/10 · 토큰 153K/15.1M · 주간 0.3%/2%')
+  expect(rows[1]?.text).toBe('시간 10분 · 단계 10 · 토큰 1M · 주간 1%')
   expect((await pane.find({ type: 'Text', text: /^최근 7일/ }))?.text).toBe(
     '최근 7일, 예정보다 보통 시간 +30% · 단계 -100% · 토큰 -99%',
   )
-  expect((await pane.find({ key: 'work-layout-row' }))?.text).toBe('✓ 맨 위 작업 줄')
+  expect(await pane.find({ type: 'Text', text: /^%는 그 작업이/ })).toBeDefined()
   await pane.unmount()
   expect(Object.keys(app.workFiles)).toContain(`${WORK_FOLDER}/cli-1.json`)
 })
@@ -1350,7 +1421,7 @@ test('a command that only names codex exec is no work, and a refused run gives i
   await $.tool.call({ tool: 'Bash', command: 'codex exec --help' })
   const none = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect(await none.find({ key: 'work-codex-text' })).toBeUndefined()
+  expect(await none.find({ key: 'work-codex' })).toBeUndefined()
   await none.unmount()
 
   await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10 })
@@ -1358,9 +1429,8 @@ test('a command that only names codex exec is no work, and a refused run gives i
   await $.tool.call({ tool: 'Bash', command: 'cd /tmp && codex exec "review"', run_in_background: true })
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  const row = (await ui.find({ key: 'work-codex-text' }))?.text
-
-  expect(row).toBe('Codex · 16:00 시작 · 예정 16:10 (10분 남음) · 토큰 0')
+  expect(await textOf(ui, /까지/)).toBe('16:10까지 10분')
+  expect(await textOf(ui, /^0 ×0$/)).toBe('0 ×0')
   await ui.unmount()
 })
 

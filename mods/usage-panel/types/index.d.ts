@@ -207,18 +207,14 @@ export type Cache = { requestAt?: number; ttlMs: number; summaryAt?: number }
 
 export type WorkMaker = 'claude' | 'codex'
 
-// Where the band draws the work rows: on rows of their own at its top, or at
-// the end of its first line. Both stay until the person picks one.
-export type WorkLayout = 'row' | 'line-end'
-
 // What the session said a piece of work would take, when it said so, and the
 // conversation's length then, which each Claude step reads again. Steps only
 // for Claude: a session cannot foresee a Codex run's steps.
 export type WorkEstimate = { minutes: number; steps?: number; setAt: number; dueAt: number; contextTokens?: number }
 
 // One piece of work: a reply of this session, or a codex exec run it started.
-// `isAlone` holds while no other session (or run) worked beside it, so its
-// limit rise is its own; `rise` is how far the 5-hour window rose meanwhile.
+// `rise` is how far its tool's tighter window rose meanwhile, other sessions'
+// use included; a Codex run has one once its record finished.
 export type Work = {
   maker: WorkMaker
   id: string
@@ -231,7 +227,6 @@ export type Work = {
   steps: number
   tokens: number
   weight: number
-  isAlone: boolean
   rise?: number
   // What the estimate came to when the work ended, kept as it was then.
   expected?: WorkLoad
@@ -243,11 +238,16 @@ export type Work = {
   recordStartedAt?: number
 }
 
-// What a session's file of finished work holds.
-export type WorkFile = { works: Work[] }
+// A tool's weekly limit as a session saw it change: when, to what, and when
+// that week ends. The steps every session saw make one series per tool.
+export type LimitStep = { at: number; maker: WorkMaker; percentUsed: number; resetsAt?: string }
+
+// What a session's file holds: its finished work and the limit steps it saw.
+export type WorkFile = { works: Work[]; limitSteps?: LimitStep[] }
 
 // What the estimates are figured with, from the finished work of the last 7
-// days: Claude by steps times the conversation's length, Codex by minutes.
+// days: Claude by steps times the conversation's length, Codex by minutes; the
+// percent by the weekly window's rise over every session's work since its reset.
 export type WorkPace = {
   weightPerStepContext?: number
   tokensPerStepContext?: number
@@ -282,7 +282,8 @@ declare module 'claude-code' {
       cacheTick: Shaped<number>
       works: Shaped<Work[]>
       workHistory: Shaped<Work[]>
-      workLayout: Shaped<WorkLayout>
+      limitSteps: Shaped<LimitStep[]>
+      limitHistory: Shaped<LimitStep[]>
       pendingCodexEstimate: Shaped<WorkEstimate | null>
       workTick: Shaped<number>
     }

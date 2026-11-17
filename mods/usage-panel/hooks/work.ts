@@ -1,4 +1,4 @@
-import type { CodexTotals, Level, Work, WorkLoad, WorkMaker, WorkPace } from '../types'
+import type { CodexTotals, Level, LimitStep, Work, WorkLoad, WorkMaker, WorkPace } from '../types'
 
 export const MINUTE_MS = 60 * 1000
 const DAY_MS = 24 * 60 * MINUTE_MS
@@ -7,9 +7,11 @@ export const WORK_KEEP_MS = 7 * DAY_MS
 const PACE_MIN_MS = MINUTE_MS
 const PACE_KEEP = 30
 const PACE_MIN_COUNT = 3
-// A rise under one point is the window's rounding, not the work.
-const RISE_MIN = 1
-const PERCENT_KEEP = 10
+// The weekly window rises in whole points: below three, one point of rounding
+// is a third of the rate or more.
+const WEEK_RISE_MIN = 3
+// A week that ends this much later than the one before is a new week.
+const RESET_SHIFT_MS = DAY_MS
 // How far over its estimate a piece of work went before it turns yellow, then red.
 const OVER_WARN = 1.2
 const OVER_HIGH = 1.5
@@ -55,23 +57,51 @@ function paceSamples(works: readonly Work[], maker: WorkMaker): Work[] {
     .slice(-PACE_KEEP)
 }
 
-// Points of the 5-hour window per unit of weight, from work that ran alone
-// and rose the window by a point or more.
-function percentPerWeight(works: readonly Work[], maker: WorkMaker): number | undefined {
-  const rates = works
-    .filter(w => w.maker === maker && w.isAlone && w.isAborted !== true && (w.rise ?? 0) >= RISE_MIN && w.weight > 0)
-    .sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
-    .slice(-PERCENT_KEEP)
-    .map(w => (w.rise ?? 0) / w.weight)
+export function isNewWeek(before: Pick<LimitStep, 'resetsAt'>, after: Pick<LimitStep, 'resetsAt'>): boolean {
+  const beforeEnd = Date.parse(before.resetsAt ?? '')
+  const afterEnd = Date.parse(after.resetsAt ?? '')
 
-  return settledMedian(rates)
+  return afterEnd - beforeEnd > RESET_SHIFT_MS
+}
+
+// The steps since the window last started over: after the last one whose
+// percent fell or whose week ends a day or more later than the one before.
+function sinceReset(sorted: readonly LimitStep[]): LimitStep[] {
+  const isReset = (step: LimitStep, i: number): boolean => {
+    const before = sorted[i - 1]
+
+    return before !== undefined && (step.percentUsed < before.percentUsed || isNewWeek(before, step))
+  }
+  const start = sorted.reduce((found, step, i) => (isReset(step, i) ? i : found), 0)
+
+  return sorted.slice(start)
+}
+
+// Points of the weekly window per unit of weight: how far the window rose
+// since it last started over, over the weight of every session's work of the
+// tool that finished meanwhile. The window is the account's, so all of it
+// counts; none until it rose three points.
+function percentPerWeight(works: readonly Work[], steps: readonly LimitStep[], maker: WorkMaker): number | undefined {
+  const week = sinceReset(steps.filter(s => s.maker === maker).sort((a, b) => a.at - b.at))
+  const first = week[0]
+  const last = week[week.length - 1]
+
+  if (first && last && last.percentUsed - first.percentUsed >= WEEK_RISE_MIN) {
+    const isWithin = (w: Work): boolean =>
+      w.finishedAt !== undefined && w.finishedAt > first.at && w.finishedAt <= last.at
+    const weight = works.filter(w => w.maker === maker && isWithin(w)).reduce((sum, w) => sum + w.weight, 0)
+
+    return weight > 0 ? (last.percentUsed - first.percentUsed) / weight : undefined
+  } else {
+    return undefined
+  }
 }
 
 // Claude's pace is per step and token of the conversation, since each step
 // reads the whole conversation again; Codex's is per minute.
-export function workPace(works: readonly Work[], maker: WorkMaker): WorkPace {
+export function workPace(works: readonly Work[], steps: readonly LimitStep[], maker: WorkMaker): WorkPace {
   const samples = paceSamples(works, maker)
-  const percent = percentPerWeight(works, maker)
+  const percent = percentPerWeight(works, steps, maker)
 
   if (maker === 'claude') {
     const reads = samples.filter(w => (w.startContext ?? 0) > 0 && w.steps > 0)
@@ -150,6 +180,11 @@ export function keptWorks(works: readonly Work[], now: number): Work[] {
   return works
     .filter(w => w.finishedAt !== undefined && now - w.finishedAt < WORK_KEEP_MS)
     .sort((a, b) => (a.finishedAt ?? 0) - (b.finishedAt ?? 0))
+}
+
+// Limit steps younger than the week, the oldest first.
+export function keptSteps(steps: readonly LimitStep[], now: number): LimitStep[] {
+  return steps.filter(s => now - s.at < WORK_KEEP_MS).sort((a, b) => a.at - b.at)
 }
 
 // How much longer or shorter than estimated, as a share of the estimate.

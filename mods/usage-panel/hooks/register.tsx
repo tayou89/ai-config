@@ -7,11 +7,13 @@ import {
   codexTokens,
   codexWeight,
   expectedLoad,
+  isNewWeek,
+  keptSteps,
   keptWorks,
   overLevel,
   workPace,
 } from './work'
-import type { EngineInterface, Register, ToolCallResult } from 'claude-code'
+import type { EngineInterface, FsEntry, Register, ToolCallResult } from 'claude-code'
 import type {
   Cache,
   CacheOutput,
@@ -29,6 +31,7 @@ import type {
   Insight,
   Level,
   Limit,
+  LimitStep,
   ListedSession,
   Live,
   Reading,
@@ -46,7 +49,6 @@ import type {
   Work,
   WorkEstimate,
   WorkFile,
-  WorkLayout,
   WorkLoad,
   WorkMaker,
   WorkPace,
@@ -67,6 +69,8 @@ type Usage = {
 // One piece of a work row as the band draws it: its text, and the color or
 // weight that carries how it compares with the estimate.
 type WorkPart = { key: string; text: string; color?: string; isBold?: boolean; isDim?: boolean }
+// A work's pieces in its usage line: when it ends, its tokens, its share of the week.
+type WorkPieces = { time: WorkPart[]; tokens: WorkPart[]; percent: WorkPart[] }
 // What was last read of a session: its file's save time, and the activity
 // stamp its transcript was last looked at for a question.
 type SessionSeen = SessionRead & { savedAt: number; askedAt?: string }
@@ -202,14 +206,17 @@ const CACHE_SOON_MS = 10 * 60 * 1000
 const CACHE_TICK_MS = 60 * 1000
 // This session's work, a reply or a codex exec run it started, each with the
 // estimate the session gave for it; the finished work of every session here
-// from the files they keep; and where the band draws it, which the person
-// picks with the switch in the details.
+// from the files they keep; and the weekly limits' steps this session saw and
+// every session saw, which the percent of a work is figured from.
 const works = atom({ plugin: 'usage-panel', key: 'works' } as const, [] as Work[], { shape: 'works-1' })
 const workHistory = atom({ plugin: 'usage-panel', key: 'workHistory' } as const, [] as Work[], {
   shape: 'work-history-1',
 })
-const workLayout = atom({ plugin: 'usage-panel', key: 'workLayout' } as const, 'row' as WorkLayout, {
-  shape: 'work-layout-1',
+const limitSteps = atom({ plugin: 'usage-panel', key: 'limitSteps' } as const, [] as LimitStep[], {
+  shape: 'limit-steps-1',
+})
+const limitHistory = atom({ plugin: 'usage-panel', key: 'limitHistory' } as const, [] as LimitStep[], {
+  shape: 'limit-history-1',
 })
 // A Codex estimate waits here for the codex exec run the session starts next.
 const pendingCodexEstimate = atom(
@@ -220,9 +227,8 @@ const pendingCodexEstimate = atom(
 // Bumped twice a minute while work runs, so its minutes left redraw.
 const workTick = atom({ plugin: 'usage-panel', key: 'workTick' } as const, 0, { shape: 'work-tick-1' })
 const WORK_TICK_MS = 30 * 1000
-const WORK_LAYOUTS: readonly WorkLayout[] = ['row', 'line-end']
-const WORK_LAYOUT_KEY = 'workLayout'
-const WORK_LAYOUT_NAME: Record<WorkLayout, string> = { row: '맨 위 작업 줄', 'line-end': '맨 윗줄 끝' }
+const WEEK_LIMIT = 'seven_day'
+const PERCENT_SHOWN_MIN = 0.1
 const WORK_FOLDER = 'Library/Application Support/usage-panel/work'
 const WORK_EVERY_MS = 60 * 1000
 const KEEP_OWN_WORKS = 50
@@ -1167,7 +1173,7 @@ const duration = (ms: number | undefined) => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`
 }
 
-const LIMIT_NAME: Record<string, string> = { five_hour: '5h', seven_day: 'Week' }
+const LIMIT_NAME: Record<string, string> = { five_hour: '5h', [WEEK_LIMIT]: 'Week' }
 
 // Fixed hues read on light and dark alike; text keeps the theme's own colors.
 const ORANGE = '#D97757'
@@ -1179,7 +1185,7 @@ const DIM_HEX = '#9C9A92'
 
 const clamp = (p: number) => Math.max(0, Math.min(100, p))
 
-const WINDOW_MS: Record<string, number> = { five_hour: 5 * 3600_000, seven_day: 7 * 86_400_000 }
+const WINDOW_MS: Record<string, number> = { five_hour: 5 * 3600_000, [WEEK_LIMIT]: 7 * 86_400_000 }
 
 // Colors by pace, as the Claude Usage app does: what share of the window the
 // current rate would use by the reset. Under 85% is fine, 85-100% is close, and
@@ -1229,20 +1235,6 @@ const turnLevel = (t: Turn, before: Turn[]): { level: Level; delta: number; rati
   const level: Level = delta >= RISE_HIGH || ratio >= 6 ? 'high' : delta >= RISE_WARN || ratio >= 3 ? 'warn' : 'ok'
 
   return { level, delta, ratio }
-}
-
-// A Codex run is heavy by the same measure as a reply: how far its tighter
-// window rose while it ran, or has risen so far.
-function codexRunLevel(run: CodexTotals): Level {
-  const rise = run.rise ?? 0
-
-  if (rise >= RISE_HIGH) {
-    return 'high'
-  } else if (rise >= RISE_WARN) {
-    return 'warn'
-  } else {
-    return 'ok'
-  }
 }
 
 // The newest reading wins: while a run works, its record is newer than the
@@ -1314,17 +1306,6 @@ function settingText(setting: CodexSetting): string {
 function runSetting(run: CodexTotals): CodexSetting | undefined {
   if (run.model) {
     return { model: run.model, effort: run.effort }
-  }
-}
-
-// The runs at work beyond the one the band shows, with or without a record.
-function otherRunsText(state: Codex): string {
-  const others = state.running - 1
-
-  if (others > 0) {
-    return ` +${others} ${others === 1 ? 'run' : 'runs'}`
-  } else {
-    return ''
   }
 }
 
@@ -1938,6 +1919,17 @@ const CLAUDE_SVG =
 const CODEX_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 16 16"><g fill="none" stroke="#8A877F" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5"/><path d="M4.5 6l2 2-2 2M8.5 10.5h3"/></g></svg>'
 
+// A work's pieces in a usage line, each after its own mark: a stopwatch for
+// when it ends (the clock is the cache's), a coin stack for its tokens, a dial
+// for its share of the week. A list glyph opens the details.
+const DETAILS_GLYPH = '≡'
+const STOPWATCH_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16"><g fill="none" stroke="#8A877F" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9.3" r="5.2"/><path d="M6.4 1.8h3.2M8 9.3V6.4"/></g></svg>'
+const TOKENS_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16"><g fill="none" stroke="#8A877F" stroke-width="1.3"><ellipse cx="8" cy="4.3" rx="5" ry="2"/><path d="M3 4.3v3.6c0 1.1 2.2 2 5 2s5-.9 5-2V4.3M3 7.9v3.6c0 1.1 2.2 2 5 2s5-.9 5-2V7.9"/></g></svg>'
+const DIAL_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16"><g fill="none" stroke="#8A877F" stroke-width="1.4" stroke-linecap="round"><path d="M2.3 11.5a5.7 5.7 0 0 1 11.4 0"/><path d="M8 11.5l2.6-3.6"/></g></svg>'
+
 // One toast per window and threshold, the first time a reading crosses it.
 async function alertLimits($: EngineInterface, limits: readonly Limit[], maker?: string): Promise<void> {
   const offset = await read($, tzOffset)
@@ -2036,56 +2028,124 @@ function isWork(value: unknown): value is Work {
   )
 }
 
-// What a session's work file holds, its works checked one by one: the file is
-// written by any session, and a version of the mod may have changed its shape.
-// A file caught half-written is none until its next read.
-function parseWorkFile(text: string): Work[] {
+function isLimitStep(value: unknown): value is LimitStep {
+  const step = value as Partial<LimitStep> | null
+  const isShaped = typeof step === 'object' && step !== null
+
+  return (
+    isShaped &&
+    isWorkMaker(step.maker) &&
+    Number.isFinite(step.at) &&
+    Number.isFinite(step.percentUsed) &&
+    (step.resetsAt === undefined || typeof step.resetsAt === 'string')
+  )
+}
+
+// What a session's work file holds, each entry checked: the file is written by
+// any session, and a version of the mod may have changed its shape. A file
+// caught half-written is empty until its next read.
+function parseWorkFile(text: string): Required<WorkFile> {
   try {
     const parsed = JSON.parse(text) as Partial<WorkFile> | null
 
-    return Array.isArray(parsed?.works) ? parsed.works.filter(isWork) : []
+    return {
+      works: Array.isArray(parsed?.works) ? parsed.works.filter(isWork) : [],
+      limitSteps: Array.isArray(parsed?.limitSteps) ? parsed.limitSteps.filter(isLimitStep) : [],
+    }
   } catch {
-    return []
+    return { works: [], limitSteps: [] }
   }
+}
+
+// Another session's work file written within the week.
+function isRecentOtherFile(entry: FsEntry, sessionId: string, now: number): boolean {
+  const isWorkFile = entry.kind === 'file' && entry.name.endsWith('.json')
+
+  return isWorkFile && entry.name !== `${sessionId}.json` && now - entry.mtimeMs < WORK_KEEP_MS
 }
 
 async function workFolder($: EngineInterface): Promise<string> {
   return `${(await $.env.get('HOME')) ?? ''}/${WORK_FOLDER}`
 }
 
-// The finished work of the other sessions here within the week, from their
-// files, and this session's from its own memory, the newest last. A file not
-// written within the week is passed by its listing.
-async function readWorkHistory($: EngineInterface): Promise<Work[]> {
+// The finished work and the limit steps of the other sessions here within the
+// week, from their files, and this session's from its own memory, the newest
+// last. A file not written within the week is passed by its listing, and this
+// session's own file is left out: its memory holds the same, and newer.
+async function readWorkHistory($: EngineInterface): Promise<Required<WorkFile>> {
   const folder = await workFolder($)
   const now = await $.clock.now()
   const sessionId = await $.session.id()
-  const entries = (await $.fs.list(folder)).filter(
-    entry => entry.kind === 'file' && entry.name.endsWith('.json') && now - entry.mtimeMs < WORK_KEEP_MS,
-  )
+  const entries = (await $.fs.list(folder)).filter(entry => isRecentOtherFile(entry, sessionId, now))
   const files = await Promise.allSettled(entries.map(entry => $.fs.read(`${folder}/${entry.name}`)))
-  const others = files
-    .flatMap(file => (file.status === 'fulfilled' ? parseWorkFile(String(file.value)) : []))
-    .filter(w => w.sessionId !== sessionId)
+  const others = files.map(file => parseWorkFile(file.status === 'fulfilled' ? String(file.value) : ''))
+  const otherWorks = others.flatMap(file => file.works).filter(w => w.sessionId !== sessionId)
 
-  return keptWorks([...others, ...(await read($, works))], now)
+  return {
+    works: keptWorks([...otherWorks, ...(await read($, works))], now),
+    limitSteps: keptSteps([...others.flatMap(file => file.limitSteps), ...(await read($, limitSteps))], now),
+  }
 }
 
-// This session's finished work goes to its own file, which no other session
-// writes, read from memory at the write so the newest save holds everything;
-// the week's work beside it takes this session's at once. A failed write
-// leaves the band as it is, and the next one writes all.
+// This session's finished work and the limit steps it saw go to its own file,
+// which no other session writes, read from memory at the write so the newest
+// save holds everything; the week's work beside it takes this session's at
+// once. A failed write leaves the band as it is, and the next one writes all.
 async function saveOwnWorks($: EngineInterface): Promise<void> {
   try {
     const now = await $.clock.now()
     const sessionId = await $.session.id()
     const own = keptWorks(await read($, works), now)
-    const file: WorkFile = { works: own }
+    const file: WorkFile = { works: own, limitSteps: keptSteps(await read($, limitSteps), now) }
 
     await update($, workHistory, past => keptWorks([...past.filter(w => w.sessionId !== sessionId), ...own], now))
     await $.fs.write(`${await workFolder($)}/${sessionId}.json`, JSON.stringify(file))
   } catch {
     // The next finished work writes the file again.
+  }
+}
+
+// A tool's weekly limit as read now, as a step when it moved from the last
+// step this session saw of that tool: a point up, or a new week. It carries
+// the time the reading was made, so a reading another session shared keeps
+// its own time.
+function movedLimitSteps(
+  seen: readonly LimitStep[],
+  maker: WorkMaker,
+  limits: readonly Limit[],
+  at: number,
+): LimitStep[] {
+  const limit = limits.find(l => l.kind === WEEK_LIMIT)
+  const last = [...seen].reverse().find(s => s.maker === maker)
+
+  if (limit && (last === undefined || last.percentUsed !== limit.percentUsed || isNewWeek(last, limit))) {
+    return [{ at, maker, percentUsed: limit.percentUsed, resetsAt: limit.resetsAt }]
+  } else {
+    return []
+  }
+}
+
+// Adds the steps the weekly limits took since this session last looked; says
+// whether there were any, so the caller saves them. A failure records none,
+// and the history is read as it is.
+async function recordLimitSteps($: EngineInterface): Promise<boolean> {
+  try {
+    const now = await $.clock.now()
+    const seen = await read($, limitSteps)
+    const claudeState = await read($, live)
+    const codexState = await read($, codex)
+    const found = [
+      ...movedLimitSteps(seen, 'claude', claudeState.limits, claudeState.limitsAt ?? now),
+      ...movedLimitSteps(seen, 'codex', codexState.limits, codexState.limitsAt ?? now),
+    ]
+    const isMoved = found.length > 0
+
+    if (isMoved) {
+      await update($, limitSteps, list => keptSteps([...list, ...found], now))
+    }
+    return isMoved
+  } catch {
+    return false
   }
 }
 
@@ -2129,21 +2189,9 @@ function matchCodexRecord(
   }
 }
 
-// Whether another run's record overlaps this one's time.
-function hasOverlappingRun(record: CodexRecord, records: readonly CodexRecord[], now: number): boolean {
-  const end = record.finishedAt ?? now
-
-  return records.some(r => r !== record && r.startedAt < end && (r.finishedAt ?? now) > record.startedAt)
-}
-
 // A run started here takes its record's totals and its true start; a
 // finished record ends it at the record's end.
-function settleCodexWork(
-  work: Work,
-  records: readonly CodexRecord[],
-  claimed: ReadonlySet<number>,
-  now: number,
-): Work {
+function settleCodexWork(work: Work, records: readonly CodexRecord[], claimed: ReadonlySet<number>): Work {
   const record = matchCodexRecord(work, records, claimed)
 
   if (record) {
@@ -2155,7 +2203,6 @@ function settleCodexWork(
       tokens: codexTokens(record),
       weight: codexWeight(record),
       finishedAt: record.finishedAt ?? work.finishedAt,
-      isAlone: work.isAlone && !hasOverlappingRun(record, records, now),
       rise: record.finishedAt === undefined ? undefined : (record.rise ?? 0),
     }
   } else {
@@ -2170,7 +2217,7 @@ function settleCodexWorks(list: readonly Work[], state: Codex, pace: WorkPace, n
   const records = codexRecords(state)
   const claimed = new Set(list.flatMap(w => (w.recordStartedAt === undefined ? [] : [w.recordStartedAt])))
 
-  const settle = (w: Work): Work => endUnseenCodexWork(settleCodexWork(w, records, claimed, now), state, now)
+  const settle = (w: Work): Work => endUnseenCodexWork(settleCodexWork(w, records, claimed), state, now)
 
   return list.map(w => {
     const settled = isCodexWorkOpen(w, now) ? settle(w) : w
@@ -2197,12 +2244,6 @@ function isCodexWorkOpen(work: Work, now: number): boolean {
   return work.maker === 'codex' && work.rise === undefined && isWaiting
 }
 
-// Whether this session works alone now, by the app's count of sessions at
-// work: the count includes this one.
-async function isWorkingAlone($: EngineInterface): Promise<boolean> {
-  return ((await read($, sessions))?.working ?? 1) <= 1
-}
-
 // The work bookkeeping never stands in the way of the turn or the command it
 // rides on: a failure leaves that work unrecorded.
 async function startClaudeWork($: EngineInterface, turnId: string, now: number): Promise<void> {
@@ -2216,7 +2257,6 @@ async function startClaudeWork($: EngineInterface, turnId: string, now: number):
       steps: 0,
       tokens: 0,
       weight: 0,
-      isAlone: await isWorkingAlone($),
     }
 
     await update($, works, list => [...list, work].slice(-KEEP_OWN_WORKS))
@@ -2243,8 +2283,8 @@ async function addClaudeStep($: EngineInterface, turnId: string, usage: Usage): 
   }
 }
 
-// The turn's work ends with the turn; its rise is the 5-hour window's, which
-// stands for the work alone only while no other session worked.
+// The turn's work ends with the turn, keeping what its estimate came to then;
+// its rise is the 5-hour window's, other sessions' use included.
 async function finishClaudeWork(
   $: EngineInterface,
   turnId: string,
@@ -2253,13 +2293,12 @@ async function finishClaudeWork(
   isAborted: boolean,
 ): Promise<void> {
   try {
-    const isAlone = await isWorkingAlone($)
-    const pace = workPace(await read($, workHistory), 'claude')
+    const pace = workPace(await read($, workHistory), await read($, limitHistory), 'claude')
     const startPct = finished?.startPct
     const endPct = finished?.endPct
     const rise = startPct !== undefined && endPct !== undefined ? endPct - startPct : undefined
     const end = (w: Work): Work => {
-      const ended = { ...withTurnTotals(w, finished), finishedAt: now, isAlone: w.isAlone && isAlone, rise, isAborted }
+      const ended = { ...withTurnTotals(w, finished), finishedAt: now, rise, isAborted }
 
       return { ...ended, expected: expectedLoad(ended, pace) }
     }
@@ -2342,7 +2381,6 @@ async function startCodexWork($: EngineInterface, toolUseId: string, now: number
       steps: 0,
       tokens: 0,
       weight: 0,
-      isAlone: (await read($, codex)).running === 0,
     }
 
     await update($, pendingCodexEstimate, () => null)
@@ -2413,8 +2451,16 @@ function minutesText(ms: number): string {
   return minutes < 1 ? '1분 미만' : `${minutes}분`
 }
 
+// A work's share of the week is often under a point: one decimal, and a share
+// too small for it reads as under 0.1.
 function percentText(percent: number): string {
-  return percent < 10 ? percent.toFixed(1).replace(/\.0$/, '') : String(Math.round(percent))
+  if (percent > 0 && percent < PERCENT_SHOWN_MIN) {
+    return `<${PERCENT_SHOWN_MIN}`
+  } else if (percent < 10) {
+    return percent.toFixed(1).replace(/\.0$/, '')
+  } else {
+    return String(Math.round(percent))
+  }
 }
 
 function signedShareText(actual: number, expected: number): string {
@@ -2423,84 +2469,90 @@ function signedShareText(actual: number, expected: number): string {
   return share >= 0 ? `+${share}%` : `${share}%`
 }
 
-// When the work ended against when it was due, by the estimate's own length.
-function endPart(work: Work, finishedAt: number, offset: number): WorkPart[] {
+// When the work runs to or ended at, against when it was due: "14:25까지 8분"
+// or past due while it runs, "14:22 끝" and how far off once it ended.
+function timeParts(work: Work, now: number, offset: number): WorkPart[] {
   const estimate = work.estimate
-  const late = estimate ? finishedAt - estimate.dueAt : 0
-  const level = estimate ? overLevel(finishedAt - work.startedAt, estimate.dueAt - work.startedAt) : 'ok'
-  const due: WorkPart = { key: 'due', text: estimate ? `예정 ${local(estimate.dueAt, offset).hm}` : '', isDim: true }
+  const end = work.finishedAt
 
-  if (estimate && late >= MINUTE_MS) {
-    return [due, { key: 'gap', text: `${minutesText(late)} 늦음`, color: LEVEL_KEY[level] }]
-  } else if (estimate && late <= -MINUTE_MS) {
-    return [due, { key: 'gap', text: `${minutesText(-late)} 빠름`, color: LEVEL_KEY.ok }]
-  } else if (estimate) {
-    return [due, { key: 'gap', text: '제때', color: LEVEL_KEY.ok }]
-  } else {
-    return [{ key: 'took', text: `${minutesText(finishedAt - work.startedAt)} 걸림`, isDim: true }]
-  }
-}
-
-// How long is left until the work is due, or how long it is past due.
-function duePart(work: Work, now: number, offset: number): WorkPart[] {
-  const estimate = work.estimate
-  const left = estimate ? estimate.dueAt - now : 0
-
-  if (estimate && left >= 0) {
-    return [{ key: 'due', text: `예정 ${local(estimate.dueAt, offset).hm} (${minutesText(left)} 남음)`, isDim: true }]
+  if (end !== undefined) {
+    return [{ key: 'end', text: `${local(end, offset).hm} 끝`, isBold: true }, ...endGapPart(work, end)]
+  } else if (estimate && estimate.dueAt >= now) {
+    return [{ key: 'due', text: `${local(estimate.dueAt, offset).hm}까지 ${minutesText(estimate.dueAt - now)}` }]
   } else if (estimate) {
     return [
       { key: 'due', text: `예정 ${local(estimate.dueAt, offset).hm}`, isDim: true },
-      { key: 'gap', text: `${minutesText(-left)} 지남`, color: LEVEL_KEY.warn },
+      { key: 'gap', text: ` ${minutesText(now - estimate.dueAt)} 지남`, color: LEVEL_KEY.warn },
     ]
   } else {
     return [{ key: 'took', text: `진행 ${minutesText(now - work.startedAt)}`, isDim: true }]
   }
 }
 
-// The cost so far against the estimate's: tokens, then points of the 5-hour
-// window. A finished work says how far it went past its tokens.
-function loadParts(work: Work, actual: WorkLoad, expected: WorkLoad | undefined): WorkPart[] {
+// How far a finished work ended from its due time, colored by the estimate's
+// own length; without an estimate, how long it took. Each part carries the
+// space before it, as the line draws the parts side by side.
+function endGapPart(work: Work, end: number): WorkPart[] {
+  const estimate = work.estimate
+  const late = estimate ? end - estimate.dueAt : 0
+  const level = estimate ? overLevel(end - work.startedAt, estimate.dueAt - work.startedAt) : 'ok'
+
+  if (estimate && late >= MINUTE_MS) {
+    return [{ key: 'gap', text: ` ${minutesText(late)} 늦음`, color: LEVEL_KEY[level] }]
+  } else if (estimate && late <= -MINUTE_MS) {
+    return [{ key: 'gap', text: ` ${minutesText(-late)} 빠름`, color: LEVEL_KEY.ok }]
+  } else if (estimate) {
+    return [{ key: 'gap', text: ' 제때', color: LEVEL_KEY.ok }]
+  } else {
+    return [{ key: 'took', text: ` ${minutesText(end - work.startedAt)} 걸림`, isDim: true }]
+  }
+}
+
+// The tokens so far against the estimate's, the steps while it runs, and how
+// far past its tokens a finished work went.
+function tokenParts(work: Work, actual: WorkLoad, expected: WorkLoad | undefined): WorkPart[] {
   const isDone = work.finishedAt !== undefined
-  const tokenText = expected ? `토큰 ${tokens(actual.tokens)}/예상 ${tokens(expected.tokens)}` : `토큰 ${tokens(actual.tokens)}`
-  const tokenGap: WorkPart[] =
+  const total: WorkPart = { key: 'tokens', text: tokens(actual.tokens) }
+  const estimate: WorkPart[] = expected
+    ? [{ key: 'expected', text: `/예상 ${tokens(expected.tokens)}`, isDim: true }]
+    : []
+  const steps: WorkPart[] = isDone ? [] : [{ key: 'steps', text: ` ×${work.steps}`, isDim: true }]
+  const gap: WorkPart[] =
     isDone && expected
       ? [
           {
             key: 'token-gap',
-            text: signedShareText(actual.tokens, expected.tokens),
+            text: ` ${signedShareText(actual.tokens, expected.tokens)}`,
             color: LEVEL_KEY[overLevel(actual.tokens, expected.tokens)],
           },
         ]
       : []
-  const percentParts: WorkPart[] =
-    actual.percent === undefined
-      ? []
-      : [
-          {
-            key: 'percent',
-            text:
-              expected?.percent === undefined
-                ? `5시간 ≈+${percentText(actual.percent)}%`
-                : `5시간 ≈+${percentText(actual.percent)}%/예상 +${percentText(expected.percent)}%`,
-            isDim: true,
-          },
-        ]
 
-  return [{ key: 'tokens', text: tokenText, isDim: true }, ...tokenGap, ...percentParts]
+  return [total, ...estimate, ...steps, ...gap]
 }
 
-// A work row's pieces, after the maker's name and its mark: when it started or
-// ended, against when it was due, then its cost against the estimate's.
-function workParts(work: Work, pace: WorkPace, now: number, offset: number): WorkPart[] {
+// The work's share of the week so far, against the estimate's; none until the
+// rate is known.
+function percentParts(actual: WorkLoad, expected: WorkLoad | undefined): WorkPart[] {
+  if (actual.percent !== undefined && expected?.percent !== undefined) {
+    return [{ key: 'percent', text: `${percentText(actual.percent)}/${percentText(expected.percent)}%` }]
+  } else if (actual.percent !== undefined) {
+    return [{ key: 'percent', text: `${percentText(actual.percent)}%` }]
+  } else {
+    return []
+  }
+}
+
+// A work's pieces as its usage line draws them, each after its own mark.
+function workPieces(work: Work, pace: WorkPace, now: number, offset: number): WorkPieces {
   const actual = actualLoad(work, pace)
   const expected = work.expected ?? expectedLoad(work, pace)
-  const timing =
-    work.finishedAt === undefined
-      ? [{ key: 'when', text: `${local(work.startedAt, offset).hm} 시작` }, ...duePart(work, now, offset)]
-      : [{ key: 'when', text: `${local(work.finishedAt, offset).hm} 끝`, isBold: true }, ...endPart(work, work.finishedAt, offset)]
 
-  return [...timing, ...loadParts(work, actual, expected)]
+  return {
+    time: timeParts(work, now, offset),
+    tokens: tokenParts(work, actual, expected),
+    percent: percentParts(actual, expected),
+  }
 }
 
 // One finished work in the details: each measure as actual/estimated, or the
@@ -2518,8 +2570,8 @@ function workHistoryText(work: Work, pace: WorkPace): string {
       ? []
       : [
           expected?.percent === undefined
-            ? `5시간 ≈+${percentText(actual.percent)}%`
-            : `5시간 ≈+${percentText(actual.percent)}%/+${percentText(expected.percent)}%`,
+            ? `주간 ${percentText(actual.percent)}%`
+            : `주간 ${percentText(actual.percent)}%/${percentText(expected.percent)}%`,
         ]
 
   return [time, steps, tokenText, ...percent].join(' · ')
@@ -2551,21 +2603,6 @@ async function registerEstimateTool($: EngineInterface): Promise<void> {
   } catch {
     // The next start registers it again.
   }
-}
-
-// The pick is kept in the store, so every session and the next ones draw it.
-// The store first, so a read of it meanwhile cannot put the old pick back.
-async function setWorkLayout($: EngineInterface, layout: WorkLayout): Promise<void> {
-  try {
-    await $.store.set(WORK_LAYOUT_KEY, layout)
-    await update($, workLayout, () => layout)
-  } catch {
-    // The switch stays as it was; pressing it again tries again.
-  }
-}
-
-function pickWorkLayout(value: unknown): WorkLayout {
-  return WORK_LAYOUTS.find(layout => layout === value) ?? 'row'
 }
 
 export const register: Register = on => {
@@ -2781,9 +2818,10 @@ export const register: Register = on => {
     }
     $.clock.every(CODEX_TICK_MS, () => void codexTicks.tick())
 
-    // The estimate tool, and the work every session here finished, with the
-    // layout the person picked, read again each minute. A session that starts
-    // anew drops a reply its last run left open: that turn never ended.
+    // The estimate tool, and the work every session here finished with the
+    // weekly limits' steps, read again each minute after this session adds
+    // the steps it saw. A session that starts anew drops a reply its last run
+    // left open: that turn never ended.
     await registerEstimateTool($)
     if (!isReload) {
       await update($, works, list => list.filter(w => w.maker !== 'claude' || w.finishedAt !== undefined))
@@ -2792,11 +2830,13 @@ export const register: Register = on => {
     ownWorksSaver = ownWorksSave.refresh
     const refreshWorkHistory = async (): Promise<void> => {
       try {
+        if (await recordLimitSteps($)) {
+          await ownWorksSave.refresh()
+        }
         const found = await readWorkHistory($)
-        const layout = pickWorkLayout(await $.store.get(WORK_LAYOUT_KEY))
 
-        await update($, workHistory, () => found)
-        await update($, workLayout, () => layout)
+        await update($, workHistory, () => found.works)
+        await update($, limitHistory, () => found.limitSteps)
       } catch {
         // The next minute reads them again.
       }
@@ -2812,7 +2852,7 @@ export const register: Register = on => {
         const state = await read($, codex)
         const now = await $.clock.now()
         const isAnyOpen = (await read($, works)).some(w => isCodexWorkOpen(w, now))
-        const pace = workPace(await read($, workHistory), 'codex')
+        const pace = workPace(await read($, workHistory), await read($, limitHistory), 'codex')
 
         if (isAnyOpen) {
           await update($, works, list => settleCodexWorks(list, state, pace, now))
@@ -2905,19 +2945,9 @@ export const register: Register = on => {
     return next(e)
   })
 
-  // `/usage-panel layout row` or `line-end` picks where the band draws the
-  // work; anything else opens the details.
-  on('command.run', { command: 'usage-panel' }, async ($, e) => {
-    const [word, value] = e.args.trim().split(/\s+/)
-    const layout = WORK_LAYOUTS.find(l => l === value)
-
-    if (word === 'layout' && layout) {
-      await setWorkLayout($, layout)
-      return { text: `작업 표시를 '${WORK_LAYOUT_NAME[layout]}'로 바꿨어요.` }
-    } else {
-      await openDetails($)
-      return { text: '사용량 패널을 열었어요.' }
-    }
+  on('command.run', { command: 'usage-panel' }, async $ => {
+    await openDetails($)
+    return { text: '사용량 패널을 열었어요.' }
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
@@ -2931,31 +2961,19 @@ export const register: Register = on => {
     const now = await $.clock.now()
     const offset = await read($, tzOffset)
     const state = await read($, live)
-    const list = await read($, turns)
-    const last = [...list].reverse().find(t => !t.isRunning)
-    const isWorking = list.some(t => t.isRunning)
     const place = await read($, where)
     const busy = await read($, helpers)
     const codexState = await read($, codex)
     const heavy = await read($, note)
     const ownWorks = await read($, works)
     const pastWorks = await read($, workHistory)
-    const layout = await read($, workLayout)
+    const pastSteps = await read($, limitHistory)
     await read($, workTick)
     const counts = await read($, sessions)
     const sessionParts = SESSION_PARTS.map(part => ({ ...part, count: counts?.[part.state] ?? 0 })).filter(
       part => part.count > 0,
     )
     const cached = cacheView(await read($, cache), state.contextTokens, now, offset)
-    const running = list.find(t => t.isRunning)
-    // While a reply runs, its numbers take the color it would get if it
-    // ended now: the 5h rise so far and its weight so far.
-    const liveLevel: Level = running
-      ? turnLevel(
-          { ...running, endPct: state.limits.find(l => l.kind === 'five_hour')?.percentUsed, weight: running.liveWeight },
-          list.slice(0, list.indexOf(running)),
-        ).level
-      : 'ok'
 
     const gauge = (percent: number, alt: string, level: Level, elapsed?: number, isDim = false) =>
       Svg ? (
@@ -3004,43 +3022,73 @@ export const register: Register = on => {
         </Text>
       )
 
-    // The newest work of each maker this session did: its mark and name, a
-    // spinner while it runs or a check once done, then when it ran against
-    // when it was due and what it cost against the estimate. The same row
-    // stands on its own line or at the end of the first, as the person picked.
-    const paces = { claude: workPace(pastWorks, 'claude'), codex: workPace(pastWorks, 'codex') }
-    const workRow = (maker: WorkMaker) => {
-      const work = latestWork(ownWorks, maker)
-      const parts = work ? workParts(work, paces[maker], now, offset) : []
+    // A piece's mark; the terminal draws no Svg, so a dot stands in for it.
+    const pieceMark = (source: string, name: string) =>
+      Svg ? (
+        <Svg source={source} alt={name} width={11} height={11} />
+      ) : (
+        <Text size="caption" dimColor>
+          ·
+        </Text>
+      )
+    const pieceText = (parts: readonly WorkPart[]) => (
+      <Text size="caption">
+        {parts.map(part => (
+          <Text key={part.key} color={part.color} bold={part.isBold} dimColor={part.isDim}>
+            {part.text}
+          </Text>
+        ))}
+      </Text>
+    )
 
-      return work ? (
-        <Box key={`work-${maker}`} flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="xs">
-          {mark(`work-${maker}-mark`, maker === 'claude' ? CLAUDE_SVG : CODEX_SVG, WORK_NAME[maker])}
-          {slot(
-            `work-${maker}-state`,
-            work.finishedAt === undefined ? (
-              spinner()
-            ) : (
-              <Text size="caption" color={LEVEL_KEY.ok}>
-                ✓
-              </Text>
-            ),
-          )}
-          {slot(
-            `work-${maker}-text`,
-            <Text size="caption">
-              <Text bold>{WORK_NAME[maker]}</Text>
-              {parts.map(part => (
-                <Text key={part.key} color={part.color} bold={part.isBold} dimColor={part.isDim}>
-                  {` · ${part.text}`}
-                </Text>
-              ))}
-            </Text>,
-          )}
-        </Box>
-      ) : null
+    // The newest work this session did with the line's tool takes the place
+    // the reply's tokens had: a spinner while it runs or a check once done,
+    // then when it ends, its tokens and its share of the week, each after its
+    // mark. The tokens in and out stay in the details.
+    const paces = {
+      claude: workPace(pastWorks, pastSteps, 'claude'),
+      codex: workPace(pastWorks, pastSteps, 'codex'),
     }
-    const workRows = (place: WorkLayout) => (layout === place ? [workRow('claude'), workRow('codex')] : [])
+    const workBox = (maker: WorkMaker, work: Work) => {
+      const pieces = workPieces(work, paces[maker], now, offset)
+      const hasShare = pieces.percent.length > 0
+
+      return (
+        <Box key={`work-${maker}`} flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
+          {work.finishedAt === undefined ? (
+            spinner()
+          ) : (
+            <Text size="caption" color={LEVEL_KEY.ok}>
+              ✓
+            </Text>
+          )}
+          {pieceMark(STOPWATCH_SVG, 'ends')}
+          {pieceText(pieces.time)}
+          {pieceMark(TOKENS_SVG, 'tokens')}
+          {pieceText(pieces.tokens)}
+          {hasShare ? pieceMark(DIAL_SVG, 'share of the week') : null}
+          {hasShare ? pieceText(pieces.percent) : null}
+        </Box>
+      )
+    }
+    const workItem = (maker: WorkMaker) => {
+      const work = latestWork(ownWorks, maker)
+
+      return work ? workBox(maker, work) : null
+    }
+
+    // The details open from a list mark at the end of each usage line: a
+    // glyph in a Text, since a Button holds only text, and a label that names
+    // it for a reader that cannot see it.
+    const detailsButton = (key: string) =>
+      slot(
+        key,
+        <Button key={key} label="Details" plain onPress={() => void openDetails($)}>
+          <Text size="caption" dimColor>
+            {DETAILS_GLYPH}
+          </Text>
+        </Button>,
+      )
 
     const item = (
       key: string,
@@ -3161,7 +3209,6 @@ export const register: Register = on => {
             </Text>
           </Box>
         )}
-        {workRows('line-end')}
         {heavy && (
           <Box flexDirection="row" alignItems="center" alignSelf="center" flexGrow={1} justifyContent="flex-end">
             <Text size="caption" wrap="truncate-end">
@@ -3172,18 +3219,19 @@ export const register: Register = on => {
       </Box>
     )
 
-    // The line keeps what is worth a glance: the limits, the context and how
-    // heavy the last reply was. The cost waits in the details.
-    // A reading older than the stale mark is grey and says when it was read, in
-    // place of its reset and its pace.
+    // The line keeps what is worth a glance: the limits, the context and this
+    // session's latest work. The cost, the week's reset and the context's size
+    // wait in the details. A reading older than the stale mark is grey and
+    // says when it was read, in place of its reset and its pace.
     const limitItems = (prefix: string, limits: readonly Limit[], at: number | undefined) => {
       const isOld = isReadingOld(at, now)
       const asOf = at === undefined ? '' : local(at, offset).hm
+      const afterText = (l: Limit): string => (l.kind === WEEK_LIMIT ? '' : `↻${resetAt(l.resetsAt, now, offset)}`)
 
       return limits.map(l => {
         const p = isOld ? undefined : pace(l, now)
         const full = p?.fullAt !== undefined ? local(p.fullAt, offset).hm : ''
-        const after = isOld ? `·${asOf} 기준` : `↻${resetAt(l.resetsAt, now, offset)}`
+        const after = isOld ? `·${asOf} 기준` : afterText(l)
 
         return item(
           `${prefix}${l.kind}`,
@@ -3198,12 +3246,7 @@ export const register: Register = on => {
       })
     }
 
-    const codexLast = codexState.last
-    const codexLastLevel = codexLast ? codexRunLevel(codexLast) : 'ok'
-    // As on the Claude line, a run at work takes the place of the last one: the
-    // spinner and its totals so far, then how many other runs work beside it.
     const codexWork = codexState.working[0]
-    const codexWorkLevel = codexWork ? codexRunLevel(codexWork) : 'ok'
     // At the end of the line, as the app puts the model under the prompt: the
     // setting of the run at work, or with none at work, the setting the next
     // run takes, greyed with its time once old.
@@ -3211,38 +3254,12 @@ export const register: Register = on => {
     const codexSetting = workSetting ?? codexState.configured
     const isCodexSettingOld = workSetting === undefined && isReadingOld(codexState.configuredAt, now)
     const codexSettingAsOf = codexState.configuredAt === undefined ? '' : local(codexState.configuredAt, offset).hm
-    const codexLine = hasCodex(codexState) ? (
+    // A run this session started shows even before any Codex reading came.
+    const codexLine = hasCodex(codexState) || latestWork(ownWorks, 'codex') ? (
       <Box key="codex" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="md">
         {mark('codex-mark', CODEX_SVG, CODEX_NAME)}
         {limitItems('codex-', codexState.limits, codexState.limitsAt)}
-        {codexWork
-          ? (
-            <Box key="codex-last" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
-              {spinner()}
-              <Text size="caption">
-                <Text dimColor>In </Text>
-                <Text color={LEVEL_KEY[codexWorkLevel]}>{tokens(codexWork.read)}</Text>
-                <Text dimColor>·Out </Text>
-                <Text color={LEVEL_KEY[codexWorkLevel]}>{tokens(codexWork.write)}</Text>
-                <Text dimColor>
-                  {` ×${codexWork.steps}`}
-                  {otherRunsText(codexState)}
-                </Text>
-              </Text>
-            </Box>
-          )
-          : codexLast
-            ? slot(
-                'codex-last',
-                <Text size="caption">
-                  <Text bold>Last</Text>
-                  <Text dimColor> In </Text>
-                  <Text color={LEVEL_KEY[codexLastLevel]}>{tokens(codexLast.read)}</Text>
-                  <Text dimColor>·Out </Text>
-                  <Text color={LEVEL_KEY[codexLastLevel]}>{tokens(codexLast.write)}</Text>
-                </Text>,
-              )
-            : null}
+        {workItem('codex')}
         {codexSetting ? (
           <Box key="codex-setting" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
             <Text size="caption" dimColor={isCodexSettingOld}>
@@ -3256,12 +3273,7 @@ export const register: Register = on => {
             ) : null}
           </Box>
         ) : null}
-        {slot(
-          'codex-details',
-          <Button key="codex-details" plain onPress={() => void openDetails($)}>
-            <Text size="caption">Details ›</Text>
-          </Button>,
-        )}
+        {detailsButton('codex-details')}
       </Box>
     ) : null
 
@@ -3273,50 +3285,16 @@ export const register: Register = on => {
           'context',
           state.contextPercent ?? 0,
           'Context',
-          `·${tokens(state.contextTokens ?? 0)}/${tokens(state.contextWindow)}`,
+          '',
           contextLevel(state.contextPercent ?? 0),
         )}
-        {isWorking && running
-          ? (
-            <Box key="last" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
-              {spinner()}
-              <Text size="caption">
-                <Text dimColor>In </Text>
-                <Text color={LEVEL_KEY[liveLevel]}>{tokens(running.liveRead ?? 0)}</Text>
-                <Text dimColor>·Out </Text>
-                <Text color={LEVEL_KEY[liveLevel]}>{tokens(running.liveWrite ?? 0)}</Text>
-                <Text dimColor> ×{running.steps ?? 0}</Text>
-              </Text>
-            </Box>
-          )
-          : last
-            ? slot(
-                'last',
-                <Text size="caption">
-                  <Text bold>Last</Text>
-                  {/* Only the numbers take the reply's color, as the % of a gauge does. */}
-                  <Text dimColor> In </Text>
-                  <Text color={LEVEL_KEY[last.level ?? 'ok']}>{tokens(last.read)}</Text>
-                  <Text dimColor>·Out </Text>
-                  <Text color={LEVEL_KEY[last.level ?? 'ok']}>{tokens(last.write)}</Text>
-                </Text>,
-              )
-            : null}
-        {slot(
-          'details',
-          <Button key="details" plain onPress={() => void openDetails($)}>
-            <Text size="caption">Details ›</Text>
-          </Button>,
-        )}
+        {workItem('claude')}
+        {detailsButton('details')}
       </Box>
     )
 
-    // Without a first line to end, the rows stand on their own.
-    const ownRows = place ? workRows('row') : [workRow('claude'), workRow('codex')]
-
     return (
       <Box flexDirection="column" rowGap="xs">
-        {ownRows}
         {placeLine}
         {usageLine}
         {codexLine}
@@ -3663,8 +3641,8 @@ export const register: Register = on => {
     const busyNow = await read($, helpers)
     const seen = [...(await read($, insights))].reverse().slice(0, 5)
     await read($, tick)
-    const layout = await read($, workLayout)
     const pastWorks = await read($, workHistory)
+    const pastSteps = await read($, limitHistory)
     const recentWorks = [...pastWorks].reverse().slice(0, SHOWN_HISTORY)
     const averageText = workAverageText(pastWorks.filter(w => w.firstEstimate !== undefined))
 
@@ -3913,21 +3891,8 @@ export const register: Register = on => {
 
         {heading('WORK TIMES')}
         <Text size="caption" dimColor>
-          띠에 보이는 자리
+          %는 그 작업이 주간 사용량을 얼마나 썼는지예요. 다른 기기에서 쓴 양이 섞이면 조금 높게 잡혀요.
         </Text>
-        <Box flexDirection="row" gap={1} marginTop={1}>
-          {WORK_LAYOUTS.map(choice => (
-            <Button
-              key={`work-layout-${choice}`}
-              variant={layout === choice ? 'primary' : 'secondary'}
-              onPress={() => void setWorkLayout($, choice)}
-            >
-              <Text size="caption" bold={layout === choice}>
-                {layout === choice ? `✓ ${WORK_LAYOUT_NAME[choice]}` : WORK_LAYOUT_NAME[choice]}
-              </Text>
-            </Button>
-          ))}
-        </Box>
         {recentWorks.length === 0 ? (
           <Text size="footnote" dimColor>
             작업이 끝나면 예정과 실제를 여기에 쌓아요.
@@ -3942,7 +3907,7 @@ export const register: Register = on => {
                 <Text bold>{WORK_NAME[w.maker]}</Text>
               </Text>
               <Text size="caption" dimColor>
-                {workHistoryText(w, workPace(pastWorks, w.maker))}
+                {workHistoryText(w, workPace(pastWorks, pastSteps, w.maker))}
               </Text>
             </Box>
           ))
