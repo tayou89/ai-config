@@ -22,7 +22,8 @@ from typing import Any
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 HOOK_SCRIPT = REPOSITORY_ROOT / "scripts" / "main-session-hook.py"
 RECORDS_PATH = Path("Library") / "Application Support" / "Claude" / "claude-code-sessions" / "account" / "org"
-SKILL_PATH = Path("skills") / "decisions-and-collaboration" / "SKILL.md"
+LEAD_SKILL = "session-management"
+SKILL_PATH = Path("skills") / LEAD_SKILL / "SKILL.md"
 ENCODING = "utf-8"
 EVENT_KEY = "hook_event_name"
 TOOL_NAME_KEY = "tool_name"
@@ -31,7 +32,7 @@ HOST_SESSION_VARIABLE = "CLAUDE_CODE_HOST_SESSION_ID"
 SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 NOTICE_TAG = "[MAIN SESSION]"
 TOOL_NOTICE_TEXT = "file changes and long commands go to a session of their own"
-NOT_LOADED_TEXT = "has not loaded the decisions-and-collaboration skill"
+NOT_LOADED_TEXT = f"has not loaded the {LEAD_SKILL} skill"
 SIZE_TEXT = "conversation part"
 MAIN_SESSION = "local_main"
 CHILD_SESSION = "local_child"
@@ -64,7 +65,7 @@ def make_usage_record(total: int, sidechain: bool = False) -> dict[str, Any]:
 
 
 def make_skill_load_record(stamp: str, sidechain: bool = False) -> dict[str, Any]:
-    block = {"type": "tool_use", "name": "Skill", "input": {"skill": "decisions-and-collaboration"}}
+    block = {"type": "tool_use", "name": "Skill", "input": {"skill": LEAD_SKILL}}
     message = {"role": "assistant", "content": [block]}
 
     return {"type": "assistant", "isSidechain": sidechain, "timestamp": stamp, "message": message}

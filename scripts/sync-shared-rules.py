@@ -54,7 +54,11 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, propose, start, or close other sessions, run a main session, or handle design-tool comments.",
+        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, or handle design-tool comments.",
+    ),
+    "sessions.md": (
+        "session-management",
+        "Propose, start, message, run, and close other sessions, as a main session or for one, and take on work outside your session's area: areas, briefs, titles, handoffs, the bulletin, closing, and replacing the main session.",
     ),
     "planning.md": (
         "product-planning",

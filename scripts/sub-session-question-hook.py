@@ -6,7 +6,7 @@ session sends meanwhile, such as the user's answer it relayed after asking the
 same question, waits in the queue, and stopping the session is refused while
 it waits for the user (seen 2026-11-13). The next-step box question and the
 closing message end the turn and still let the user answer in this session
-(`decisions-and-collaboration` "Working alongside other sessions", user
+(`session-management` "Working alongside other sessions", user
 decision, 2026-11-13).
 
 Lineage comes from the desktop app's session records through

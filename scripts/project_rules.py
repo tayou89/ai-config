@@ -4,7 +4,7 @@ A project's rules are the CLAUDE.md, AGENTS.md, and .claude/CLAUDE.md files at
 the root of its Git repository, the nearest folder holding `.git`, so a task
 worktree reads its own copy. A heading is a line of one to six `#` and a
 space; lines split on any line break, Windows `\\r\\n` included. The role list is the one
-`decisions-and-collaboration` "Working alongside other sessions" defines (user
+`session-management` "Working alongside other sessions" defines (user
 decision, 2026-11-16): under a "Role sessions" heading of any level, with any
 parenthetical after it, one list item per role session that starts with its
 title in backticks, followed by `(not main)` for a top-level role the user set

@@ -3,7 +3,7 @@
 
 A session is the main session once it has started another session while no
 other session started it, or after it was moved to the top level
-(`decisions-and-collaboration` "Working alongside other sessions", user
+(`session-management` "Working alongside other sessions", user
 decisions, 2026-11-08 and 2026-11-13). The rule lives in a skill, and a long
 session can hold a copy loaded before the rule changed, since a compaction
 restores each skill as it was loaded; a main session that worked on its own
@@ -12,7 +12,7 @@ rule missing from its context (2026-11-13). This hook puts the facts back:
 
 - UserPromptSubmit, which also runs on turns another session's message
   starts: the role, the conversation part's size against the replacement
-  threshold, and whether the installed `decisions-and-collaboration` skill
+  threshold, and whether the installed `session-management` skill
   changed after this session last loaded it.
 - PreToolUse on file edits and long commands (Edit, Write, NotebookEdit,
   Monitor, a terminal-tab command, a Bash command run in the background): one
@@ -51,7 +51,7 @@ _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 _SWITCH_OFF = "off"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
-_LEAD_SKILL = "decisions-and-collaboration"
+_LEAD_SKILL = "session-management"
 _SKILL_FILE = Path("skills") / _LEAD_SKILL / "SKILL.md"
 _SKILL_TOOL = "Skill"
 _SKILL_INPUT_KEY = "skill"
