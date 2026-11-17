@@ -105,6 +105,7 @@ RUNTIME_SCRIPTS = (
     "project_rules.py",
     "sub-session-question-hook.py",
     "project-goal-hook.py",
+    "recommendation-change-hook.py",
     "report-check-hook.py",
     "report_check.py",
     "shell-guard-hook.py",

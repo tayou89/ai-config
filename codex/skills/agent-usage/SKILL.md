@@ -3,7 +3,7 @@ name: agent-usage
 description: Coordinate subagents only when the user explicitly authorizes delegation; define review scope and verify their evidence.
 ---
 
-<!-- Adapted from skills/agent-usage/SKILL.md at d507f8e3f203fd12b31e4a410f9570ff62dc2a17 -->
+<!-- Adapted from skills/agent-usage/SKILL.md at 498047d1bcf3f1b729bb8ff0aa5ca0580dbd6f2a, skills/agent-usage/references/codex-implementation.md at e4698985eb66b63a622cc0b992678219a17f8e23 -->
 
 # Agent Coordination
 
