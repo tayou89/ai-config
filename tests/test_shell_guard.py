@@ -3108,7 +3108,7 @@ class CommandScopeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_commit_in_a_repository_with_commit_hooks_still_covers_it(self) -> None:
+    def test_commit_waiting_for_approval_with_commit_hooks_holds_up_no_one(self) -> None:
         hook = self.fixture.repository / ".git" / "hooks" / "pre-commit"
         command = {"command": self.make_commit_command()}
 
@@ -3118,7 +3118,7 @@ class CommandScopeTest(unittest.TestCase):
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
 
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_call_stopped_before_it_ran_holds_up_no_one_after_its_result(self) -> None:
         self.check_stopped_call_holds_up_no_one("")

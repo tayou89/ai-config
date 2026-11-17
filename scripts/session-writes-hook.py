@@ -37,29 +37,20 @@ import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from typing import Any
 
 from session_writes import (
-    RECORD_FORMAT,
-    PendingCall,
-    RepositorySnapshot,
     SessionWritesError,
     SnapshotScope,
-    UnknownWrite,
-    WriteEvent,
-    append_events,
     find_command_roots,
     find_repository_root,
+    finish_call_record,
     get_record_directory,
     is_pending,
-    list_changes,
     read_blob_text,
-    read_pending,
     remove_expired_records,
-    remove_pending,
-    save_pending,
-    take_snapshot,
+    start_call_record,
 )
 
 _PRE_EVENT = "PreToolUse"
@@ -198,10 +189,8 @@ def _record_call_start(session_id: str, tool_use_id: str, payload: dict[str, Any
     the call unseen by them.
     """
     is_first_call = not (get_record_directory() / session_id).exists()
-    start = time.time()
-    snapshots, unknown = _take_snapshots(_list_scopes(session_id, payload))
 
-    save_pending(session_id, tool_use_id, PendingCall(start, snapshots, unknown))
+    start_call_record(session_id, tool_use_id, _list_scopes(session_id, payload))
     if is_first_call:
         remove_expired_records()
 
@@ -228,24 +217,6 @@ def _list_file_scopes(file_path: str) -> list[SnapshotScope]:
         return []
 
 
-def _take_snapshots(scopes: Sequence[SnapshotScope]) -> tuple[list[RepositorySnapshot], list[SnapshotScope]]:
-    """The snapshots that could be taken, and the scopes of those that could not."""
-    taken = [(scope, _try_snapshot(scope)) for scope in scopes]
-    snapshots = [snapshot for _, snapshot in taken if snapshot is not None]
-    unknown = [scope for scope, snapshot in taken if snapshot is None]
-
-    return snapshots, unknown
-
-
-def _try_snapshot(scope: SnapshotScope) -> RepositorySnapshot | None:
-    try:
-        snapshot = take_snapshot(scope)
-    except SessionWritesError:
-        return None
-    else:
-        return snapshot
-
-
 def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any], tool_name: str) -> None:
     """Record the call's changes and its unknown writes, then drop its pending file, so it is never in neither.
 
@@ -253,37 +224,10 @@ def _record_changes(session_id: str, tool_use_id: str, payload: dict[str, Any], 
     change is judged for exactness, or a project hook run around it, whose
     change the tool's report cannot explain.
     """
-    pending = read_pending(session_id, tool_use_id)
     is_tool_write = tool_name == payload.get(_TOOL_NAME_KEY)
+    judge = functools.partial(_judge_exactness, payload) if is_tool_write else None
 
-    if pending:
-        pairs = [(before, _try_snapshot(before.get_scope())) for before in pending.snapshots]
-        end = time.time()
-        changes = [
-            (before.root, change)
-            for before, after in pairs
-            if after is not None
-            for change in list_changes(before, after)
-        ]
-        events = [
-            WriteEvent(
-                root,
-                path,
-                old,
-                new,
-                pending.start,
-                end,
-                tool_name,
-                _judge_exactness(payload, root, old, new) if is_tool_write else None,
-                RECORD_FORMAT,
-            )
-            for root, (path, old, new) in changes
-        ]
-        unknown = [*pending.unknown, *(before.get_scope() for before, after in pairs if after is None)]
-        unknown_writes = [UnknownWrite(scope.root, scope.path, pending.start, end, tool_name) for scope in unknown]
-
-        append_events(session_id, [*events, *unknown_writes])
-        remove_pending(session_id, tool_use_id)
+    finish_call_record(session_id, tool_use_id, tool_name, judge)
 
 
 def _judge_exactness(

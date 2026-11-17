@@ -2,8 +2,10 @@
 
 Hook input carries no session lineage, so hooks read the app's records
 (`claude-code-sessions/*/*/local_*.json` in the app's support folder):
-`spawnedFrom` names the session that started a session and `lineageDetached`
-marks one moved to the top level. These records are not a documented
+`spawnedFrom` names the session that started a session, `lineageDetached`
+marks one moved to the top level, `cliSessionId` names the Claude Code
+session the write record files go by, and `isArchived` marks one the app
+archived. These records are not a documented
 interface; when they or the app's session variable are missing, as in a
 terminal session, every function here reports nothing.
 """
@@ -23,6 +25,9 @@ _SPAWNED_FROM_KEY = "spawnedFrom"
 _SESSION_ID_KEY = "sessionId"
 _DETACHED_KEY = "lineageDetached"
 _TITLE_KEY = "title"
+_CLI_SESSION_ID_KEY = "cliSessionId"
+_ARCHIVED_KEY = "isArchived"
+_APP_SESSION_PREFIX = "local_"
 _ENCODING = "utf-8"
 
 
@@ -41,6 +46,37 @@ def count_started_sessions(record: dict[str, Any]) -> int:
         return sum(1 for path in paths if _is_started_by(path, session_id))
     else:
         return 0
+
+
+def find_session_record(session_id: str) -> dict[str, Any] | None:
+    """The app's record of a session named by its app id (`local_…`) or its Claude Code id, or None when there is none.
+
+    A terminal session has no app record, so it reads as None too.
+    """
+    records = _get_records_directory()
+
+    if session_id.startswith(_APP_SESSION_PREFIX):
+        return _read_session_record(session_id, records)
+    elif session_id and records.is_dir():
+        matching = (path for path in records.glob(_SESSION_RECORD_PATTERN) if _is_cli_session_record(path, session_id))
+        found = next(matching, None)
+        record = _read_json(found) if found is not None else None
+
+        return record if isinstance(record, dict) else None
+    else:
+        return None
+
+
+def read_cli_session_id(record: dict[str, Any]) -> str | None:
+    """The Claude Code session id an app record names, which the write record files go by."""
+    cli_session_id = record.get(_CLI_SESSION_ID_KEY)
+
+    return cli_session_id if isinstance(cli_session_id, str) and cli_session_id else None
+
+
+def is_archived(record: dict[str, Any] | None) -> bool:
+    """Whether the app has archived the session, so it no longer runs; a session with no record does not count."""
+    return record is not None and record.get(_ARCHIVED_KEY) is True
 
 
 def read_session_title(record: dict[str, Any]) -> str:
@@ -79,6 +115,19 @@ def _is_started_by(path: Path, host_session: str) -> bool:
             spawned_from = record.get(_SPAWNED_FROM_KEY) if isinstance(record, dict) else None
 
             return isinstance(spawned_from, dict) and spawned_from.get(_SESSION_ID_KEY) == host_session
+        else:
+            return False
+    except OSError:
+        return False
+
+
+def _is_cli_session_record(path: Path, cli_session_id: str) -> bool:
+    """Search the bytes first, so only the few records that name the id are parsed."""
+    try:
+        if cli_session_id.encode(_ENCODING) in path.read_bytes():
+            record = _read_json(path)
+
+            return isinstance(record, dict) and record.get(_CLI_SESSION_ID_KEY) == cli_session_id
         else:
             return False
     except OSError:

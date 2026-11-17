@@ -9,6 +9,8 @@ sh -c, eval, scripts, cd and git -C) and applies these checks:
   deny  staging or committing .env and other credential files
   ask   a commit-wrapper call with --include-unrecorded, which commits
         lines this session's write record does not show as its own
+  ask   taking over another session's uncommitted files
+        (session_writes.py adopt) while that session is not archived
   ask   a git push that is not routine: force, deletion, mirror, tags,
         all branches, another remote or ref, unknown options, or a
         repository that sets shellGuard.askBeforePush
@@ -35,6 +37,8 @@ dialog. The wrapper keeps each such call it runs as approved, since it
 runs only after this dialog, so a retry whose files still hold the
 approved contents, such as one after HEAD moved, is not asked again,
 whatever else runs meanwhile (session_writes.is_include_approved).
+With --no-stage the wrapper commits its prepared index as it is, so the
+dialog lists and keeps the index's contents instead of the working tree's.
 """
 
 from __future__ import annotations
@@ -51,19 +55,22 @@ from pathlib import Path
 
 from commit_arguments import CommitArguments, CommitArgumentsError, parse_commit_arguments
 from secret_files import get_credential_reason, read_file_head
+from session_lineage import find_session_record, is_archived, read_session_title
+from session_writes import (
+    INDEX_VARIABLE,
+    SessionWritesError,
+    add_include_offer,
+    find_repository_paths,
+    is_include_approved,
+    list_unproven_lines,
+    read_index_blobs,
+)
 from shell_command import (
     CommandCall,
     GitCommand,
     expand_shell_command,
     join_directory,
     parse_git_command,
-)
-from session_writes import (
-    SessionWritesError,
-    add_include_offer,
-    find_repository_paths,
-    is_include_approved,
-    list_unproven_lines,
 )
 from workflow_policy import WorkflowMode, find_repository_root, read_checkout_policy, read_original_checkout
 
@@ -123,6 +130,13 @@ MERGE_APPROVAL_REASON = (
     "This merges a pull request in a repository that records no guarded pull-request "
     "workflow, so it needs your approval: {command}{origin}."
 )
+ADOPTION_REASON = (
+    "이 명령은 다른 세션({sender})이 아직 커밋하지 않은 줄을 이 세션 것으로 넘겨받습니다: {files}. "
+    "그 세션은 {state}. 그 세션이 이 파일을 넘긴 것이 맞을 때만 승인해 주세요. "
+    "거절하시면 커밋할 때 그 줄을 따로 여쭙니다.\n명령: {command}{origin}"
+)
+ADOPTION_OPEN_STATE = "아직 닫히지 않았습니다"
+ADOPTION_UNKNOWN_STATE = "앱 기록에 없어 닫혔는지 알 수 없습니다"
 ANALYSIS_FAILURE_REASON = (
     "The shell guard hook could not analyze this command ({error}). Approve "
     "only if it does not rewrite or delete remote history, commit credential "
@@ -159,6 +173,9 @@ GRAPHQL_MERGE = "mergePullRequest"
 RISK_SEPARATOR = "; "
 MAX_SHOWN_COMMAND_LENGTH = 160
 COMMIT_WRAPPER_NAME = "claude-commit.py"
+SESSION_WRITES_NAME = "session_writes.py"
+ADOPT_COMMAND = "adopt"
+FROM_OPTION = "--from"
 PYTHON_PATTERN = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$")
 DYNAMIC_MARKER = "$"
 COMMIT_SUBCOMMAND = "commit"
@@ -355,6 +372,7 @@ def decide(command: str, cwd: str | None, session_id: str | None = None) -> dict
         ask_reasons = (
             push_reasons
             + find_unrecorded_include_reasons(calls, session_id)
+            + find_adoption_reasons(calls)
             + find_production_reasons(calls)
             + [describe_call(MERGE_APPROVAL_REASON, call) for call in merge_calls if not is_guarded_merge(call)]
         )
@@ -564,30 +582,48 @@ def find_unrecorded_include_reasons(calls: list[CommandCall], session_id: str | 
         arguments = read_commit_wrapper_arguments(call.argv)
         included = arguments.included_paths if arguments is not None else ()
 
-        offer = offer_include(call, included, session_id) if included else None
+        offer = offer_include(call, arguments, session_id) if arguments is not None and included else None
 
         if included and not is_approved_offer(offer, session_id):
             reasons.append(make_include_reason(call, included, offer, session_id))
     return reasons
 
 
-def offer_include(call: CommandCall, included: Sequence[str], session_id: str | None) -> IncludeOffer | None:
+def offer_include(call: CommandCall, arguments: CommitArguments, session_id: str | None) -> IncludeOffer | None:
     """Keep the files' contents as the dialog will show them, which the commit wrapper then commits exactly.
 
-    None outside a Claude session or a repository, or when a file cannot be
-    stored; the dialog then says it could not list the lines.
+    With --no-stage they are the contents of the index the call commits.
+    None outside a Claude session or a repository, when a file cannot be
+    stored, or when the call names an index whose place is known only when
+    it runs; the dialog then says it could not list the lines.
     """
+    included = arguments.included_paths
     scope = find_repository_paths(call.cwd, included) if call.cwd and session_id else None
+    index_values = list_index_values(call) if arguments.no_stage else []
+    index_file = join_directory(call.cwd, index_values[-1]) if index_values else None
+    is_index_known = not index_values or index_file is not None
 
-    if scope is not None and session_id:
-        return try_add_include_offer(session_id, *scope)
+    if scope is not None and session_id and is_index_known:
+        return try_add_include_offer(session_id, *scope, arguments.no_stage, index_file)
     else:
         return None
 
 
-def try_add_include_offer(session_id: str, root: str, paths: list[str]) -> IncludeOffer | None:
+def list_index_values(call: CommandCall) -> list[str]:
+    """The GIT_INDEX_FILE values a call sets for its git commands; none means the repository's own index."""
+    return [value for name, value in list_call_assignments(call) if name == INDEX_VARIABLE]
+
+
+def try_add_include_offer(
+    session_id: str,
+    root: str,
+    paths: list[str],
+    from_index: bool,
+    index_file: str | None,
+) -> IncludeOffer | None:
     try:
-        blobs = add_include_offer(session_id, root, paths)
+        index_blobs = read_index_blobs(root, paths, index_file) if from_index else None
+        blobs = add_include_offer(session_id, root, paths, index_blobs)
     except (SessionWritesError, OSError):
         return None
     else:
@@ -648,6 +684,44 @@ def try_list_unproven_lines(session_id: str, root: str, path: str, blob: str | N
         return None
 
 
+def find_adoption_reasons(calls: list[CommandCall]) -> list[str]:
+    """Ask before a takeover of files from a session the app has not archived, since it may still commit them."""
+    takeovers = [(call, takeover) for call in calls if (takeover := read_adoption_arguments(call.argv)) is not None]
+    reasons: list[str] = []
+
+    for call, (sender, files) in takeovers:
+        record = find_session_record(sender)
+
+        if not is_archived(record):
+            reasons.append(make_adoption_reason(call, sender, files, record))
+    return reasons
+
+
+def read_adoption_arguments(argv: list[str]) -> tuple[str, list[str]] | None:
+    """The session and files of a `session_writes.py adopt --from <session> <file>...` call, or None for any other."""
+    script_index = find_script_index(argv, SESSION_WRITES_NAME)
+    arguments = argv[script_index + 1 :] if script_index >= 0 else []
+
+    if arguments[:2] == [ADOPT_COMMAND, FROM_OPTION] and len(arguments) > 3:
+        return arguments[2], arguments[3:]
+    else:
+        return None
+
+
+def make_adoption_reason(call: CommandCall, sender: str, files: list[str], record: dict[str, object] | None) -> str:
+    title = read_session_title(record) if record is not None else ""
+    shown = f"{title}, {sender}" if title else sender
+    state = ADOPTION_OPEN_STATE if record is not None else ADOPTION_UNKNOWN_STATE
+
+    return ADOPTION_REASON.format(
+        sender=shown,
+        files=", ".join(files),
+        state=state,
+        command=show_command(call),
+        origin=show_origin(call),
+    )
+
+
 def find_commit_wrapper_files(argv: list[str]) -> list[str]:
     arguments = read_commit_wrapper_arguments(argv)
 
@@ -671,12 +745,17 @@ def parse_wrapper_arguments(arguments: list[str]) -> CommitArguments | None:
 
 
 def find_commit_wrapper_index(argv: list[str]) -> int:
+    return find_script_index(argv, COMMIT_WRAPPER_NAME)
+
+
+def find_script_index(argv: list[str], script_name: str) -> int:
+    """Where a call names a script, run directly or by a Python interpreter with only options before it, or -1."""
     names = [os.path.basename(argument) for argument in argv]
 
-    if names[:1] == [COMMIT_WRAPPER_NAME]:
+    if names[:1] == [script_name]:
         return 0
-    elif names and PYTHON_PATTERN.match(names[0]) and COMMIT_WRAPPER_NAME in names[1:]:
-        position = names.index(COMMIT_WRAPPER_NAME, 1)
+    elif names and PYTHON_PATTERN.match(names[0]) and script_name in names[1:]:
+        position = names.index(script_name, 1)
         return position if all(argument.startswith("-") for argument in argv[1:position]) else -1
     else:
         return -1
