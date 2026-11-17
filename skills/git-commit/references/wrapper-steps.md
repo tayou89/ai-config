@@ -3,7 +3,7 @@
 Read from the `git-commit` skill, section 6, when the wrapper refuses or behaves unexpectedly.
 
 The wrapper:
-1. Validates subject prefix + length, body line length, body line count, bullet count, internal-term ban
+1. Refuses a checkout whose `.agent-workflow.json` is missing or unreadable, before anything else (FAIL exit 11; ask the user which mode the repository uses and record it, as the skill's section 1 says), then validates subject prefix + length, body line length, body line count, bullet count, internal-term ban
 2. Holds this checkout's commit lock until the commit is checked, recorded, and the shared index refreshed, so a commit through this wrapper or an integration tool already running in this checkout finishes first (it prints that it is waiting; FAIL exit 10 after 30 minutes, nothing committed); a plain `git commit` takes no lock. Run it with a timeout long enough for that wait and the pre-commit check, or in the background. Without `--expect-head` it reads HEAD after the wait. With it, if HEAD is no longer that commit, it rebuilds a private index (`--private-index` or a hand-built one) on the new HEAD when the new HEAD descends from the expected one on the same branch and holds every listed file as the expected one did (not for `--amend`, an empty file list, or the shared index), and otherwise refuses (FAIL exit 6; see 6a). It refuses `--amend` unless HEAD is a commit this session made through the wrapper and on no remote-tracking branch (FAIL exit 9)
 3. Prints `git log --oneline -3` for amend awareness
 4. Stages exact files passed as argv (skipped with `--no-stage`)
