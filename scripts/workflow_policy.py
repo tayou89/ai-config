@@ -6,8 +6,12 @@ integration tools read the file from the base branch as fetched, so a task
 branch cannot loosen its own gate; the hooks read the original checkout's
 copy, which needs no Git command.
 
-A repository without the file records no worktree workflow: the hooks leave
-it alone, and the shell guard asks before a merge there.
+A repository that commits straight to its base branch records the direct
+mode, and a team's repository records the team mode in a copy Git does not
+track; neither uses worktrees, so the hooks leave them alone and the shell
+guard asks before a merge there. A repository without the file records no
+workflow at all: the commit wrapper commits nothing there until one is
+recorded (user decision, 2026-11-17).
 """
 
 from __future__ import annotations
@@ -34,6 +38,13 @@ _GIT_TIMEOUT_SECONDS = 10
 class WorkflowMode(str, Enum):
     PULL_REQUEST = "pull-request"
     LOCAL_INTEGRATION = "local-integration"
+    DIRECT = "direct"
+    TEAM = "team"
+
+    @property
+    def is_worktree_mode(self) -> bool:
+        """Whether every writing task gets its own worktree and the original checkout stays read-only."""
+        return self in (WorkflowMode.PULL_REQUEST, WorkflowMode.LOCAL_INTEGRATION)
 
 
 class PolicyError(Exception):
@@ -73,7 +84,7 @@ def read_checkout_policy(root: Path) -> WorkflowPolicy | None:
     path = root / POLICY_FILE
 
     if path.is_file():
-        return parse_policy(path.read_text(encoding=_ENCODING), str(path))
+        return parse_policy(_read_policy_text(path), str(path))
     else:
         return None
 
@@ -203,6 +214,14 @@ def _check_mode_fields(policy: WorkflowPolicy, source: str) -> None:
         raise PolicyError(f"{source} lists no {_REQUIRED_CHECKS_KEY!r}, so no merge could be checked")
     elif policy.mode == WorkflowMode.LOCAL_INTEGRATION and not policy.check_commands:
         raise PolicyError(f"{source} lists no {_CHECK_COMMANDS_KEY!r}, so no integration could be checked")
+
+
+def _read_policy_text(path: Path) -> str:
+    """A file that cannot be read records no usable workflow, which the callers report like a malformed one."""
+    try:
+        return path.read_text(encoding=_ENCODING)
+    except (OSError, UnicodeDecodeError) as error:
+        raise PolicyError(f"{path} cannot be read: {error}") from error
 
 
 def _is_command(command: Any) -> bool:

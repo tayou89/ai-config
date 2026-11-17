@@ -184,7 +184,7 @@ def _list_worktree_removal_reasons(folder: str, what: str) -> list[str]:
     root = find_repository_root(Path(folder))
     original = read_original_checkout(root) if root else None
 
-    if original and read_checkout_policy(original) is not None:
+    if original and _is_worktree_workflow(original):
         return [_WORKTREE_REMOVAL_REASON.format(what=what)]
     else:
         return []
@@ -194,10 +194,17 @@ def _find_guarded_original(path: Path) -> Path | None:
     """The repository root when the path is in an original checkout whose workflow uses worktrees, else None."""
     root = find_repository_root(path)
 
-    if root and is_original_checkout(root) and read_checkout_policy(root) is not None:
+    if root and is_original_checkout(root) and _is_worktree_workflow(root):
         return root
     else:
         return None
+
+
+def _is_worktree_workflow(root: Path) -> bool:
+    """Direct and team repositories record a workflow without task worktrees, so their original checkout stays writable."""
+    policy = read_checkout_policy(root)
+
+    return policy is not None and policy.mode.is_worktree_mode
 
 
 def _make_decision(reasons: list[str]) -> dict[str, Any]:
