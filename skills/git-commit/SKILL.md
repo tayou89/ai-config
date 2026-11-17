@@ -13,7 +13,7 @@ Routine commits and pushes need no user approval (user decision, 2026-11-09): th
 
 Follow the workflow the repository records in `.agent-workflow.json`, which names its mode, base branch, and required checks or check commands for the tools below (user decision, 2026-11-13):
 
-- **Pull request with a guarded merge** (`pull-request`, personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request with `pr-create`, and merge it only with `~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. Never push the base branch, merge with administrator rights, or enable auto-merge.
+- **Pull request with a guarded merge** (`pull-request`, personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request with `pr-create`, and merge it only with `~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. Once the pull request is open, run `~/.claude/scripts/pr-merge.py --wait` as one background command: it waits for the required checks, brings a base that moved meanwhile into the head through GitHub's update-branch when that merges cleanly, waits for the checks again, and merges, stopping with the reasons on a conflict or a failed check. That one background wait is the only exception to the app's instruction not to poll checks; scheduled wake-ups, Monitor, and repeated commands stay barred (user decision, 2026-11-17). Never push the base branch, merge with administrator rights, or enable auto-merge.
 - **Local integration** (`local-integration`, a repository without a remote): commit on the task branch and integrate it with `~/.claude/scripts/local-integrate.py`, which merges it onto the current base in a temporary worktree, runs the check commands there, and moves the base only when they pass.
 - **Direct commits** (`direct`): commit to the base branch in the original checkout as section 6a describes, holding the repository's lock for the whole write, check, and commit where its rules keep one; record it only as the user's choice for that repository, not because few sessions are open.
 - **Team workflow** (`team`): follow the team's rules; the shell guard asks before every merge. Keep the file out of the team's repository by listing it in `.git/info/exclude`.
@@ -95,7 +95,7 @@ For a large change, after the checklist review, add `--reviewed` before the mess
 ~/.claude/scripts/claude-commit.py --reviewed "<message>" <file1> ...
 ```
 
-The wrapper counts the staged change only: on `--amend` that is the new part, so review the whole amended commit when a series of amends grows past the limit, and on a `--no-stage` merge it is everything the merge brings in.
+The wrapper counts the staged change only: on `--amend` that is the new part, so review the whole amended commit when a series of amends grows past the limit, and on a merge it is only what differs from Git's own automatic merge of the two sides, such as conflict resolutions and hand edits, since the merged branch's lines passed their checks there (user decision, 2026-11-17).
 
 For amend:
 
