@@ -4,7 +4,8 @@ Asks Codex's own `codex app-server` for `account/rateLimits/read`, the same read
 the usage panel uses; no credentials are read. Prints one JSON line such as
 {"plan": "plus", "five_hour": 0, "seven_day": 100, "seven_day_resets": "...", "running_reviews": 1}
 or {"error": "...", "running_reviews": 1} and exits 0 either way, so a caller can decide what to do.
-`running_reviews` counts the `codex exec` processes running on this machine.
+`running_reviews` counts the read-only `codex exec` processes running on this machine,
+since implementation runs write in their own worktree and must not hold reviews back.
 """
 import datetime
 import json
@@ -78,7 +79,17 @@ def summarize(answer):
 
 
 def is_review_process(arguments):
-    return len(arguments) > 1 and os.path.basename(arguments[0]) == 'codex' and arguments[1] == 'exec'
+    is_codex_exec = len(arguments) > 1 and os.path.basename(arguments[0]) == 'codex' and arguments[1] == 'exec'
+
+    return is_codex_exec and is_read_only(arguments)
+
+
+def is_read_only(arguments):
+    pairs = zip(arguments, arguments[1:])
+
+    return '--sandbox=read-only' in arguments or any(
+        flag in ('-s', '--sandbox') and value == 'read-only' for flag, value in pairs
+    )
 
 
 def count_running_reviews():
