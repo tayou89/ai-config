@@ -3,7 +3,7 @@ name: code-plan
 description: Prepare evidence-based plans for substantial features, structural changes, or complex fixes; skip trivial edits and already settled planning.
 ---
 
-<!-- Adapted from skills/code-plan/SKILL.md at 1795b7fa82b5663ce5c674d9202a341c47ff022f -->
+<!-- Adapted from skills/code-plan/SKILL.md at 0966c7e97339d8dee5f0e497ccca4888c8ad75f1 -->
 
 # Plan Workflow
 

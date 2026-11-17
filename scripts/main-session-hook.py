@@ -11,7 +11,7 @@ and passed the replacement threshold without proposing it did so with that
 rule missing from its context (2026-11-13). This hook puts the facts back:
 
 - UserPromptSubmit, which also runs on turns another session's message
-  starts: the role, the conversation part's size against the replacement
+  starts: the role, the context's size against the 80% replacement
   threshold, and whether the installed `session-management` skill
   changed after this session last loaded it.
 - PreToolUse on file edits and long commands (Edit, Write, NotebookEdit,
@@ -24,10 +24,10 @@ variable are missing, as in a terminal session, the hook adds nothing. A
 top-level session whose title its project's role list marks `(not main)`,
 read through `project_rules` from the hook input's folder, gets nothing
 either, since the user set that role apart (user decision, 2026-11-16). The
-conversation part is estimated from the transcript as the last request's
-input tokens minus the first request's, which matched the app's Messages
-category within 2.6% on 2026-11-13, reading high as the fixed part grows
-after the first request.
+context's size is the last request's input tokens in the transcript, which
+matched the app's context reading within 1% on 2026-11-17. Hook input carries
+no window size, so the window is the 1,000,000 tokens the app reported for
+the main sessions' model that day; a model with another window reads wrong.
 A subagent's tool calls get nothing, since it cannot start sessions, and an
 unreadable transcript leaves out the size and skill sentences.
 MAIN_SESSION_NOTICE=off in the settings env turns the notices off. The hook
@@ -80,7 +80,9 @@ _INPUT_KEY = "input"
 _INPUT_TOKEN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 _UTC_SUFFIX = "Z"
 _UTC_OFFSET = "+00:00"
-_REPLACEMENT_THRESHOLD = 200_000
+_CONTEXT_WINDOW = 1_000_000
+_REPLACEMENT_PERCENT = 80
+_PERCENT_SCALE = 100
 _THOUSAND = 1_000
 _NOTICE_TAG = "[MAIN SESSION]"
 _ROLE_NOTICE = (
@@ -88,8 +90,9 @@ _ROLE_NOTICE = (
     f'a main session, which {_LEAD_SKILL} "Working alongside other sessions" limits to '
     "conversation and managing sessions."
 )
-_SIZE_PAST_NOTICE = "Its conversation part is about {size}k tokens, past the {threshold}k replacement threshold."
-_SIZE_BELOW_NOTICE = "Its conversation part is about {size}k of the {threshold}k replacement threshold."
+_SIZE_NOTICE = "Its context is about {size}k of the {window}k window ({percent}%), {position} the {threshold}% replacement threshold."
+_PAST_POSITION = "past"
+_BELOW_POSITION = "below"
 _SKILL_CHANGED_NOTICE = (
     f"The installed {_LEAD_SKILL} skill changed after this session last loaded it, "
     "and a compaction restores each skill as it was loaded."
@@ -210,7 +213,7 @@ def _read_transcript_records(transcript_path: Any) -> list[dict[str, Any]] | Non
 
 
 def _list_transcript_notices(transcript: list[dict[str, Any]]) -> list[str]:
-    size = _estimate_conversation_size(transcript)
+    size = _read_context_size(transcript)
     notices = [_make_size_notice(size)] if size is not None else []
 
     return notices + _list_skill_notices(transcript)
@@ -225,15 +228,15 @@ def _parse_record(line: bytes) -> dict[str, Any] | None:
         return None
 
 
-def _estimate_conversation_size(transcript: list[dict[str, Any]]) -> int | None:
-    """The last request's input tokens minus the first's: the first holds only the fixed part and the brief.
+def _read_context_size(transcript: list[dict[str, Any]]) -> int | None:
+    """The last request's input tokens, the whole context the model read.
 
     Records with no input tokens, such as messages the tool writes itself, are not requests and are skipped.
     """
     totals = [total for total in map(_sum_input_tokens, transcript) if total]
 
     if totals:
-        return max(totals[-1] - totals[0], 0)
+        return totals[-1]
     else:
         return None
 
@@ -249,9 +252,15 @@ def _sum_input_tokens(record: dict[str, Any]) -> int | None:
 
 
 def _make_size_notice(size: int) -> str:
-    template = _SIZE_PAST_NOTICE if size > _REPLACEMENT_THRESHOLD else _SIZE_BELOW_NOTICE
+    is_past = size * _PERCENT_SCALE > _CONTEXT_WINDOW * _REPLACEMENT_PERCENT
 
-    return template.format(size=round(size / _THOUSAND), threshold=_REPLACEMENT_THRESHOLD // _THOUSAND)
+    return _SIZE_NOTICE.format(
+        size=round(size / _THOUSAND),
+        window=f"{_CONTEXT_WINDOW // _THOUSAND:,}",
+        percent=round(size * _PERCENT_SCALE / _CONTEXT_WINDOW),
+        position=_PAST_POSITION if is_past else _BELOW_POSITION,
+        threshold=_REPLACEMENT_PERCENT,
+    )
 
 
 def _list_skill_notices(transcript: list[dict[str, Any]]) -> list[str]:

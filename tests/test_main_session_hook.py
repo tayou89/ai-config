@@ -97,16 +97,28 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertTrue(context.startswith(NOTICE_TAG))
         self.assertIn("started 1 other session and", context)
-        self.assertIn("about 120k of the 200k replacement threshold", context)
+        self.assertIn("about 210k of the 1,000k window (21%), below the 80% replacement threshold", context)
 
     def test_size_past_the_threshold_says_so(self) -> None:
         self._write_main_with_child()
         self._write_transcript(
             make_usage_record(FIRST_REQUEST_TOKENS),
-            make_usage_record(FIRST_REQUEST_TOKENS + 266_402),
+            make_usage_record(812_345),
         )
 
-        self.assertIn("about 266k tokens, past the 200k replacement threshold", self._read_turn_context())
+        self.assertIn("about 812k of the 1,000k window (81%), past the 80% replacement threshold", self._read_turn_context())
+
+    def test_size_at_the_threshold_is_not_yet_past(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(800_000))
+
+        self.assertIn("(80%), below the 80% replacement threshold", self._read_turn_context())
+
+    def test_size_just_over_the_threshold_is_past(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(800_001))
+
+        self.assertIn("(80%), past the 80% replacement threshold", self._read_turn_context())
 
     def test_sidechain_requests_do_not_count(self) -> None:
         self._write_main_with_child()
@@ -116,7 +128,7 @@ class MainSessionHookTest(unittest.TestCase):
             make_usage_record(900_000, sidechain=True),
         )
 
-        self.assertIn("about 50k of the", self._read_turn_context())
+        self.assertIn("about 140k of the", self._read_turn_context())
 
     def test_records_without_input_tokens_do_not_count(self) -> None:
         self._write_main_with_child()
@@ -126,7 +138,7 @@ class MainSessionHookTest(unittest.TestCase):
             make_usage_record(FIRST_REQUEST_TOKENS + 30_000),
         )
 
-        self.assertIn("about 30k of the", self._read_turn_context())
+        self.assertIn("about 120k of the", self._read_turn_context())
 
     def test_counts_every_session_it_started_including_archived(self) -> None:
         self._write_record(MAIN_SESSION)
@@ -251,7 +263,7 @@ class MainSessionHookTest(unittest.TestCase):
         with self._transcript.open("a", encoding=ENCODING) as stream:
             stream.write('{"type":"assistant", broken\n')
 
-        self.assertIn("about 40k of the", self._read_turn_context())
+        self.assertIn("about 130k of the", self._read_turn_context())
 
     def test_file_changes_and_long_commands_in_a_main_session_get_the_tool_notice(self) -> None:
         self._write_main_with_child()
