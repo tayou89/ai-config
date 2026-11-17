@@ -156,6 +156,16 @@
         ]
       },
       {
+        "matcher": "mcp__ccd_turn__wrap_up",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/recommendation-change-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "AskUserQuestion",
         "hooks": [
           {
@@ -183,6 +193,11 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/back-reference-hook.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/recommendation-change-hook.py\"",
             "timeout": 10
           }
         ]
