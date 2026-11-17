@@ -220,7 +220,10 @@ MOVED_BASE_NOTE = "HEAD moved from {old} to {new}; the commits since leave your 
 REMOTE_BRANCH_FORMAT = "--format=%(if)%(symref)%(then)%(else)%(refname:short)%(end)"
 NO_SESSION_REASON = "cannot be shown to be this session's: only a Claude session lists the commits it makes"
 OTHER_COMMIT_REASON = "this session did not make through this wrapper (another session's or a person's commit, or one made before the wrapper listed commits)"
-SEQUENCER_STATE_FILES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD")
+MERGE_HEAD = "MERGE_HEAD"
+SEQUENCER_STATE_FILES = (MERGE_HEAD, "CHERRY_PICK_HEAD", "REVERT_HEAD")
+MERGE_TREE_CONFLICTED = 1
+GIT_STATE_ENCODING = "utf-8"
 REGULAR_FILE_MODE = "100644"
 EXECUTABLE_FILE_MODE = "100755"
 MAX_SHOWN_FOREIGN_LINES = 12
@@ -919,10 +922,48 @@ def check_large_commit_reviewed(changed_lines: int, reviewed: bool) -> None:
 
 
 def count_code_lines() -> int:
-    numstat_proc = run_git(["diff", "--cached", "--numstat", "-z"], capture_output=True)
+    numstat_proc = run_git(["diff", "--cached", "--numstat", "-z", *read_count_base()], capture_output=True)
     if numstat_proc.returncode != 0:
         fail("FAIL: git diff --cached --numstat failed", EXIT_GIT_ERROR)
     return sum(count_numstat_lines(*entry) for entry in parse_numstat(numstat_proc.stdout))
+
+
+def read_count_base() -> list[str]:
+    """What the staged change is counted against: HEAD, or for a merge Git's own automatic merge of both sides.
+
+    The lines a merged branch brings in passed review and checks on that branch,
+    so a merge counts only what differs from Git's automatic merge, the same
+    comparison `git show --remerge-diff` makes: conflict resolutions and hand
+    edits. A merge of several branches, or one Git cannot redo, counts against HEAD.
+    """
+    merge_heads = read_merge_heads()
+
+    if len(merge_heads) == 1:
+        return read_automatic_merge(merge_heads[0])
+    else:
+        return []
+
+
+def read_merge_heads() -> list[str]:
+    path_proc = run_git(["rev-parse", "--git-path", MERGE_HEAD], capture_output=True)
+    path = path_proc.stdout.strip()
+
+    if path_proc.returncode == 0 and os.path.isfile(path):
+        with open(path, encoding=GIT_STATE_ENCODING) as handle:
+            return handle.read().split()
+    else:
+        return []
+
+
+def read_automatic_merge(merge_head: str) -> list[str]:
+    merge_proc = run_git(["merge-tree", "--write-tree", "--no-messages", "HEAD", merge_head], capture_output=True)
+    tree = merge_proc.stdout.split("\n", 1)[0].strip()
+
+    if merge_proc.returncode in (0, MERGE_TREE_CONFLICTED) and tree:
+        return [tree]
+    else:
+        print("Note: Git could not redo this merge, so its lines are counted against HEAD.")
+        return []
 
 
 def parse_numstat(output: str) -> list[tuple[str, str, str]]:
