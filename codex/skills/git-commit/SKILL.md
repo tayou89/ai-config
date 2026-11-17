@@ -3,7 +3,7 @@ name: git-commit
 description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
-<!-- Adapted from skills/git-commit/SKILL.md at f1ba3a245e4c9ba3024942dec93f2a0dfe764d04, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 816ed150fb803e0256d060d075609d83c970829c -->
+<!-- Adapted from skills/git-commit/SKILL.md at aaad3886b36ccae90e1c328d447f8063021da1a5, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at cbf3ecf007637f00fca41eba361b43159b76ac4f -->
 
 # Commit Workflow
 

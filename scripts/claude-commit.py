@@ -140,18 +140,23 @@ from session_writes import (
     ContestCause,
     IncludeChangedError,
     SessionWritesError,
+    SnapshotScope,
     approve_include,
     decode_content,
     describe_contest_cause,
     find_contest_cause,
     find_repository_paths,
+    finish_call_record,
+    has_commit_hooks,
     has_other_session_writes,
     has_record,
     is_line_tracked,
     is_record_complete,
     is_whole_file_own,
     load_file_history,
+    read_index_blobs,
     read_session_id,
+    start_call_record,
     store_text,
 )
 from workflow_policy import (
@@ -172,6 +177,9 @@ REFLOG_ACTION_VARIABLE = "GIT_REFLOG_ACTION"
 COMMIT_REFLOG_ACTION = "commit"
 AMEND_REFLOG_ACTION = "commit (amend)"
 REFLOG_MARK_BYTES = 8
+COMMIT_HOOK_TOOL = "commit hook"
+COMMIT_HOOK_CALL_PREFIX = "commit-hooks-"
+COMMIT_HOOK_RECORD_NOTE = "Note: the commit hooks' writes could not be recorded ({error})."
 REFLOG_ENTRY_FORMAT = "--format=%H %gs"
 REFLOG_ENTRY_RE = re.compile(r"([0-9a-f]{40,64}) (.*)")
 REFLOG_SPACE_RE = re.compile(r"[\t\n\r ]+")
@@ -506,21 +514,25 @@ def approve_included_files(arguments: CommitArguments) -> dict[str, ApprovedCont
 
     The shell guard asks before every such call, so this run is the user's
     approval of what its dialog showed, and the wrapper commits those
-    contents rather than the files as they are when staged. A session
-    without a record folder has no dialog contents kept, so the files count
-    as they are now. It is empty outside a session, with --no-stage, whose
-    prepared index is committed as it is, and when the approval cannot be
-    kept; the files are then staged as they are. Only regular files and
-    removed ones are staged from a content: a folder, a link, or a submodule
-    is staged by `git add` as before.
+    contents rather than the files as they are when staged. With --no-stage
+    the prepared index is committed as it is, so the dialog showed the
+    index's contents and the approval covers them; nothing is staged from
+    it. A session without a record folder has no dialog contents kept, so
+    the files count as they are now. It is empty outside a session and when
+    the approval cannot be kept; the files are then staged as they are. Only
+    regular files and removed ones are staged from a content: a folder, a
+    link, or a submodule is staged by `git add` as before.
     """
     session_id = read_session_id()
-    included = [] if arguments.no_stage else list(arguments.included_paths)
+    included = list(arguments.included_paths)
     scope = find_repository_paths(os.getcwd(), included) if session_id and included else None
 
-    if session_id and scope is not None:
+    if session_id and scope is not None and arguments.no_stage:
+        try_approve_include(session_id, *scope, from_index=True)
+        return {}
+    elif session_id and scope is not None:
         root, repository_paths = scope
-        blobs = try_approve_include(session_id, root, repository_paths)
+        blobs = try_approve_include(session_id, root, repository_paths, from_index=False)
         pairs = zip(included, repository_paths)
 
         return {
@@ -539,9 +551,17 @@ def is_content_stageable(root: str, path: str) -> bool:
     return not os.path.lexists(file) or (os.path.isfile(file) and not os.path.islink(file))
 
 
-def try_approve_include(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
+def try_approve_include(session_id: str, root: str, paths: Sequence[str], from_index: bool) -> dict[str, str | None]:
+    """Approve what the dialog showed: the files, or with `from_index` the prepared index this commit takes.
+
+    A relative index path counts from this folder, as the shell guard reads it from the command's folder.
+    """
     try:
-        return approve_include(session_id, root, paths)
+        index_file = os.environ.get(PRIVATE_INDEX_VARIABLE)
+        index_path = os.path.abspath(index_file) if index_file else None
+        index_blobs = read_index_blobs(root, paths, index_path) if from_index else None
+
+        return approve_include(session_id, root, paths, index_blobs)
     except IncludeChangedError as error:
         fail(make_changed_include_message(error.paths), EXIT_FOREIGN_LINES)
     except (SessionWritesError, OSError) as error:
@@ -1285,17 +1305,63 @@ def do_commit(message: str, amend: bool, expected_head: str | None, files: Seque
     git_args = ["commit"]
     if amend:
         git_args.append("--amend")
-    commit_proc = subprocess.run(
-        ["git", *git_args, "-F", "-"],
-        input=message,
-        text=True,
-        env=env,
-        check=False,
-    )
+    with record_commit_hooks():
+        commit_proc = subprocess.run(
+            ["git", *git_args, "-F", "-"],
+            input=message,
+            text=True,
+            env=env,
+            check=False,
+        )
     if commit_proc.returncode != 0:
         check_head_unchanged(expected_head, files)
         sys.exit(EXIT_GIT_ERROR)
     return find_made_commit(make_commit_reflog_message(reflog_action, message))
+
+
+@contextlib.contextmanager
+def record_commit_hooks() -> Iterator[None]:
+    """Record what the repository's commit hooks write while git commit runs, as this session's command write.
+
+    The record hook takes no snapshot for the wrapper's own call, so a commit
+    that waits for the shell guard's dialog holds up no other session; only
+    the hooks' run counts as running for them. Recording only helps: a
+    failure leaves the hooks' writes unrecorded, which a later commit asks
+    about, so it never stops this commit.
+    """
+    record = start_commit_hook_record()
+
+    try:
+        yield
+    finally:
+        finish_commit_hook_record(record)
+
+
+def start_commit_hook_record() -> tuple[str, str] | None:
+    """The session and call id of a record started around git commit, or None when there is nothing to record."""
+    session_id = read_session_id()
+    call_id = f"{COMMIT_HOOK_CALL_PREFIX}{secrets.token_hex(REFLOG_MARK_BYTES)}"
+
+    try:
+        root = read_repository_root()
+
+        if session_id is not None and has_record(session_id) and has_commit_hooks(root):
+            start_call_record(session_id, call_id, [SnapshotScope(root, None)])
+            return session_id, call_id
+        else:
+            return None
+    except Exception as error:
+        print(COMMIT_HOOK_RECORD_NOTE.format(error=error), file=sys.stderr)
+        return None
+
+
+def finish_commit_hook_record(record: tuple[str, str] | None) -> None:
+    """Any failure here only leaves the hooks' writes unrecorded, after the commit is already made."""
+    if record is not None:
+        try:
+            finish_call_record(*record, COMMIT_HOOK_TOOL)
+        except Exception as error:
+            print(COMMIT_HOOK_RECORD_NOTE.format(error=error), file=sys.stderr)
 
 
 def make_reflog_action(amend: bool) -> str:
