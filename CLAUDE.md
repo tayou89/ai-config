@@ -18,7 +18,7 @@ Load each skill that this section or `rules/skill-triggers.md` names with the Sk
 
 - **Codex share**: While Codex has spare share, Codex does the actual work and Claude directs, decides, and reviews; load `agent-usage` before doing implementation, research, record collection, or measurement yourself, and before writing a plan step or session brief (user decision, 2026-11-18).
 - **Research access**: Read `research-access` before reading result lists or sources on video sites, review stores, or community sites, or when a search or fetch is refused or returns nothing.
-- **User-invoked only**: `/deep-prompt` (rewrite a request into a deeper prompt for a new session), `/outside-review` (read-only review by another model family), `/domain-pass` (sequential subagents, one per relevant field). Run them only when the user invokes them or asks for one in words (then read its skill file); at a review checkpoint, propose `/outside-review` instead of spawning a reviewer.
+- **User-invoked only**: `/deep-prompt` (rewrite a request into a deeper prompt for a new session), `/domain-pass` (sequential subagents, one per relevant field). Run them only when the user invokes them or asks for one in words (then read its skill file).
 
 ## Miscellaneous
 
