@@ -72,6 +72,8 @@ class WorktreeGuardHookTest(unittest.TestCase):
             ("sed -i '' s/seed/x/ README.md", DENY),
             ("echo x | tee new.txt", DENY),
             ("sed -i 's/A/B/' README.md", DENY),
+            ("sed -I '' 's/A/B/' README.md", DENY),
+            ("sed -I '' 's/A/B/' claude-plans/plan-x.md", PASS),
             ("sed -i '' 's/A/B/' claude-plans/plan-x.md", PASS),
             ("sed -i 's/A/B/' claude-plans/plan-x.md", PASS),
             ("perl -pi -e 's/A/B/' claude-plans/plan-x.md", PASS),
