@@ -13,7 +13,8 @@ import {
   overLevel,
   workPace,
 } from './work'
-import type { EngineInterface, FsEntry, Register, RenderChildren, ToolCallResult } from 'claude-code'
+import { UNGROUPED_SECTION, WAITING_SECTION_NAME, decideWaitingStep, sidebarPlace } from './waiting'
+import type { EngineInterface, FsEntry, McpToolResult, Register, RenderChildren, ToolCallResult } from 'claude-code'
 import type {
   Cache,
   CacheOutput,
@@ -34,17 +35,26 @@ import type {
   LimitStep,
   ListedSession,
   Live,
+  OwnSession,
+  OwnSidebarPlace,
   Reading,
   Segment,
   SessionCounts,
   SessionListFilter,
   SessionRead,
+  SessionState,
   SessionsOutput,
   SessionsRequest,
   Shared,
   SharedFile,
+  SidebarSectionRow,
   Tab,
   Turn,
+  WaitingRecord,
+  WaitingRefusal,
+  WaitingStep,
+  WaitingSwitch,
+  WaitingView,
   Where,
   Work,
   WorkEstimate,
@@ -74,7 +84,13 @@ type WorkPieces = { time: WorkPart[]; tokens: WorkPart[]; percent: WorkPart[] }
 // What was last read of a session: its file's save time, and the activity
 // stamp its transcript was last looked at for a question.
 type SessionSeen = SessionRead & { savedAt: number; askedAt?: string }
-type SessionState = keyof SessionCounts | 'idle'
+// What the waiting section does with this session's place on one tick.
+type WaitingArranger = (own: OwnSession, state: SessionState) => Promise<void>
+// The waiting files of this session: its own record and the switch all share.
+type WaitingPaths = { record: string; waitingSwitch: string }
+// The waiting section looked for: found, deleted by the person, or not known
+// because the app did not answer.
+type SectionLookup = { kind: 'found'; sectionId: string } | { kind: 'deleted' } | { kind: 'unreached' }
 type CacheView = { kind: 'warm'; until: string } | { kind: 'soon'; minutes: number } | { kind: 'cold'; after: string }
 // What each shared reading holds, by its file's name.
 type SharedOutputs = {
@@ -183,6 +199,21 @@ const SESSIONS_READ_MS = 20 * 1000
 // to itself: off, a session waiting for the person is counted in none.
 const IS_WAITING_COUNTED = true
 const SESSION_LIST = { server: 'ccd_session_mgmt', tool: 'list_sessions', limit: 500 } as const
+const OWN_SESSION = { server: 'ccd_session_mgmt', tool: 'get_session', id: 'self' } as const
+// Each session that waits for the person files itself, and only itself, under
+// the waiting section at the sidebar's top, and back once the person answers.
+// Moving a session takes an allow rule: auto mode refuses the band's call.
+const SIDEBAR = {
+  server: 'ccd_sidebar',
+  list: 'list_sections',
+  create: 'create_section',
+  move: 'move_sessions',
+} as const
+const WAITING_FOLDER = 'Library/Application Support/usage-panel/waiting'
+const WAITING_SWITCH = 'Library/Application Support/usage-panel/waiting-section.json'
+const WAITING_ON: WaitingSwitch = { isOn: true }
+const WAITING_VIEW: WaitingView = { isOn: true, isRefused: false }
+const waiting = atom({ plugin: 'usage-panel', key: 'waiting' } as const, WAITING_VIEW, { shape: 'waiting-1' })
 const APP_SESSIONS = 'Library/Application Support/Claude/claude-code-sessions'
 const APP_STORE = 'Library/Application Support/Claude/Local Storage/leveldb'
 const STORE_FILE = /\.(log|ldb)$/
@@ -1482,14 +1513,250 @@ async function recordCodexServerFailure($: EngineInterface): Promise<void> {
   }
 }
 
+function callText(result: McpToolResult): string {
+  return result.content.map(block => block.text ?? '').join('')
+}
+
 // The sessions the app lists, less this one: by default the sidebar's own
 // list, which leaves archived ones out.
 async function listSessions($: EngineInterface, filter: SessionListFilter = {}): Promise<ListedSession[]> {
   const listed = await $.mcp.call(SESSION_LIST.server, SESSION_LIST.tool, { limit: SESSION_LIST.limit, ...filter })
-  const text = listed.content.map(block => block.text ?? '').join('')
-  const rows = listed.isError ? [] : (JSON.parse(text) as ListedSession[])
+  const rows = listed.isError ? [] : (JSON.parse(callText(listed)) as ListedSession[])
 
   return Array.isArray(rows) ? rows.filter(row => typeof row.sessionId === 'string') : []
+}
+
+// This session's own row; none outside the app, or while the app cannot answer.
+async function readOwnSession($: EngineInterface): Promise<OwnSession | undefined> {
+  try {
+    const found = await $.mcp.call(OWN_SESSION.server, OWN_SESSION.tool, { session_id: OWN_SESSION.id })
+    const row = found.isError ? undefined : (JSON.parse(callText(found)) as OwnSession)
+
+    return row && typeof row.sessionId === 'string' ? row : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// A waiting file's value; none while it is missing, cleared or unreadable.
+async function readWaitingFile<T>($: EngineInterface, path: string): Promise<T | undefined> {
+  try {
+    const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+
+    return text ? ((JSON.parse(text) as T | null) ?? undefined) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// The switch as every session last left it: on until someone turned it off,
+// also when its file holds no clear answer.
+async function readWaitingSwitch($: EngineInterface, path: string): Promise<WaitingSwitch> {
+  const found = await readWaitingFile<WaitingSwitch>($, path)
+
+  return found ? { ...found, isOn: found.isOn !== false } : WAITING_ON
+}
+
+// The sidebar's section ids; none while the app cannot list them, as with no
+// app window open, which says nothing about a section being gone.
+async function sidebarSectionIds($: EngineInterface): Promise<string[] | undefined> {
+  try {
+    const listed = await $.mcp.call(SIDEBAR.server, SIDEBAR.list, {})
+    const rows = listed.isError ? undefined : (JSON.parse(callText(listed)) as SidebarSectionRow[])
+
+    return Array.isArray(rows) ? rows.flatMap(row => (typeof row.id === 'string' ? [row.id] : [])) : undefined
+  } catch {
+    return undefined
+  }
+}
+
+// Files this session, and no other, under a section; false when the app or
+// the engine refused the move.
+async function moveSelf($: EngineInterface, sectionId: string): Promise<boolean> {
+  try {
+    const request = { session_ids: [OWN_SESSION.id], section_id: sectionId }
+    const moved = await $.mcp.call(SIDEBAR.server, SIDEBAR.move, request)
+
+    return !moved.isError
+  } catch {
+    return false
+  }
+}
+
+// The section made before, while the sidebar still lists it. One the person
+// deleted turns the band off for every session.
+async function keptWaitingSection($: EngineInterface, sectionId: string, path: string): Promise<SectionLookup> {
+  const ids = await sidebarSectionIds($)
+
+  if (ids?.includes(sectionId)) {
+    return { kind: 'found', sectionId }
+  } else if (ids) {
+    const switchedOff: WaitingSwitch = { isOn: false }
+
+    await $.fs.write(path, JSON.stringify(switchedOff))
+    return { kind: 'deleted' }
+  } else {
+    return { kind: 'unreached' }
+  }
+}
+
+// The app makes one section of a name and returns that one to later asks.
+async function madeWaitingSection($: EngineInterface, path: string): Promise<SectionLookup> {
+  const made = await $.mcp.call(SIDEBAR.server, SIDEBAR.create, { name: WAITING_SECTION_NAME })
+  const section = made.isError ? undefined : (JSON.parse(callText(made)) as SidebarSectionRow)
+
+  if (typeof section?.id === 'string') {
+    const switchedOn: WaitingSwitch = { isOn: true, sectionId: section.id }
+
+    await $.fs.write(path, JSON.stringify(switchedOn))
+    return { kind: 'found', sectionId: section.id }
+  } else {
+    return { kind: 'unreached' }
+  }
+}
+
+async function findWaitingSection(
+  $: EngineInterface,
+  waitingSwitch: WaitingSwitch,
+  path: string,
+): Promise<SectionLookup> {
+  try {
+    return waitingSwitch.sectionId === undefined
+      ? await madeWaitingSection($, path)
+      : await keptWaitingSection($, waitingSwitch.sectionId, path)
+  } catch {
+    return { kind: 'unreached' }
+  }
+}
+
+function isSameWaitingView(before: WaitingView, after: WaitingView): boolean {
+  return before.isOn === after.isOn && before.isRefused === after.isRefused
+}
+
+// A cleared record is the JSON null, since a mod cannot delete a file.
+async function writeWaitingRecord($: EngineInterface, path: string, record: WaitingRecord | null): Promise<void> {
+  await $.fs.write(path, JSON.stringify(record))
+}
+
+// The group a leaving session goes back to: the one it came from while the
+// sidebar still lists it, else the ungrouped list; none while the app cannot
+// list its sections.
+async function leavingSectionId($: EngineInterface, toSectionId: string): Promise<string | undefined> {
+  if (toSectionId === UNGROUPED_SECTION) {
+    return toSectionId
+  } else {
+    const ids = await sidebarSectionIds($)
+
+    return ids ? keptOrUngrouped(ids, toSectionId) : undefined
+  }
+}
+
+function keptOrUngrouped(ids: readonly string[], sectionId: string): string {
+  return ids.includes(sectionId) ? sectionId : UNGROUPED_SECTION
+}
+
+// Each tick files this session by its step and keeps the pane's view. A move
+// the app refused or could not make is not asked again until this session's
+// activity moves on, which an allow rule added meanwhile then lets through.
+function waitingArranger($: EngineInterface, home: string): WaitingArranger {
+  let refused: WaitingRefusal | undefined
+
+  const enter = async (
+    step: Extract<WaitingStep, { kind: 'enter' }>,
+    waitingSwitch: WaitingSwitch,
+    paths: WaitingPaths,
+  ): Promise<void> => {
+    const lookup = await findWaitingSection($, waitingSwitch, paths.waitingSwitch)
+    const isMoved = lookup.kind === 'found' && (await moveSelf($, lookup.sectionId))
+
+    if (isMoved) {
+      const record: WaitingRecord = {
+        kind: 'moved',
+        sectionId: lookup.sectionId,
+        fromGroupId: step.fromGroupId,
+        activityAt: step.activityAt,
+      }
+
+      await writeWaitingRecord($, paths.record, record)
+    } else if (lookup.kind !== 'deleted') {
+      refused = { activityAt: step.activityAt }
+    }
+  }
+
+  const leave = async (toSectionId: string, activityAt: string | undefined, paths: WaitingPaths): Promise<void> => {
+    const sectionId = await leavingSectionId($, toSectionId)
+    const isMoved = sectionId !== undefined && (await moveSelf($, sectionId))
+
+    if (isMoved) {
+      await writeWaitingRecord($, paths.record, null)
+    } else {
+      refused = { activityAt }
+    }
+  }
+
+  const performStep = async (
+    step: WaitingStep,
+    place: OwnSidebarPlace,
+    waitingSwitch: WaitingSwitch,
+    paths: WaitingPaths,
+  ): Promise<void> => {
+    switch (step.kind) {
+      case 'enter':
+        await enter(step, waitingSwitch, paths)
+        break
+      case 'leave':
+        await leave(step.toSectionId, place.activityAt, paths)
+        break
+      case 'release':
+        await writeWaitingRecord($, paths.record, { kind: 'released', activityAt: step.activityAt })
+        break
+      case 'forget':
+        await writeWaitingRecord($, paths.record, null)
+        break
+      case 'stay':
+        break
+    }
+  }
+
+  return async (own: OwnSession, state: SessionState): Promise<void> => {
+    try {
+      const paths: WaitingPaths = {
+        record: `${home}/${WAITING_FOLDER}/${own.sessionId}.json`,
+        waitingSwitch: `${home}/${WAITING_SWITCH}`,
+      }
+      const waitingSwitch = await readWaitingSwitch($, paths.waitingSwitch)
+      const place = sidebarPlace(own)
+      const record = await readWaitingFile<WaitingRecord>($, paths.record)
+      const { isOn, sectionId } = waitingSwitch
+      const step = decideWaitingStep({ own: place, state, record, sectionId, isOn, refused })
+
+      await performStep(step, place, waitingSwitch, paths)
+      const after = step.kind === 'enter' ? await readWaitingSwitch($, paths.waitingSwitch) : waitingSwitch
+      const isRefused = refused !== undefined && refused.activityAt === place.activityAt
+      const view: WaitingView = { isOn: after.isOn, isRefused }
+
+      if (!isSameWaitingView(await read($, waiting), view)) {
+        await update($, waiting, () => view)
+      }
+    } catch {
+      // The next tick looks at this session's place again.
+    }
+  }
+}
+
+// The pane's switch, which every session's band reads on its next tick: off
+// keeps the section for turning on again; on makes or finds it anew.
+async function switchWaiting($: EngineInterface): Promise<void> {
+  try {
+    const path = `${(await $.env.get('HOME')) ?? ''}/${WAITING_SWITCH}`
+    const before = await readWaitingSwitch($, path)
+    const after: WaitingSwitch = before.isOn ? { ...before, isOn: false } : WAITING_ON
+
+    await $.fs.write(path, JSON.stringify(after))
+    await update($, waiting, view => ({ ...view, isOn: after.isOn }))
+  } catch {
+    // The button can be pressed again.
+  }
 }
 
 // A session that started another one is a main session: its model and effort
@@ -1633,7 +1900,9 @@ function isSameCounts(before: SessionCounts | null, after: SessionCounts): boole
 
 // Counts the other sessions on each tick. What it read last stays with it: a
 // file is read again, and the store's unread list too, only once it changed.
-function sessionCounter($: EngineInterface, home: string): () => Promise<void> {
+// This session is read the same way, left out of the counts, and its state
+// handed to the waiting section.
+function sessionCounter($: EngineInterface, home: string, arrange: WaitingArranger): () => Promise<void> {
   const seen = new Map<string, SessionSeen>()
   let before = new Map<string, ListedSession>()
   let storeAt = ''
@@ -1642,9 +1911,11 @@ function sessionCounter($: EngineInterface, home: string): () => Promise<void> {
   return async () => {
     try {
       const listed = await listSessions($)
+      const own = await readOwnSession($)
+      const looked = own ? [...listed, own] : listed
       const stamp = await storeStamp($, home)
       const store = stamp === storeAt ? undefined : `${home}/${APP_STORE}`
-      const request = sessionsRequest(listed, await sessionFiles($, home), before, seen, store)
+      const request = sessionsRequest(looked, await sessionFiles($, home), before, seen, store)
       const isAsked = request.store !== undefined || request.sessions.length > 0
       const output = isAsked ? await readSessions($, request) : undefined
 
@@ -1653,11 +1924,14 @@ function sessionCounter($: EngineInterface, home: string): () => Promise<void> {
         unread = output.unread === undefined ? unread : output.unread
         recordSeen(seen, request, output)
       }
-      before = new Map(listed.map(session => [session.sessionId, session]))
+      before = new Map(looked.map(session => [session.sessionId, session]))
       const counts = countSessions(listed, seen, unread)
 
       if (!isSameCounts(await read($, sessions), counts)) {
         await update($, sessions, () => counts)
+      }
+      if (own) {
+        await arrange(own, sessionState(own, seen.get(own.sessionId), unread?.includes(own.sessionId) === true))
       }
     } catch {
       // The next tick counts again.
@@ -2895,7 +3169,7 @@ export const register: Register = on => {
     await claudeShare.tick()
     $.clock.every(CLAUDE_SHARE_EVERY_MS, () => void claudeShare.tick())
 
-    const sessionCount = runOneAtATime(sessionCounter($, home))
+    const sessionCount = runOneAtATime(sessionCounter($, home, waitingArranger($, home)))
     void sessionCount.tick()
     $.clock.every(SESSIONS_EVERY_MS, () => void sessionCount.tick())
 
@@ -3641,6 +3915,7 @@ export const register: Register = on => {
     const pastWorks = await read($, workHistory)
     const pastSteps = await read($, limitHistory)
     const recentWorks = [...pastWorks].reverse().slice(0, SHOWN_HISTORY)
+    const waitingView = await read($, waiting)
     const averageText = workAverageText(pastWorks.filter(w => w.firstEstimate !== undefined))
 
     const tabButton = (key: Tab, label: string) => (
@@ -3884,6 +4159,26 @@ export const register: Register = on => {
               </Text>
             </Box>
           )}
+        </Box>
+
+        {heading('SIDEBAR')}
+        <Text size="caption" dimColor>
+          {waitingView.isOn
+            ? `답을 기다리는 세션을 사이드바 맨 위 ${WAITING_SECTION_NAME}에 모아요. 답하면 원래 자리로 돌아가요.`
+            : '꺼져 있어요. 켜면 답을 기다리는 세션을 다시 맨 위에 모아요.'}
+        </Text>
+        {waitingView.isRefused ? (
+          <Text size="caption" color="warning">
+            사이드바에서 세션 옮기기를 허락하는 설정이 없어 이 세션을 옮기지 못했어요.
+          </Text>
+        ) : null}
+        <Box marginTop={1} flexDirection="row">
+          <Button
+            key="waiting-switch"
+            plain
+            label={waitingView.isOn ? '모으기 끄기' : '모으기 켜기'}
+            onPress={() => void switchWaiting($)}
+          />
         </Box>
 
         {heading('WORK TIMES')}

@@ -13,6 +13,11 @@ contested: none of its changes is counted as this session's, and those the
 commit would leave out are returned so the caller asks instead of guessing.
 So is a change between writes that no other session's record explains,
 since it may be this session's line rewritten outside the record.
+A commit of this session's lines leaves base matching none of the recorded
+contents when another session's lines stayed out of it, so the commits
+found in the history are replayed onto the weave: a base one of them made
+is then known line by line instead of matched by text, where blank lines
+and common headings tie to the wrong session's lines.
 The record types are named apart from the earlier format's (OwnWrite,
 OwnContent), so a process that loads an older copy of a sibling module
 fails on import instead of reading the new records with the old meaning.
@@ -51,6 +56,21 @@ class RecordedWrite:
 
 
 @dataclass(frozen=True)
+class CommitPoint:
+    """A commit of the file made between the session's writes, with the file as it was when it was made.
+
+    `after_writes` counts the session's writes that ended before it, and
+    other sessions' recorded writes lead from the last of them through
+    `file_then` to the next, so what changed around it is others' work.
+    """
+
+    after_writes: int
+    file_then: str
+    base: str
+    committed: str
+
+
+@dataclass(frozen=True)
 class FileHistory:
     """A session's writes to one file, and the file now.
 
@@ -59,12 +79,16 @@ class FileHistory:
     before, or one past the last write for what changed since it. Their
     changes may be this session's own lines rewritten outside the record, by
     a project hook say, so they are asked about instead of left out.
+    `commit_points` holds the commits of the file within the history, in
+    order; one whose content is not its parent plus this session's lines of
+    then adds nothing.
     """
 
     first_before: str
     own_writes: tuple[RecordedWrite, ...]
     working_tree: str
     unexplained_steps: frozenset[int] = frozenset()
+    commit_points: tuple[CommitPoint, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -128,7 +152,8 @@ def build_own_content(base: str, history: FileHistory) -> OwnCommitContent:
     first_lines = history.first_before.splitlines(keepends=True)
     working_lines = history.working_tree.splitlines(keepends=True)
     weave, versions = _build_weave(history)
-    readings = [_link_base_lines(base_lines, weave, version) for version in _find_base_versions(base_lines, versions)]
+    base_versions = _find_base_versions(base_lines, versions)
+    readings = [_link_base_lines(base_lines, weave, version) for version in base_versions]
     renders = [_render_lines(base_lines, weave, links) for links in readings]
     lines = renders[0]
     ambiguous = next((_list_line_changes(lines, other) for other in renders[1:] if other != lines), [])
@@ -137,7 +162,8 @@ def build_own_content(base: str, history: FileHistory) -> OwnCommitContent:
         [],
     )
     hidden = next(filter(None, (_find_hidden_removals(weave, set(links.values())) for links in readings)), [])
-    unproven = _find_unproven_changes(base_lines, first_lines, lines, working_lines, weave)
+    base_record_ids = _find_base_record_ids(base_lines, base_versions[0])
+    unproven = _find_unproven_changes(base_lines, first_lines, lines, working_lines, weave, base_record_ids)
 
     return OwnCommitContent("".join(lines), tuple(entangled), (*ambiguous, *hidden, *unproven))
 
@@ -173,6 +199,7 @@ def _find_unproven_changes(
     candidate: list[str],
     working_tree: list[str],
     weave: list[_LineRecord],
+    base_record_ids: set[int] | None,
 ) -> list[ContestedLine]:
     """Changes the candidate makes that no own write made, and changes it leaves out that are not surely others'.
 
@@ -187,13 +214,13 @@ def _find_unproven_changes(
     others' additions, and base lines gone by then are others' removals.
     Both are counted by text, never by a diff that could pair the wrong
     lines, and a removal does not count for the text of a line anyone wrote
-    since, which may have been committed since and removed by anyone.
+    since, which may have been committed since and removed by anyone. When
+    base is a recorded version, `base_record_ids` holds its records, and the
+    additions are told by record instead, since base may hold own lines of
+    the same text as the others' lines.
     """
     written_since = Counter(record.text for record in weave if record.origin != LineOrigin.EARLIER)
-    still_there = Counter(
-        record.text for record in weave if record.origin == LineOrigin.EARLIER and record.deleted_by is None
-    )
-    added_earlier = still_there - Counter(base)
+    added_earlier = _count_added_earlier(weave, base, base_record_ids)
     removed_earlier = Counter(base) - Counter(first_before) - written_since
     own_added = Counter(
         record.text for record in weave if record.origin == LineOrigin.OWN and record.deleted_by is None
@@ -229,6 +256,28 @@ def _find_unproven_changes(
             or not _take_count(foreign_removed if line.kind == ChangeKind.REMOVED else foreign_added, line.text)
         ),
     ]
+
+
+def _find_base_record_ids(base: list[str], version: list[_LineRecord]) -> set[int] | None:
+    """None when base is only matched by text, since then which record a line is may be wrong."""
+    if [record.text for record in version] == base:
+        return {id(record) for record in version}
+    else:
+        return None
+
+
+def _count_added_earlier(
+    weave: list[_LineRecord],
+    base: list[str],
+    base_record_ids: set[int] | None,
+) -> Counter[str]:
+    """Lines from before the first write that are still there but not in base: others' additions from then."""
+    still_there = [record for record in weave if record.origin == LineOrigin.EARLIER and record.deleted_by is None]
+
+    if base_record_ids is not None:
+        return Counter(record.text for record in still_there if id(record) not in base_record_ids)
+    else:
+        return Counter(record.text for record in still_there) - Counter(base)
 
 
 def _list_line_changes(old: list[str], new: list[str]) -> list[ContestedLine]:
@@ -271,8 +320,10 @@ def _build_weave(history: FileHistory) -> tuple[list[_LineRecord], list[list[_Li
     weave = [_LineRecord(line, LineOrigin.EARLIER, position=index) for index, line in enumerate(first_lines)]
     versions = [list(weave)]
     current = history.first_before
+    final_step = len(history.own_writes) + 1
 
     for step, write in enumerate(history.own_writes, start=1):
+        weave, current = _apply_commit_points(weave, versions, current, history, step)
         if write.before != current:
             weave = _apply_gap(weave, write.before, -step, step in history.unexplained_steps)
             versions.append(_list_live(weave))
@@ -281,11 +332,55 @@ def _build_weave(history: FileHistory) -> tuple[list[_LineRecord], list[list[_Li
         if write.contested:
             _mark_contested(inserted, deleted)
         current = write.after
-    final_step = len(history.own_writes) + 1
+    weave, current = _apply_commit_points(weave, versions, current, history, final_step)
     if history.working_tree != current:
         weave = _apply_gap(weave, history.working_tree, final_step, final_step in history.unexplained_steps)
         versions.append(_list_live(weave))
     return weave, versions
+
+
+def _apply_commit_points(
+    weave: list[_LineRecord],
+    versions: list[list[_LineRecord]],
+    current: str,
+    history: FileHistory,
+    step: int,
+) -> tuple[list[_LineRecord], str]:
+    """Add the versions the commits before own write `step` made, each after the file as it was then.
+
+    The file then splits the gap before that write; its lines get a group
+    number of their own, below every step, so they never read as written
+    together with the gap's. Returns the weave and the content it now holds.
+    """
+    for index, point in enumerate(history.commit_points):
+        if point.after_writes == step - 1:
+            if point.file_then != current:
+                group = -(len(history.own_writes) + 2 + index)
+
+                weave = _apply_gap(weave, point.file_then, group, False)
+                versions.append(_list_live(weave))
+                current = point.file_then
+            versions.extend(_find_committed_versions(point, weave, versions))
+    return weave, current
+
+
+def _find_committed_versions(
+    point: CommitPoint,
+    weave: list[_LineRecord],
+    versions: list[list[_LineRecord]],
+) -> list[list[_LineRecord]]:
+    """The records the commit holds by each reading of its parent's content, for the readings whose every line is a
+    record and whose text is what it committed; none when it committed anything else."""
+    base_lines = point.base.splitlines(keepends=True)
+    committed_lines = point.committed.splitlines(keepends=True)
+    readings = [_link_base_lines(base_lines, weave, version) for version in _find_base_versions(base_lines, versions)]
+    renders = [_render_records(base_lines, weave, links) for links in readings]
+
+    return [
+        [record for _, record in render if record is not None]
+        for render in renders
+        if all(record is not None for _, record in render) and [text for text, _ in render] == committed_lines
+    ]
 
 
 def _apply_gap(weave: list[_LineRecord], text: str, step: int, is_unexplained: bool) -> list[_LineRecord]:
@@ -401,29 +496,38 @@ def _link_by_text(
 
 
 def _render_lines(base: list[str], weave: list[_LineRecord], links: dict[int, int]) -> list[str]:
-    """Base with this session's live changes applied in weave order, keeping base text for every line it kept.
+    return [text for text, _ in _render_records(base, weave, links)]
 
-    A base line that is no record stays, ahead of the new own lines next to it.
+
+def _render_records(
+    base: list[str],
+    weave: list[_LineRecord],
+    links: dict[int, int],
+) -> list[tuple[str, _LineRecord | None]]:
+    """Base with this session's live changes applied in weave order, each line with the record it is.
+
+    Every line base kept keeps base text; a base line that is no record
+    stays, with None, ahead of the new own lines next to it.
     """
-    lines: list[str] = []
+    rendered: list[tuple[str, _LineRecord | None]] = []
     cursor = 0
 
     for index, line in enumerate(base):
         link = links.get(index)
 
         if link is None:
-            lines.append(line)
+            rendered.append((line, None))
         else:
-            lines.extend(_list_new_own_lines(weave[cursor:link]))
+            rendered.extend((record.text, record) for record in _list_new_own_records(weave[cursor:link]))
             if weave[link].deleted_by != LineOrigin.OWN:
-                lines.append(line)
+                rendered.append((line, weave[link]))
             cursor = link + 1
-    lines.extend(_list_new_own_lines(weave[cursor:]))
-    return lines
+    rendered.extend((record.text, record) for record in _list_new_own_records(weave[cursor:]))
+    return rendered
 
 
-def _list_new_own_lines(records: list[_LineRecord]) -> list[str]:
-    return [record.text for record in records if _is_live_own(record)]
+def _list_new_own_records(records: list[_LineRecord]) -> list[_LineRecord]:
+    return [record for record in records if _is_live_own(record)]
 
 
 def _find_entangled(weave: list[_LineRecord], committed: set[int]) -> list[str]:

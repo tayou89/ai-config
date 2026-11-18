@@ -566,12 +566,18 @@ def is_finished(entry: dict[str, Any]) -> bool:
 
 
 def is_waiting_for_checks(pull_request: PullRequest, required: Sequence[str]) -> bool:
-    """An open pull request whose required checks have not all started and finished on its head."""
+    """An open pull request without conflicts whose required checks have not all started and finished on its head.
+
+    GitHub starts no pull_request workflow on a head that conflicts with its base, so a check
+    that has not started there never will; the merge step then reports the conflict.
+    """
     entries = [entry for entry in pull_request.checks if read_check_name(entry) in required]
     started = {read_check_name(entry) for entry in entries}
 
-    return pull_request.state == OPEN_STATE and (
-        not set(required) <= started or not all(is_finished(entry) for entry in entries)
+    return (
+        pull_request.state == OPEN_STATE
+        and pull_request.mergeable != CONFLICTING
+        and (not set(required) <= started or not all(is_finished(entry) for entry in entries))
     )
 
 
