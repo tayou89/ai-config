@@ -112,6 +112,7 @@ RUNTIME_SCRIPTS = (
     "recommendation-change-hook.py",
     "report-check-hook.py",
     "report_check.py",
+    "motion_values.py",
     "shell-guard-hook.py",
     "shell_command.py",
     "secret_files.py",
