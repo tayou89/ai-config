@@ -3,7 +3,7 @@ name: code-plan
 description: Prepare evidence-based plans for substantial features, structural changes, or complex fixes; skip trivial edits and already settled planning.
 ---
 
-<!-- Adapted from skills/code-plan/SKILL.md at 1795b7fa82b5663ce5c674d9202a341c47ff022f -->
+<!-- Adapted from skills/code-plan/SKILL.md at 587187506f45349f9be1b14d1193ebd99f586abe -->
 
 # Plan Workflow
 
@@ -56,6 +56,7 @@ Before drafting any plan, perform all of the following. Skipping any is the root
 3. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Compare them on the shared decision axes, naming the lifetime assumptions, failure conditions, and evidence that tell them apart. Present the best, not the first found.
 4. **Boilerplate detection**: Where `code-style` "Boilerplate Belongs on the Owner" calls for it, move the guard/query/narrow pattern into the owner.
 5. **Cross-cutting policy fields vs metadata**: Behavior-controlling flags (cancel policy, retry policy, timeout policy) belong as top-level fields on the entity, at the same level as other policy fields, not crammed into `metadata`/generic data containers. `metadata` is for identifiers and payload, not for policy.
+6. **Shared resources**: For a quota, port, lock, or other resource that several sessions or processes use at once, name its single owner and how concurrent users reserve and release it, and check the rules that already gate that resource for conflicts, since a read-only check cannot stop two users from taking the same share (user decision, 2026-11-17).
 
 ## 4b. Plan Revision Minimization
 

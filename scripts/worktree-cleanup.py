@@ -135,6 +135,10 @@ def read_cleanup_policy(original: Path) -> WorkflowPolicy:
         raise PolicyError(
             f"{original} records no worktree workflow, so this tool cannot tell how its work is integrated"
         )
+    elif not policy.mode.is_worktree_mode:
+        raise PolicyError(
+            f"{original} records the {policy.mode.value} workflow, which gives tasks no worktrees to clean up"
+        )
     else:
         return policy
 

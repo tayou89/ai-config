@@ -43,6 +43,10 @@ When a plan adopts a new language, framework, or external service, or enters a s
 
 When a plan gives an application a production, staging, or live mode, select that mode only on the command line that starts it: a mode or environment option (`--mode live`, `--env production`) or an environment variable set on the command itself (`APP_MODE=live <command>`), with the safe mode as the default. Never let a config-file or `.env` value alone turn it on, and do not use a separate confirmation flag as the switch. Command guards (the shell guard hook, which the production mode principle in `work-principles` relies on) see only the command line and recognize mode words such as `production`, `staging`, and `live` in mode and environment options and variables; tested 2026-11-09, the guard asked before `--mode live` and `<NAME>_MODE=live` but let `--confirm-live` and a config-file `mode = "live"` run without asking.
 
+## 3d. Codex Bundles
+
+When an implementation step fits `agent-usage` section 14, check its budget while planning and, when the verdict is `delegate`, mark the step for Codex with its model, estimated share, and the files it may change; approving the plan approves that run (user decision, 2026-11-17).
+
 ## 4. Pattern Alignment Check
 
 For structural decisions (new file layout, where a new type lives, module split, naming), grep 2-3 analogous cases in the same codebase. Match the dominant local pattern, or justify the deviation in the plan. Skill rules don't override local conventions. If no precedent exists, flag it.
@@ -54,6 +58,7 @@ Before drafting any plan, perform all of the following. Skipping any is the root
 1. **Owner and duplication scan**: For every piece of state, config, or flag the plan touches, name the owner class/module, and search the codebase for the guard/query/narrow patterns (NO_OPERATION guards, type narrows, optional chains) the plan would introduce. Where `code-style` "Boilerplate Belongs on the Owner" calls for it, the plan adds a typed API on the owner (e.g. `getX()` / `registerXHandler(callback)`) instead of the client code.
 2. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Compare them on the shared decision axes, naming the lifetime assumptions, failure conditions, and evidence that tell them apart. Present the best, not the first found.
 3. **Cross-cutting policy fields vs metadata**: Behavior-controlling flags (cancel policy, retry policy, timeout policy) belong as top-level fields on the entity, at the same level as other policy fields, not crammed into `metadata`/generic data containers. `metadata` is for identifiers and payload, not for policy.
+4. **Shared resources**: For a quota, port, lock, or other resource that several sessions or processes use at once, name its single owner and how concurrent users reserve and release it, and check the rules that already gate that resource for conflicts, since a read-only check cannot stop two users from taking the same share (user decision, 2026-11-17).
 
 ## 4b. Plan Revision Minimization
 

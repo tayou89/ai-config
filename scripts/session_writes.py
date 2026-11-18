@@ -27,8 +27,16 @@ counting as running once it has ended. File contents are kept as bytes end to
 end (decoded with surrogateescape), so line endings and undecodable bytes
 survive the round trip.
 
-Usage (list what --own-lines would leave out):
+A session can take over files another session handed it with their changes
+uncommitted (`adopt`): that session's recorded writes to those files, up to
+the takeover, then count as this session's own, and so, in turn, do the
+writes it took over itself. Lines of any other session stay theirs, and so
+do the handing session's writes after the takeover.
+
+Usage (list what --own-lines would leave out, or take over another session's
+recorded writes to files it handed over):
     session_writes.py report <file1> [<file2> ...]
+    session_writes.py adopt --from <session> <file1> [<file2> ...]
 """
 
 from __future__ import annotations
@@ -41,13 +49,14 @@ import re
 import subprocess
 import sys
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
 from own_lines import ContestedLine, FileHistory, RecordedWrite, build_own_content, list_foreign_lines
+from session_lineage import find_session_record, read_cli_session_id
 from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
 
 _SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
@@ -85,6 +94,15 @@ _BLOBS_FIELD = "blobs"
 _TIME_FIELD = "time"
 _APPROVALS_FILE = "approved-includes.jsonl"
 _OFFERS_FILE = "offered-includes.jsonl"
+_ADOPTIONS_FILE = "adopted.jsonl"
+_PATH_FIELD = "path"
+_SENDER_FIELD = "from"
+_ADOPT_COMMAND = "adopt"
+_FROM_OPTION = "--from"
+_EXIT_ADOPT_FAILED = 1
+INDEX_VARIABLE = "GIT_INDEX_FILE"
+_LITERAL_PATHSPECS_VARIABLE = "GIT_LITERAL_PATHSPECS"
+_INDEX_ENTRY_SEPARATOR = "\t"
 _APPROVAL_LIFETIME_SECONDS = 30 * 60
 _EDITING_TOOLS = frozenset({"Edit", "Write", "NotebookEdit"})
 _KIND_FIELD = "kind"
@@ -344,6 +362,16 @@ class _IncludeApproval:
     time: float
 
 
+@dataclass(frozen=True)
+class _Adoption:
+    """A file whose writes `sender` recorded up to `time` this session took over."""
+
+    root: str
+    path: str
+    sender: str
+    time: float
+
+
 _EVENT_FIELDS = frozenset(event_field.name for event_field in fields(WriteEvent))
 _UNKNOWN_FIELDS = frozenset(unknown_field.name for unknown_field in fields(UnknownWrite))
 
@@ -386,19 +414,87 @@ def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[s
     """Repositories a command may write.
 
     A command made only of calls that leave working trees as they were, such
-    as reading files, the commit wrapper's git index work, a push that can
-    run no program here, and GitHub CLI sign-in and viewing commands, writes
-    none of them, except a repository it commits in whose commit hooks may
-    change files. Like Jujutsu's --ignore-working-copy, such a command takes no
-    snapshot, so another session's write while it ran is not read as its
-    own, and it does not count as running for other sessions.
+    as reading files, the commit wrapper, a push that can run no program
+    here, and GitHub CLI sign-in and viewing commands, writes none of them.
+    Like Jujutsu's --ignore-working-copy, such a command takes no snapshot,
+    so another session's write while it ran is not read as its own, and it
+    does not count as running for other sessions, even while it waits for
+    the shell guard's dialog. Commit hooks the wrapper runs may change files,
+    so the wrapper records their run itself (start_call_record).
     """
     calls = _expand_known_command(command, cwd)
 
     if calls is not None and all(map(_is_tree_keeping, calls)):
-        return sorted({root for root in map(_find_hooked_commit_root, calls) if root})
+        return []
     else:
         return _find_possible_roots(session_id, command, cwd)
+
+
+def has_commit_hooks(root: str) -> bool:
+    """Whether git commit may run a hook in the repository that changes files."""
+    return _has_hooks(root, _COMMIT_HOOK_NAMES)
+
+
+def take_snapshots(scopes: Sequence[SnapshotScope]) -> tuple[list[RepositorySnapshot], list[SnapshotScope]]:
+    """The snapshots that could be taken, and the scopes of those that could not."""
+    taken = [(scope, _try_snapshot(scope)) for scope in scopes]
+    snapshots = [snapshot for _, snapshot in taken if snapshot is not None]
+    unknown = [scope for scope, snapshot in taken if snapshot is None]
+
+    return snapshots, unknown
+
+
+def start_call_record(session_id: str, call_id: str, scopes: Sequence[SnapshotScope]) -> None:
+    """Snapshot what a call may write and keep it pending, so other sessions count the call as running until it ends."""
+    start = time.time()
+    snapshots, unknown = take_snapshots(scopes)
+
+    save_pending(session_id, call_id, PendingCall(start, snapshots, unknown))
+
+
+def finish_call_record(
+    session_id: str,
+    call_id: str,
+    tool_name: str,
+    judge: Callable[[str, str | None, str | None], bool | None] | None = None,
+) -> None:
+    """Record what changed since a call's pending snapshots and drop its pending file, so the call is never in neither.
+
+    `judge` tells, from the root and a file's before and after contents,
+    whether the change is exactly the tool's own reported one; without it
+    the change is recorded as a command's. A snapshot that cannot be taken
+    turns what it covers into an unknown write over the call's time.
+    """
+    pending = read_pending(session_id, call_id)
+
+    if pending:
+        pairs = [(before, _try_snapshot(before.get_scope())) for before in pending.snapshots]
+        end = time.time()
+        changes = [
+            (before.root, change)
+            for before, after in pairs
+            if after is not None
+            for change in list_changes(before, after)
+        ]
+        events = [
+            WriteEvent(
+                root,
+                path,
+                old,
+                new,
+                pending.start,
+                end,
+                tool_name,
+                judge(root, old, new) if judge is not None else None,
+                RECORD_FORMAT,
+            )
+            for root, (path, old, new) in changes
+        ]
+        unknown = [*pending.unknown, *(before.get_scope() for before, after in pairs if after is None)]
+        unknown_writes = [UnknownWrite(scope.root, scope.path, pending.start, end, tool_name) for scope in unknown]
+
+        append_events(session_id, [*events, *unknown_writes])
+        remove_pending(session_id, call_id)
 
 
 def _find_possible_roots(session_id: str, command: str, cwd: str | None) -> list[str]:
@@ -421,6 +517,15 @@ def take_snapshot(scope: SnapshotScope) -> RepositorySnapshot:
         return _take_repository_snapshot(scope.root)
     else:
         return _take_file_snapshot(scope.root, scope.path)
+
+
+def _try_snapshot(scope: SnapshotScope) -> RepositorySnapshot | None:
+    try:
+        snapshot = take_snapshot(scope)
+    except SessionWritesError:
+        return None
+    else:
+        return snapshot
 
 
 def store_text(root: str, text: str) -> str:
@@ -511,11 +616,12 @@ def load_file_history(
     read back.
     """
     events = _read_file_events(root, path)
-    own = _list_own_writes(session_id, events)
+    owners = _find_owners(session_id, root, path)
+    own = _list_own_writes(owners, events)
     current_text = working_text if working_text is not None else _read_working_text(root, path)
 
     if own:
-        foreign = _list_foreign_writes(session_id, root, path, events)
+        foreign = _list_foreign_writes(session_id, owners, root, path, events)
         own_writes = tuple(_make_recorded_write(event, foreign) for event in own)
         unexplained = _list_unexplained_steps(root, own, foreign, current_text)
 
@@ -534,8 +640,9 @@ def find_contest_cause(session_id: str, root: str, path: str) -> ContestCause:
     file. Raises SessionWritesError when a record cannot be read back.
     """
     events = _read_file_events(root, path)
-    unproven = [event for event in _list_own_writes(session_id, events) if event.exact is not True]
-    foreign = _list_foreign_writes(session_id, root, path, events)
+    owners = _find_owners(session_id, root, path)
+    unproven = [event for event in _list_own_writes(owners, events) if event.exact is not True]
+    foreign = _list_foreign_writes(session_id, owners, root, path, events)
     overlapping = [other for other in foreign if any(_is_overlapping(event, other) for event in unproven)]
 
     if any(_is_editing_write(other) for other in overlapping):
@@ -557,8 +664,9 @@ def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | No
     """
     try:
         events = _read_file_events(root, path)
-        own = _list_own_writes(session_id, events)
-        foreign = _list_foreign_writes(session_id, root, path, events)
+        owners = _find_owners(session_id, root, path)
+        own = _list_own_writes(owners, events)
+        foreign = _list_foreign_writes(session_id, owners, root, path, events)
         chain = [base_blob, *(blob for event in own for blob in (event.before, event.after))]
         working_tree = _store_files(root, [path])[path]
         is_unbroken = all(chain[index] == chain[index + 1] for index in range(0, len(chain) - 1, 2))
@@ -573,18 +681,24 @@ def has_other_session_writes(session_id: str, root: str, since: float) -> bool:
     """Whether another session wrote in the repository at or after a time, or has a call there that may still run.
 
     The commit wrapper asks it about a linked worktree from when the worktree
-    was added. A record or pending file that cannot be read counts as a
-    write, and so does a time before the records' lifetime, whose records
-    may already be gone, so a doubtful case keeps the own-lines check.
+    was added. Writes this session took over count as its own. A record or
+    pending file that cannot be read counts as a write, and so does a time
+    before the records' lifetime, whose records may already be gone, so a
+    doubtful case keeps the own-lines check.
     """
     try:
         sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
-        events = [event for session in sessions if session != session_id for event in _read_events(session)]
+        events = [(session, event) for session in sessions if session != session_id for event in _read_events(session)]
+        adopted = {(adoption.root, adoption.path) for adoption in _read_adoptions(session_id)}
+        owners = {key: _find_owners(session_id, *key) for key in adopted}
     except SessionWritesError:
         return True
     else:
         is_before_records = since < time.time() - _RECORD_LIFETIME_SECONDS
-        written = any(event.root == root and event.end >= since for event in events)
+        written = any(
+            event.root == root and event.end >= since and not _is_adopted_write(owners, session, event)
+            for session, event in events
+        )
         running = any(_is_pending_in(pending, root, since) for pending in _list_other_pendings(session_id))
 
         return is_before_records or written or running
@@ -630,41 +744,101 @@ def find_repository_paths(cwd: str, paths: Sequence[str]) -> tuple[str, list[str
         return None
 
 
-def add_include_offer(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
+def add_include_offer(
+    session_id: str,
+    root: str,
+    paths: Sequence[str],
+    blobs: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
     """Keep the files' contents as the shell guard's dialog is about to show them, and return them.
 
     The guard counts the lines it lists from these contents, and the commit
     wrapper commits exactly them, so what the user approves is what lands.
-    A session without a record folder keeps nothing, and its wrapper then
-    takes the files as they are when it starts. Raises SessionWritesError
-    when a file cannot be stored.
+    They are the working tree's, or `blobs` when the call commits a prepared
+    index (--no-stage), whose contents it commits instead. A session without
+    a record folder keeps nothing, and its wrapper then takes the files as
+    they are when it starts. Raises SessionWritesError when a file cannot be
+    stored.
     """
-    blobs = _store_files(root, paths)
+    offered = blobs if blobs is not None else _store_files(root, paths)
 
-    _append_include_entry(session_id, _OFFERS_FILE, root, blobs)
-    return blobs
+    _append_include_entry(session_id, _OFFERS_FILE, root, offered)
+    return offered
 
 
-def approve_include(session_id: str, root: str, paths: Sequence[str]) -> dict[str, str | None]:
+def approve_include(
+    session_id: str,
+    root: str,
+    paths: Sequence[str],
+    blobs: dict[str, str | None] | None = None,
+) -> dict[str, str | None]:
     """Keep that the user let this session commit these files' unrecorded lines, and return the contents approved.
 
     The commit wrapper calls it as it starts with --include-unrecorded: the
     shell guard asks before every such call, and a call the user declines
     never runs, so the wrapper running is the approval of what the newest
-    dialog for these files showed. A file that differs from it raises
-    IncludeChangedError, since the user has not seen it. Without such a
-    dialog, the files as they are now. An approval that already covers the
-    contents keeps its time, so a chain of retries does not stretch it.
+    dialog for these files showed. The contents it commits are the working
+    tree's, or `blobs` from a prepared index. One that differs from the
+    dialog raises IncludeChangedError, since the user has not seen it.
+    Without such a dialog, the contents as they are now. An approval that
+    already covers the contents keeps its time, so a chain of retries does
+    not stretch it.
     """
-    blobs = _store_files(root, paths)
+    committed = blobs if blobs is not None else _store_files(root, paths)
     offer = _find_latest_include_offer(session_id, root, paths)
-    changed = [path for path in paths if offer is not None and offer.blobs[path] != blobs[path]]
+    changed = [path for path in paths if offer is not None and offer.blobs[path] != committed[path]]
 
     if changed:
         raise IncludeChangedError(changed)
     else:
-        _keep_include_approval(session_id, root, blobs)
-        return blobs
+        _keep_include_approval(session_id, root, committed)
+        return committed
+
+
+def read_index_blobs(root: str, paths: Sequence[str], index_file: str | None) -> dict[str, str | None]:
+    """The contents an index holds for the files, None for a file it does not hold, as a --no-stage commit takes them.
+
+    `index_file` is the index the commit uses (GIT_INDEX_FILE), None for the
+    repository's own. Raises SessionWritesError when git cannot read it.
+    """
+    environment = {**os.environ, _LITERAL_PATHSPECS_VARIABLE: "1"}
+
+    if index_file is not None:
+        environment[INDEX_VARIABLE] = index_file
+    else:
+        environment.pop(INDEX_VARIABLE, None)
+    output = _run_git(root, "ls-files", "-s", "-z", "--", *paths, environment=environment)
+    entries = dict(_parse_index_entry(entry) for entry in decode_content(output).split("\0") if entry)
+
+    return {path: entries.get(path) for path in paths}
+
+
+def add_adoptions(session_id: str, root: str, paths: Sequence[str], sender: str) -> dict[str, int]:
+    """Keep that this session takes over the sender's recorded writes to the files up to now, and return their counts.
+
+    It takes all of them or none: every file is checked before any is kept.
+    Raises SessionWritesError when this session has no record folder, the
+    sender is this session, the sender recorded no write to a file, or the
+    takeover cannot be kept.
+    """
+    events = _read_events(sender)
+    counts = {path: _count_writes(events, root, path) for path in paths}
+    directory = get_record_directory() / session_id
+    now = time.time()
+    entries = [{_ROOT_FIELD: root, _PATH_FIELD: path, _SENDER_FIELD: sender, _TIME_FIELD: now} for path in paths]
+
+    for path, count in counts.items():
+        _check_adoption(session_id, sender, path, count > 0, directory)
+    _append_adoptions(directory, entries)
+    return counts
+
+
+def resolve_session_id(session: str) -> str:
+    """The Claude Code session id the write records go by, for an app session id (`local_…`) or that id itself."""
+    record = find_session_record(session)
+    cli_session_id = read_cli_session_id(record) if record is not None else None
+
+    return cli_session_id or session
 
 
 def is_include_approved(session_id: str, root: str, blobs: dict[str, str | None]) -> bool:
@@ -702,6 +876,31 @@ def _print_report(paths: Sequence[str]) -> int:
 
         print(message, file=sys.stderr)
         return 1
+
+
+def _adopt_files(sender_text: str, paths: Sequence[str]) -> int:
+    """Take over the files another session handed this one, each with that session's recorded writes up to now."""
+    session_id = read_session_id()
+    sender = resolve_session_id(sender_text)
+    scope = find_repository_paths(os.getcwd(), paths) if session_id else None
+
+    if session_id and scope is not None:
+        return _keep_adoptions(session_id, sender, *scope)
+    else:
+        print(f"FAIL: run this in a Claude session, in the repository of {' '.join(paths)}.", file=sys.stderr)
+        return _EXIT_ADOPT_FAILED
+
+
+def _keep_adoptions(session_id: str, sender: str, root: str, paths: Sequence[str]) -> int:
+    try:
+        counts = add_adoptions(session_id, root, paths, sender)
+    except SessionWritesError as error:
+        print(f"FAIL: {error}. Nothing was taken over.", file=sys.stderr)
+        return _EXIT_ADOPT_FAILED
+    else:
+        for path, count in counts.items():
+            print(f"{path}: took over {count} recorded writes of session {sender}; their lines now count as yours")
+        return 0
 
 
 def _describe_file(session_id: str, absolute_path: str) -> str:
@@ -956,26 +1155,129 @@ def _read_file_events(root: str, path: str) -> list[tuple[str, WriteEvent | Unkn
     ]
 
 
-def _list_own_writes(session_id: str, events: Sequence[tuple[str, WriteEvent | UnknownWrite]]) -> list[WriteEvent]:
-    """This session's writes to the file, aligned.
+def _list_own_writes(
+    owners: dict[str, float],
+    events: Sequence[tuple[str, WriteEvent | UnknownWrite]],
+) -> list[WriteEvent]:
+    """This session's writes to the file, with those it took over, aligned.
 
     An unknown write has no content to chain, so the chain shows a gap there.
     """
     return _align_parallel_writes(
-        event for session, event in events if session == session_id and isinstance(event, WriteEvent)
+        event for session, event in events if isinstance(event, WriteEvent) and _is_owned(owners, session, event)
     )
 
 
 def _list_foreign_writes(
     session_id: str,
+    owners: dict[str, float],
     root: str,
     path: str,
     events: Sequence[tuple[str, WriteEvent | UnknownWrite]],
 ) -> list[WriteEvent | UnknownWrite]:
-    """Other sessions' writes to the file, including their unknown writes and calls still running over it."""
-    recorded = [event for session, event in events if session != session_id]
+    """Other sessions' writes to the file, including their unknown writes and calls still running over it.
+
+    A session this one took the file over from is another session again for
+    what it wrote after the takeover, and for its calls still running.
+    """
+    recorded = [event for session, event in events if not _is_owned(owners, session, event)]
 
     return [*recorded, *_read_running_calls(session_id, root, path)]
+
+
+def _find_owners(session_id: str, root: str, path: str) -> dict[str, float]:
+    """The sessions whose writes to the file count as this session's, each with the time its writes count until.
+
+    This session counts without end. A session it took the file over from
+    counts up to the takeover, and so, in turn, does each session that one
+    took the file over from, up to the earlier of the two takeovers. Raises
+    SessionWritesError when an adoption record cannot be read.
+    """
+    owners = {session_id: math.inf}
+    frontier = [(session_id, math.inf)]
+
+    while frontier:
+        session, limit = frontier.pop()
+
+        for adoption in _read_adoptions(session):
+            cutoff = min(limit, adoption.time)
+            is_later_takeover = owners.get(adoption.sender, -math.inf) < cutoff
+
+            if adoption.root == root and adoption.path == path and is_later_takeover:
+                owners[adoption.sender] = cutoff
+                frontier.append((adoption.sender, cutoff))
+    return owners
+
+
+def _is_owned(owners: dict[str, float], session: str, event: WriteEvent | UnknownWrite) -> bool:
+    """Whether an event is this session's or one it took over: one an owner recorded that ended by its cutoff."""
+    return session in owners and event.end <= owners[session]
+
+
+def _is_adopted_write(
+    owners: dict[tuple[str, str], dict[str, float]],
+    session: str,
+    event: WriteEvent | UnknownWrite,
+) -> bool:
+    """Whether another session's write to a file is one this session took over, by the owners of each file it took."""
+    file_owners = owners.get((event.root, event.path)) if event.path is not None else None
+
+    return file_owners is not None and _is_owned(file_owners, session, event)
+
+
+def _read_adoptions(session_id: str) -> list[_Adoption]:
+    """The files the session took over, oldest first, without lines that do not read as one."""
+    record = get_record_directory() / session_id / _ADOPTIONS_FILE
+    entries = [_parse_adoption(line) for line in _read_record_text(record).split(_RECORD_LINE_END) if line.strip()]
+
+    return [entry for entry in entries if entry is not None]
+
+
+def _parse_adoption(line: str) -> _Adoption | None:
+    try:
+        entry = json.loads(line)
+        adoption = _Adoption(
+            str(entry[_ROOT_FIELD]),
+            str(entry[_PATH_FIELD]),
+            str(entry[_SENDER_FIELD]),
+            float(entry[_TIME_FIELD]),
+        )
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return None
+    else:
+        return adoption
+
+
+def _check_adoption(session_id: str, sender: str, path: str, has_writes: bool, directory: Path) -> None:
+    """Refuse a takeover that would change nothing or could not be kept."""
+    if sender == session_id:
+        raise SessionWritesError(f"{sender} is this session, so there is nothing to take over")
+    elif not has_writes:
+        raise SessionWritesError(f"session {sender} recorded no write to {path}, so there is nothing to take over")
+    elif not directory.is_dir():
+        raise SessionWritesError("this session has no write record, so a takeover cannot be kept")
+
+
+def _count_writes(events: Sequence[WriteEvent | UnknownWrite], root: str, path: str) -> int:
+    return sum(1 for event in events if isinstance(event, WriteEvent) and event.is_covering(root, path))
+
+
+def _append_adoptions(directory: Path, entries: Sequence[dict[str, object]]) -> None:
+    """Append every takeover in one write; raises SessionWritesError when the file cannot be written."""
+    text = "".join(json.dumps(entry, ensure_ascii=False) + _RECORD_LINE_END for entry in entries)
+
+    try:
+        with (directory / _ADOPTIONS_FILE).open("a", encoding=_TEXT_ENCODING) as file:
+            file.write(text)
+    except OSError as error:
+        raise SessionWritesError(f"{_ADOPTIONS_FILE} cannot be written ({error})") from error
+
+
+def _parse_index_entry(entry: str) -> tuple[str, str]:
+    """A path and its content from one `git ls-files -s -z` entry: `<mode> <blob> <stage>\\t<path>`."""
+    fields_text, _, path = entry.partition(_INDEX_ENTRY_SEPARATOR)
+
+    return path, fields_text.split()[1]
 
 
 def _read_running_calls(session_id: str, root: str, path: str) -> list[UnknownWrite]:
@@ -1314,7 +1616,7 @@ def _is_tree_keeping_program(call: CommandCall) -> bool:
     elif script == _COMMIT_WRAPPER_NAME:
         return cwd is not None
     elif script == _SESSION_WRITES_NAME:
-        return script_arguments[:1] == [_REPORT_COMMAND]
+        return script_arguments[:1] in ([_REPORT_COMMAND], [_ADOPT_COMMAND])
     else:
         return os.sep not in argv[0] and argv[0] in _TREE_KEEPING_PROGRAMS
 
@@ -1499,14 +1801,6 @@ def _read_installed_script(argv: list[str], cwd: str | None) -> tuple[str, list[
         return "", arguments
 
 
-def _find_hooked_commit_root(call: CommandCall) -> str | None:
-    """The repository a commit-wrapper call commits in, when git commit runs hooks there that may change files."""
-    is_commit = bool(call.argv) and _read_installed_script(call.argv, call.cwd)[0] == _COMMIT_WRAPPER_NAME
-    root = find_repository_root(call.cwd) if is_commit and call.cwd else None
-
-    return root if root and _has_hooks(root, _COMMIT_HOOK_NAMES) else None
-
-
 def _has_hooks(root: str, names: Sequence[str]) -> bool:
     """Whether git may run one of these hooks in the repository; a hooks folder git cannot name counts as having one."""
     output = _try_git(root, "rev-parse", "--git-path", _HOOKS_DIRECTORY_NAME)
@@ -1587,9 +1881,14 @@ def _is_text(content: bytes) -> bool:
         return b"\0" not in content
 
 
-def _run_git(directory: str, *arguments: str, input_bytes: bytes | None = None) -> bytes:
+def _run_git(
+    directory: str,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    environment: dict[str, str] | None = None,
+) -> bytes:
     """Run git and return its output, raising SessionWritesError when it fails or hangs."""
-    output = _try_git(directory, *arguments, input_bytes=input_bytes)
+    output = _try_git(directory, *arguments, input_bytes=input_bytes, environment=environment)
 
     if output is not None:
         return output
@@ -1597,14 +1896,23 @@ def _run_git(directory: str, *arguments: str, input_bytes: bytes | None = None) 
         raise SessionWritesError(f"git {' '.join(arguments[:2])} failed in {directory}")
 
 
-def _try_git(directory: str, *arguments: str, input_bytes: bytes | None = None) -> bytes | None:
-    """Run git and return its output, or None when it fails, for queries whose failure is an answer."""
+def _try_git(
+    directory: str,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    environment: dict[str, str] | None = None,
+) -> bytes | None:
+    """Run git and return its output, or None when it fails, for queries whose failure is an answer.
+
+    `environment` replaces the inherited one when given, such as to pick an index.
+    """
     command = ["git", "-C", directory, *arguments]
 
     try:
         result = subprocess.run(
             command,
             input=input_bytes,
+            env=environment,
             capture_output=True,
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
@@ -1618,6 +1926,8 @@ def _try_git(directory: str, *arguments: str, input_bytes: bytes | None = None) 
 if __name__ == "__main__":
     if sys.argv[1:2] == [_REPORT_COMMAND] and sys.argv[2:]:
         sys.exit(_print_report(sys.argv[2:]))
+    elif sys.argv[1:3] == [_ADOPT_COMMAND, _FROM_OPTION] and sys.argv[4:]:
+        sys.exit(_adopt_files(sys.argv[3], sys.argv[4:]))
     else:
         print(__doc__.split("Usage", 1)[1].strip(), file=sys.stderr)
         sys.exit(_EXIT_USAGE)

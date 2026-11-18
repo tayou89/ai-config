@@ -30,6 +30,8 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
+from workflow_world import record_direct_workflow
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
@@ -438,6 +440,9 @@ class GuardFixture:
             self.create_push_repository(self.locations[name])
         self.run_git(self.locations["matching"], "config", "push.default", "matching")
         self.run_git(self.locations["guarded"], "config", "shellGuard.askBeforePush", "true")
+        for name, location in self.locations.items():
+            if name != "workflow":
+                record_direct_workflow(location)
         self.create_push_repository(self.locations["workflow"])
         (self.locations["workflow"] / ".agent-workflow.json").write_text(WORKFLOW_POLICY_TEXT)
         self.run_git(self.locations["detached"], "add", "a.txt")
@@ -595,6 +600,7 @@ class WrapperHeadFixture:
         self.git_config.write_text("[user]\n\tname = Wrapper Test\n\temail = wrapper@example.com\n")
         self.repository.mkdir()
         self.run_git("init", "-q")
+        record_direct_workflow(self.repository)
         for path in SEED_FILES:
             (self.repository / path).write_text(f"{path}\n")
         self.run_git("add", *SEED_FILES)
@@ -1910,6 +1916,7 @@ class SessionWritesFixture:
         self.git_config.write_text("[user]\n\tname = Record Test\n\temail = record@example.com\n")
         self.repository.mkdir()
         self.run_git("init", "-q")
+        record_direct_workflow(self.repository)
         (self.repository / LOG_FILE).write_text(LOG_BASE)
         self.run_git("add", LOG_FILE)
         self.run_git("commit", "-q", "-m", "Chore: seed")
@@ -2113,6 +2120,7 @@ class SessionWritesFixture:
         worktree = self.root / name
 
         self.run_git("worktree", "add", "-q", "-b", name, str(worktree))
+        record_direct_workflow(worktree)
         return worktree
 
     def run_own_lines_commit(
@@ -2233,6 +2241,7 @@ class SessionWritesFixture:
             subprocess.run(
                 ["git", *arguments], env=self.environment(None), cwd=repository, capture_output=True, check=True
             )
+        record_direct_workflow(repository)
         return repository
 
 
@@ -3108,7 +3117,7 @@ class CommandScopeTest(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_commit_in_a_repository_with_commit_hooks_still_covers_it(self) -> None:
+    def test_commit_waiting_for_approval_with_commit_hooks_holds_up_no_one(self) -> None:
         hook = self.fixture.repository / ".git" / "hooks" / "pre-commit"
         command = {"command": self.make_commit_command()}
 
@@ -3118,7 +3127,7 @@ class CommandScopeTest(unittest.TestCase):
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
 
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_call_stopped_before_it_ran_holds_up_no_one_after_its_result(self) -> None:
         self.check_stopped_call_holds_up_no_one("")
