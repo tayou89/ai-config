@@ -20,6 +20,8 @@ Follow the workflow the repository records in `.agent-workflow.json`, which name
 
 Where the repository records no workflow, the wrapper commits nothing (exit 11): ask the user which mode the repository uses, record it in `.agent-workflow.json` in the same task, and commit again (user decision, 2026-11-17). In a direct repository whose pushes start deploying, set `git config shellGuard.askBeforePush true` in the checkout and say so in the project's rules.
 
+Switch a repository to the pull-request mode through a pull request of its own: until that pull request lands, the base still records the old mode, so `pr-merge.py` refuses it and the shell guard does not know the repository as guarded. Open it, wait for its required checks, and merge it with `gh pr merge <number> --squash --match-head-commit <head>`. The shell guard asks once, and that answer is the user's approval to turn the gate on, so just before running it tell the user in plain words that this one switch changes how the base branch is protected, so one approval question will appear and approving it is all they need to do. Landing the switch as a direct commit instead skips the checks and still asks, when the base branch is pushed (checked 2026-11-18).
+
 In the first two modes every writing task owns one worktree and one branch named `<prefix>/<topic>`. A session another session starts gets `use_worktree: true`; a session opened in the original checkout calls `EnterWorktree` before its first edit. Check that the worktree starts from the current `origin/<base>` and that no other task uses it. The original checkout stays read-only, and a hook refuses edits and Git commands that change it, except files Git ignores such as `claude-plans/`. Update a pushed task branch by merging the base into it, not by rebasing. Separate worktrees may change copies of the same file; agree overlapping behavior changes with the other task before integrating.
 
 Name a local tracking branch exactly as its remote branch (`git checkout -b feature/foo origin/feature/foo`), never shortened or prefix-stripped, unless the user asks otherwise, so pushes and pull requests stay unambiguous.
@@ -39,7 +41,7 @@ git diff --stat
 - **Build artifact consistency**: if `.ts` changed with `.js`/`.js.map`, verify build output matches source
 - **Build side effects**: check for unrelated file changes after `tsc` (LF/CRLF diffs etc). Restore unrelated changes with `git restore`. Exception: `tsbuildinfo` is always meaningful during TS migration.
 
-Report: "Code review done — no issues" if clean. If issues found, report specifically and confirm with user. Flag files that should be excluded.
+Report: "Code review done — no issues" if clean. If issues found, fix those within the task, report each specifically, and ask the user only as section 5 says (user decision, 2026-11-18). Flag files that should be excluded.
 
 ## 3a. Release Commit Bundling
 
@@ -70,7 +72,7 @@ Check on your own, in this order, and fix what fails before running the wrapper:
 2. **Secrets:** no `.env`, keys, or tokens. The wrapper refuses credential files and live-looking tokens on added lines.
 3. **Checks:** type, lint, and test runs pass when code changed. The shared configuration repository also runs its pre-commit check.
 4. **Message:** the rules in section 4, including those the wrapper cannot check (why rather than what, no shorthand a reader cannot decode).
-5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run.
+5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run. A large commit is also an independent-review checkpoint (`agent-usage` section 7), so run that review too, without asking, and never offer committing without a review as a choice (user decision, 2026-11-18).
 
 Stop and ask the user only when a check fails and cannot be fixed within the task, or when the shell guard asks. When the wrapper refuses lines it cannot show as yours (exit 8: lines marked `?` or `!`, or listed as not this session's), do not ask in chat: if another session can commit its tangled lines first, message it and wait; otherwise rerun once with `--include-unrecorded <file>` for every file the refusal lists, and the shell guard's one dialog, which lists those lines, is the user's decision (user decisions, 2026-11-11 and 2026-11-16). If the user declines it, commit without that file and say so. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
 

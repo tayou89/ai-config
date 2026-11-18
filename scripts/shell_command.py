@@ -170,7 +170,37 @@ ORIGIN_SEPARATOR = " > "
 SCRIPT_ORIGIN_PREFIX = "script "
 TEE_PROGRAM = "tee"
 IN_PLACE_EDITORS = frozenset({"sed", "gsed", "perl"})
-IN_PLACE_OPTION_PATTERN = re.compile(r"-(?![MmI])[A-Za-z]*i|--in-place")
+_IN_PLACE_SHORT_OPTION = "i"
+_MACOS_SED_IN_PLACE_SHORT_OPTION = "I"
+_GNU_SED_OPTIONS_WITH_VALUE = frozenset({"l"})
+_SED_IN_PLACE_OPTION = "--in-place"
+_SED_SCRIPT_OPTIONS = frozenset({"e", "f"})
+_SED_LONG_SCRIPT_OPTIONS = frozenset({"--expression", "--file"})
+_SED_LONG_OPTIONS = (
+    "--debug",
+    "--expression",
+    "--file",
+    "--follow-symlinks",
+    "--help",
+    _SED_IN_PLACE_OPTION,
+    "--line-length",
+    "--null-data",
+    "--posix",
+    "--quiet",
+    "--regexp-extended",
+    "--sandbox",
+    "--separate",
+    "--silent",
+    "--unbuffered",
+    "--version",
+    "--zero-terminated",
+)
+LONG_OPTION_PREFIX = "--"
+_SED_BACKUP_SUFFIX_PREFIX = "."
+_PERL_PROGRAM = "perl"
+_PERL_PROGRAM_OPTIONS = frozenset({"e", "E"})
+_PERL_OPTIONS_WITH_ARGUMENT = _PERL_PROGRAM_OPTIONS | frozenset({"I", "M", "m"})
+_OPTION_VALUE_SEPARATOR = "="
 OPTION_PREFIX = "-"
 
 
@@ -221,18 +251,20 @@ class CommandCall:
         return any(part.startswith(SCRIPT_ORIGIN_PREFIX) for part in self.origin.split(ORIGIN_SEPARATOR))
 
     def list_written_files(self) -> list[str]:
-        """The files the call writes: its redirections, and the operands of `tee` and in-place editors."""
+        """The files the call writes: its redirections, the operands of `tee`, and the files in-place editors edit."""
         program = os.path.basename(self.argv[0]) if self.argv else ""
-        operands = [argument for argument in self.argv[1:] if not argument.startswith(OPTION_PREFIX)]
+        arguments = self.argv[1:]
 
-        if program == TEE_PROGRAM or (program in IN_PLACE_EDITORS and self._has_in_place_option()):
+        if program == TEE_PROGRAM:
+            operands = [argument for argument in arguments if not argument.startswith(OPTION_PREFIX)]
+
+            return [*self.write_targets, *operands]
+        elif program in IN_PLACE_EDITORS:
+            operands = _list_perl_files(arguments) if program == _PERL_PROGRAM else _list_sed_files(arguments)
+
             return [*self.write_targets, *operands]
         else:
             return list(self.write_targets)
-
-    def _has_in_place_option(self) -> bool:
-        """`-i` alone, with a suffix (`-i.bak`), or in a cluster (`perl -pi`), but not perl's `-M` or `-I` arguments."""
-        return any(IN_PLACE_OPTION_PATTERN.match(argument) for argument in self.argv[1:])
 
 
 @dataclass
@@ -1191,6 +1223,139 @@ def expand_shell_command(command: str, cwd: str | None, config_directory: Path) 
     expander = CommandExpander(load_shell_definitions(config_directory), read_git_alias, read_text_file)
 
     return expander.expand(command, cwd)
+
+
+def _list_sed_files(arguments: list[str]) -> list[str]:
+    """Union both sed readings in argument order because the executable's flavor is unknown."""
+    file_indices: set[int] = set()
+
+    for macos_options in (True, False):
+        file_indices.update(_list_sed_file_indices(arguments, macos_options))
+    return list(dict.fromkeys(argument for index, argument in enumerate(arguments) if index in file_indices))
+
+
+def _list_sed_file_indices(arguments: list[str], macos_options: bool) -> list[int]:
+    """The positions of the files one sed reading edits in place, none when that reading is not in place.
+
+    macOS sed takes the argument after a bare `-i` as the backup suffix and stops reading
+    options at its first operand; GNU sed takes only an attached suffix and reads options
+    anywhere before `--`. An empty or dot-led argument after `-i` is a suffix in both, since
+    GNU sed fails on such a script and edits nothing. macOS sed also edits in place with `-I`,
+    which GNU sed lacks, and GNU sed's `-l` takes a value where macOS sed's takes none.
+    """
+    operand_indices: list[int] = []
+    has_script = False
+    has_in_place_option = False
+    options_ended = False
+    index = 0
+
+    while index < len(arguments):
+        argument = arguments[index]
+
+        if options_ended:
+            operand_indices.append(index)
+        elif argument == OPTION_END:
+            options_ended = True
+        elif argument.startswith(LONG_OPTION_PREFIX):
+            name, separator, _ = argument.partition(_OPTION_VALUE_SEPARATOR)
+            option = _resolve_sed_long_option(name)
+
+            if option in _SED_LONG_SCRIPT_OPTIONS:
+                has_script = True
+                if not separator:
+                    index += 1
+            elif option == _SED_IN_PLACE_OPTION:
+                has_in_place_option = True
+        elif argument.startswith(OPTION_PREFIX) and argument != OPTION_PREFIX:
+            position = 1
+
+            while position < len(argument):
+                option = argument[position]
+
+                if option in _SED_SCRIPT_OPTIONS:
+                    has_script = True
+                    if position == len(argument) - 1:
+                        index += 1
+                    break
+                elif option in _GNU_SED_OPTIONS_WITH_VALUE and not macos_options:
+                    if position == len(argument) - 1:
+                        index += 1
+                    break
+                elif option == _IN_PLACE_SHORT_OPTION or (macos_options and option == _MACOS_SED_IN_PLACE_SHORT_OPTION):
+                    has_in_place_option = True
+                    if position == len(argument) - 1 and index + 1 < len(arguments):
+                        suffix = arguments[index + 1]
+
+                        if macos_options or not suffix or suffix.startswith(_SED_BACKUP_SUFFIX_PREFIX):
+                            index += 1
+                    break
+                else:
+                    position += 1
+        else:
+            operand_indices.append(index)
+            options_ended = macos_options
+        index += 1
+    if has_in_place_option:
+        file_indices = operand_indices if has_script else operand_indices[1:]
+
+        return [file_index for file_index in file_indices if arguments[file_index]]
+    else:
+        return []
+
+
+def _resolve_sed_long_option(name: str) -> str:
+    """GNU sed accepts any unambiguous abbreviation of a long option, such as `--in` for `--in-place`."""
+    matches = [option for option in _SED_LONG_OPTIONS if option.startswith(name)]
+
+    if name in matches:
+        return name
+    elif len(matches) == 1:
+        return matches[0]
+    else:
+        return name
+
+
+def _list_perl_files(arguments: list[str]) -> list[str]:
+    """The files perl edits in place, none without an in-place option.
+
+    perl stops reading options at its first operand, which is the program file when no
+    `-e` or `-E` gave the program.
+    """
+    has_program = False
+    has_in_place_option = False
+    index = 0
+
+    while index < len(arguments):
+        argument = arguments[index]
+
+        if argument == OPTION_END:
+            index += 1
+            break
+        elif argument.startswith(OPTION_PREFIX) and argument != OPTION_PREFIX:
+            position = 1
+
+            while position < len(argument):
+                option = argument[position]
+
+                if option == _IN_PLACE_SHORT_OPTION:
+                    has_in_place_option = True
+                    break
+                elif option in _PERL_OPTIONS_WITH_ARGUMENT:
+                    has_program = has_program or option in _PERL_PROGRAM_OPTIONS
+                    if position == len(argument) - 1:
+                        index += 1
+                    break
+                else:
+                    position += 1
+        else:
+            break
+        index += 1
+    if has_in_place_option:
+        operands = arguments[index:] if has_program else arguments[index + 1 :]
+
+        return [argument for argument in operands if argument]
+    else:
+        return []
 
 
 def _is_file_write(operator: str, target: str) -> bool:
