@@ -6,6 +6,8 @@ skills. Question dialogs and next-step boxes need the decision skill for two
 or more choices, the session skill when they mention a session, and the commit
 skill when they mention committing, pushing, or merging. Only questions,
 option labels, and next-step action names count, not recaps, headers, or descriptions.
+A write, a brief to another session or agent, or a `codex` prompt that sets a
+motion's length or easing needs the motion skills; motion a write leaves as it was does not count.
 
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
@@ -33,8 +35,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from motion_values import TextKind, has_in_place_motion, has_motion_text, is_motion_change
 from report_check import is_notes_report
-from shell_command import CommandCall, ExpansionLimitError, expand_shell_command
+from shell_command import IN_PLACE_EDITORS, CommandCall, ExpansionLimitError, expand_shell_command
 
 _GATE_VARIABLE = "SKILL_GATE"
 _GATE_OFF = "off"
@@ -134,6 +137,52 @@ _OTHER_CODE_EXTENSIONS = frozenset(
 )
 _SCREEN_CODE_EXTENSIONS = frozenset({".vue", ".svelte", ".astro"})
 _CODE_EXTENSIONS = _TYPESCRIPT_EXTENSIONS | _PYTHON_EXTENSIONS | _OTHER_CODE_EXTENSIONS | _SCREEN_CODE_EXTENSIONS
+_EMIL_DESIGN_ENG = "emil-design-eng"
+_WEB_MOTION_TECHNIQUES = "web-motion-techniques"
+_MOTION_SKILLS = (_UX_DESIGN, _EMIL_DESIGN_ENG, _WEB_MOTION_TECHNIQUES)
+_MOTION_TARGET_SUFFIX = " with a motion value"
+_MESSAGE_TARGET = "a message"
+_CODEX_TARGET = "a `codex` prompt"
+_CODEX_PROGRAM = "codex"
+_CODEX_SUBCOMMANDS = frozenset({"exec", "e"})
+_CODEX_VALUE_OPTIONS = frozenset(
+    {
+        "-m",
+        "--model",
+        "-c",
+        "--config",
+        "-s",
+        "--sandbox",
+        "-C",
+        "--cd",
+        "-o",
+        "--output-last-message",
+        "-p",
+        "--profile",
+        "-a",
+        "--ask-for-approval",
+        "--color",
+        "--output-schema",
+        "--add-dir",
+        "--enable",
+        "--disable",
+        "--local-provider",
+    },
+)
+# An option that takes one or more values up to the next option, such as several image files.
+_CODEX_LIST_OPTIONS = frozenset({"-i", "--image"})
+_OPTIONS_END = "--"
+_STYLE_EXTENSIONS = _SCREEN_EXTENSIONS - _TYPESCRIPT_EXTENSIONS
+_TOKEN_EXTENSIONS = frozenset({".json", ".yaml", ".yml", ".toml"})
+_ARGUMENT_WRITERS = frozenset({"echo", "printf"})
+_INPUT_WRITERS = frozenset({"cat", "tee"})
+_EXISTING_TEXT_LIMIT = 2 * 1024 * 1024
+_NEW_TEXT_KEYS = ("content", "new_string", "new_source")
+_OLD_TEXT_KEY = "old_string"
+_REPLACE_ALL_KEY = "replace_all"
+_EVERY_MATCH = -1
+_FIRST_MATCH = 1
+_MESSAGE_TOOLS = frozenset({"SendMessage", "Agent", "mcp__ccd_session__start_session"})
 _FILE_PATH_KEYS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
 _SHELL_TOOLS = frozenset({"Bash", "Monitor", "mcp__terminal__run_in_terminal"})
 _COMMAND_KEY = "command"
@@ -180,6 +229,15 @@ class _CompactionOutcome:
 
     happened: bool
     restored: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _FileChange:
+    """A file before and after a write, and the ranges of `after` an Edit really changed (none for a whole Write)."""
+
+    before: str
+    after: str
+    changed: tuple[tuple[int, int], ...]
 
 
 _PYTHON_RULES = _ProgramRules(
@@ -229,7 +287,7 @@ def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None
     file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
 
     if isinstance(file_path, str) and file_path:
-        return _make_requirement(f"`{os.path.basename(file_path)}`", list_file_skills(file_path))
+        return _find_file_requirement(file_path, tool_input)
     elif tool_name in _SHELL_TOOLS:
         return _find_command_requirement(str(tool_input.get(_COMMAND_KEY) or ""), cwd)
     elif _is_design_tool(tool_name):
@@ -238,8 +296,110 @@ def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None
         return _make_requirement(f"with `{design_tool}`", _list_design_tool_skills(design_tool, tool_input))
     elif tool_name in (_QUESTION_TOOL, _WRAP_UP_TOOL):
         return _find_question_requirement(tool_name, tool_input)
+    elif tool_name in _MESSAGE_TOOLS:
+        return _find_message_requirement(tool_input)
     else:
         return None
+
+
+def _find_file_requirement(path: str, tool_input: dict[str, Any]) -> Requirement | None:
+    target = f"`{os.path.basename(path)}`"
+
+    if _is_motion_write(path, tool_input):
+        return _make_motion_requirement(target, list_file_skills(path))
+    else:
+        return _make_requirement(target, list_file_skills(path))
+
+
+def _find_message_requirement(tool_input: dict[str, Any]) -> Requirement | None:
+    """A brief to another session, a subagent, or a new session that sets a motion value needs the motion skills."""
+    texts = [value for value in tool_input.values() if isinstance(value, str)]
+
+    if has_motion_text(_LINE_END.join(texts)):
+        return _make_motion_requirement(_MESSAGE_TARGET, [])
+    else:
+        return None
+
+
+def _is_motion_write(path: str, tool_input: dict[str, Any]) -> bool:
+    """Whether a file write sets or changes motion; other code files are not read for it."""
+    kind = _find_motion_kind(path)
+
+    if kind:
+        change = _read_change(path, tool_input)
+
+        return is_motion_change(kind, change.before, change.after, change.changed)
+    else:
+        return False
+
+
+def _find_motion_kind(path: str) -> TextKind | None:
+    extension = os.path.splitext(path)[1].lower()
+
+    if extension in _STYLE_EXTENSIONS:
+        return TextKind.STYLE
+    elif extension in _TYPESCRIPT_EXTENSIONS:
+        return TextKind.SCRIPT
+    elif extension in _CODE_EXTENSIONS:
+        return None
+    elif extension in _TOKEN_EXTENSIONS:
+        return TextKind.TOKENS
+    else:
+        return TextKind.PROSE
+
+
+def _read_change(path: str, tool_input: dict[str, Any]) -> _FileChange:
+    """The file before and after the call: an Edit applied to the file it changes, or a Write over the file it replaces.
+
+    When the file cannot be read, or an Edit's text is not in it, only the
+    replaced and the new text are compared.
+    """
+    new_text = next((value for value in map(tool_input.get, _NEW_TEXT_KEYS) if isinstance(value, str)), "")
+    old_text = tool_input.get(_OLD_TEXT_KEY)
+    existing = _read_existing_text(path)
+
+    if isinstance(old_text, str) and existing is not None and old_text and old_text in existing:
+        return _apply_edit(existing, old_text, new_text, bool(tool_input.get(_REPLACE_ALL_KEY)))
+    elif isinstance(old_text, str):
+        return _FileChange(old_text, new_text, ())
+    else:
+        return _FileChange(existing or "", new_text, ())
+
+
+def _apply_edit(existing: str, old_text: str, new_text: str, is_every_match: bool) -> _FileChange:
+    """The file after an Edit and the ranges that really changed, leaving out what both strings share at each end."""
+    starts = _list_match_starts(existing, old_text, is_every_match)
+    prefix = len(os.path.commonprefix([old_text, new_text]))
+    shared_suffix = len(os.path.commonprefix([old_text[::-1], new_text[::-1]]))
+    suffix = min(shared_suffix, min(len(old_text), len(new_text)) - prefix)
+    growth = len(new_text) - len(old_text)
+    changed = tuple(
+        (start + order * growth + prefix, start + order * growth + len(new_text) - suffix)
+        for order, start in enumerate(starts)
+    )
+    count = _EVERY_MATCH if is_every_match else _FIRST_MATCH
+
+    return _FileChange(existing, existing.replace(old_text, new_text, count), changed)
+
+
+def _list_match_starts(text: str, part: str, is_every_match: bool) -> list[int]:
+    starts = [match.start() for match in re.finditer(re.escape(part), text)]
+
+    return starts if is_every_match else starts[:_FIRST_MATCH]
+
+
+def _read_existing_text(path: str) -> str | None:
+    """The file's text, or None when it is missing, not a regular file, unreadable, or too large to compare."""
+    try:
+        is_comparable = os.path.isfile(path) and os.path.getsize(path) <= _EXISTING_TEXT_LIMIT
+
+        return Path(path).read_text(encoding=_ENCODING, errors="replace") if is_comparable else None
+    except OSError:
+        return None
+
+
+def _make_motion_requirement(target: str, skills: Iterable[str]) -> Requirement | None:
+    return _make_requirement(f"{target}{_MOTION_TARGET_SUFFIX}", [*skills, *_MOTION_SKILLS])
 
 
 def _find_question_requirement(tool_name: str, tool_input: dict[str, Any]) -> Requirement | None:
@@ -339,11 +499,87 @@ def _find_command_requirement(command: str, cwd: str | None) -> Requirement | No
         return None
     else:
         calls = [call for call in expanded if not call.is_from_script_file]
-        written = [path for call in calls for path in call.list_written_files() if list_file_skills(path)]
         skills = [skill for call in calls for skill in _list_call_skills(call)]
-        target = f"`{os.path.basename(written[0])}`" if written else _INLINE_PROGRAM_TARGET
+        motion_targets = [target for target in (_find_call_motion_target(call, cwd) for call in calls) if target]
 
-        return _make_requirement(target, skills)
+        if motion_targets:
+            return _make_motion_requirement(motion_targets[0], skills)
+        else:
+            return _make_requirement(_name_command_target(calls), skills)
+
+
+def _name_command_target(calls: Sequence[CommandCall]) -> str:
+    written = [path for call in calls for path in call.list_written_files() if list_file_skills(path)]
+
+    return f"`{os.path.basename(written[0])}`" if written else _INLINE_PROGRAM_TARGET
+
+
+def _find_call_motion_target(call: CommandCall, cwd: str | None) -> str | None:
+    """What a call writes motion into: a file it writes literal text to or edits in place, or a `codex` prompt."""
+    program = os.path.basename(call.argv[0]) if call.argv else ""
+    files = [f"`{os.path.basename(path)}`" for path in _list_motion_files(call, program, cwd)]
+
+    if files:
+        return files[0]
+    elif program == _CODEX_PROGRAM and has_motion_text(_LINE_END.join(_list_codex_prompts(call))):
+        return _CODEX_TARGET
+    else:
+        return None
+
+
+def _list_motion_files(call: CommandCall, program: str, cwd: str | None) -> list[str]:
+    """The files that receive motion: echo and printf write their arguments, cat and tee their input.
+
+    In-place editors count by their expression and the file they edit. Any
+    other program's output is not known without running it, so its input does
+    not count.
+    """
+    paths = call.list_written_files()
+    written = [(path, _find_motion_kind(path)) for path in paths]
+    arguments = " ".join(argument for argument in call.argv[1:] if argument not in paths)
+    literal = _read_literal_output(call, program, arguments)
+
+    if literal is not None:
+        return [path for path, kind in written if kind and is_motion_change(kind, "", literal)]
+    elif program in IN_PLACE_EDITORS:
+        return [path for path, kind in written if kind and _is_in_place_motion(kind, arguments, path, call.cwd or cwd)]
+    else:
+        return []
+
+
+def _read_literal_output(call: CommandCall, program: str, arguments: str) -> str | None:
+    if program in _ARGUMENT_WRITERS:
+        return arguments
+    elif program in _INPUT_WRITERS:
+        return _LINE_END.join(call.stdin_texts)
+    else:
+        return None
+
+
+def _is_in_place_motion(kind: TextKind, expression: str, path: str, cwd: str | None) -> bool:
+    full_path = os.path.join(cwd, path) if cwd else path
+
+    return has_in_place_motion(kind, expression, _read_existing_text(full_path) or "")
+
+
+def _list_codex_prompts(call: CommandCall) -> list[str]:
+    """The prompt operands of a `codex` command line, then its input, which codex appends to a prompt given too."""
+    prompts: list[str] = []
+    takes_value = False
+    takes_list = False
+    is_after_options_end = False
+
+    for argument in call.argv[1:]:
+        is_option = not is_after_options_end and argument.startswith(_OPTION_PREFIX) and argument != _STANDARD_INPUT
+        is_value = not is_option and not is_after_options_end and (takes_value or takes_list)
+        is_subcommand = not prompts and argument in _CODEX_SUBCOMMANDS
+
+        if not (is_option or is_value or is_subcommand):
+            prompts.append(argument)
+        is_after_options_end = is_after_options_end or argument == _OPTIONS_END
+        takes_value = is_option and argument in _CODEX_VALUE_OPTIONS
+        takes_list = (is_option and argument in _CODEX_LIST_OPTIONS) or (takes_list and is_value)
+    return [*prompts, *call.stdin_texts]
 
 
 def _list_call_skills(call: CommandCall) -> list[str]:

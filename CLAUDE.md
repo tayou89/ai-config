@@ -6,7 +6,7 @@ Hooks enforce these and say why when they stop or ask; follow their message, and
 
 - Commits go only through the `git-commit` wrapper; the shell guard asks before an unusual push, a production, staging, or live-mode run, and a commit of lines the session's write record does not show as its own; the configuration repository's commit check runs every check on each commit there.
 - Starting a session needs a model and effort; when a start goes ahead on an overloaded computer, tell the user the load in one line.
-- Writing code, screen files, notes-folder reports, or Figma content, or asking a question with two or more choices or one that mentions a session or committing, pushing, or merging, is refused until the skills that decide it are loaded with the Skill tool.
+- Writing code, screen files, notes-folder reports, Figma content, or a motion length or easing it detects in a write, a brief, or a Codex prompt, or asking a question with two or more choices or one that mentions a session or committing, pushing, or merging, is refused until the skills that decide it are loaded with the Skill tool.
 - A question that points elsewhere in the chat, or a question dialog in a session another session started, is sent back to where the user sees it (`[BACK-REFERENCE]`, `[SUB-SESSION QUESTION]`).
 - A closing message that says a recommendation changed without saying when its evidence appeared, or that is not in the user's language, is continued once (`[RECOMMENDATION CHANGE]`, `[REPLY LANGUAGE]`).
 - A next-step box or question dialog holding a commit number, command option, exit code, file name, or code is sent back, and a next-step box that asks a decision carries a notice for the closing message (`[PLAIN WORDS]`).

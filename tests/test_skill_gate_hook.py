@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,218 @@ PASSING_COMMANDS = (
     "uv run --python 3.12 tool.py <<'EOF'\ninput\nEOF",
     "ls > /dev/null 2>&1",
     "",
+)
+EMIL_DESIGN_ENG = "emil-design-eng"
+WEB_MOTION_TECHNIQUES = "web-motion-techniques"
+MOTION_SKILLS = (UX_DESIGN, EMIL_DESIGN_ENG, WEB_MOTION_TECHNIQUES)
+SCREEN_MOTION_SKILLS = (*SCREEN_SKILLS, EMIL_DESIGN_ENG, WEB_MOTION_TECHNIQUES)
+SCRIPT_MOTION_SKILLS = (*TYPESCRIPT_SKILLS, *MOTION_SKILLS)
+MOTION_FILE_CASES = (
+    (
+        "Write",
+        {"file_path": "/a/a.css", "content": ".menu { transition: transform 200ms ease-out; }"},
+        SCREEN_MOTION_SKILLS,
+    ),
+    (
+        "Edit",
+        {"file_path": "/a/a.css", "old_string": ".a {}", "new_string": ".a {}\n@keyframes fade { to { opacity: 1; } }"},
+        SCREEN_MOTION_SKILLS,
+    ),
+    ("Write", {"file_path": "/a/a.scss", "content": ".a { transition-duration: var(--slow); }"}, SCREEN_MOTION_SKILLS),
+    (
+        "Write",
+        {"file_path": "/a/b.svelte", "content": "<style>.a { animation: spin 1s linear infinite; }</style>"},
+        (CODE_STYLE, *SCREEN_MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.tsx", "content": "element.animate(frames, { duration: 600 });"},
+        (*TYPESCRIPT_SKILLS, *SCREEN_MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.js", "content": "document.startViewTransition(update);"},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.ts", "content": "box.style.transition = 'opacity 0.3s ease';"},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {
+            "file_path": "/a/record.md",
+            "content": "이 움직임은 첫 화면에서 들어갈 때만 씀(1초 안쪽, 누르면 바로 넘어감).",
+        },
+        MOTION_SKILLS,
+    ),
+    ("Write", {"file_path": "/a/notes.md", "content": "`transition: opacity 150ms ease`로 바꿈"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/tokens.json", "content": '{"motion-duration-fast": "150ms"}'}, MOTION_SKILLS),
+    ("Edit", {"file_path": "/a/a.md", "old_string": "x", "new_string": "x\nfade 0.2s"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 0.6초 동안 이어진다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "메뉴는 페이드인 300ms로 나타난다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "The panel slides in with ease-out over 400 ms."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.txt", "content": "The intro animation lasts 2 seconds."}, MOTION_SKILLS),
+    (
+        "Write",
+        {"file_path": "/n/side-session-notes/local_1/r.md", "content": "모션은 0.8s로 늘렸습니다."},
+        ("report-writing", *MOTION_SKILLS),
+    ),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 0.8 초로 한다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 1초안에 끝낸다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 .8s로 한다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 800밀리초로 한다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "등장은 0.8초로 합니다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환 easing은 ease-out으로 한다."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "animation easing: linear"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환 길이:\n0.8초"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "| 항목 | 값 |\n| 전환 | 0.8초 |"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/tokens.json", "content": '{"motion": {"fast": {"duration": 150}}}'}, MOTION_SKILLS),
+    (
+        "Write",
+        {"file_path": "/a/a.tsx", "content": '<motion.div transition={{ duration: 0.8, ease: "easeOut" }} />'},
+        (*TYPESCRIPT_SKILLS, *SCREEN_MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.ts", "content": "animate(element, { opacity: 1 }, { duration: 0.8 });"},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.ts", "content": 'gsap.to(element, { duration: 0.8, ease: "power2.out" });'},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.ts", "content": "element.animate (frames, { duration: 800 });"},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.html", "content": '<div class="transition-opacity duration-700 ease-out">'},
+        SCREEN_MOTION_SKILLS,
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.svg", "content": '<animate attributeName="opacity" dur="0.8s" />'},
+        SCREEN_MOTION_SKILLS,
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.ts", "content": '{"transitionDuration": "600ms"}'},
+        (*TYPESCRIPT_SKILLS, *MOTION_SKILLS),
+    ),
+    (
+        "Write",
+        {"file_path": "/a/a.json", "content": '{\n  "motion": {\n    "fast": {\n      "duration": 600\n    }\n  }\n}'},
+        MOTION_SKILLS,
+    ),
+    ("Write", {"file_path": "/a/a.md", "content": "전환 길이: \n0.8초"}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 1초안으로 끝내세요."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 1초대로 줄이세요."}, MOTION_SKILLS),
+    ("Write", {"file_path": "/a/a.md", "content": "전환은 ease로 한다."}, MOTION_SKILLS),
+    (
+        "Write",
+        {"file_path": "/a/a.css", "content": "/* transition: opacity 200ms */\n.a { color: red; }"},
+        SCREEN_MOTION_SKILLS,
+    ),
+)
+PASSING_MOTION_FILE_CASES = (
+    (
+        "Edit",
+        {
+            "file_path": "/a/a.css",
+            "old_string": ".a { transition: opacity 1s; }\n.b {}",
+            "new_string": ".a { transition: opacity 1s; }\n.b { color: red; }",
+        },
+        SCREEN_SKILLS,
+    ),
+    (
+        "Edit",
+        {"file_path": "/a/a.css", "old_string": ".a { transition: opacity 1s; }", "new_string": ".a {}"},
+        SCREEN_SKILLS,
+    ),
+    (
+        "Write",
+        {"file_path": "/a/plan.md", "content": "묶음 5 초안이 커밋되지 않은 채 남음. 전환 완료 소식을 기다림."},
+        None,
+    ),
+    ("Write", {"file_path": "/a/plan.md", "content": "```python\ntransition: StateTransition\n```"}, None),
+    (
+        "Write",
+        {"file_path": "/a/report.md", "content": "3장(7초, 35초)을 봤습니다. 화면은 설명용 애니메이션입니다."},
+        None,
+    ),
+    ("Write", {"file_path": "/a/a.md", "content": "전환율은 2026-11-18에 5% 올랐다."}, None),
+    ("Write", {"file_path": "/a/a.md", "content": "모드 전환 뒤 30 초과 시간은 버린다."}, None),
+    ("Write", {"file_path": "/a/a.md", "content": "프로모션 배너 요청을 5초 뒤 재시도합니다."}, None),
+    ("Write", {"file_path": "/a/a.ts", "content": "const transitionDuration = response.elapsed;"}, TYPESCRIPT_SKILLS),
+    ("Write", {"file_path": "/a/a.json", "content": '{"name": "x", "duration": 30}'}, None),
+    (
+        "Write",
+        {
+            "file_path": "/a/a.md",
+            "content": "전환 작업은 여러 단계로 나뉘며 각 단계는 따로 검토하고 기록을 남긴 뒤 다음으로 넘어가는데, 담당자가 바뀌는 경우에는 인수인계 문서와 점검표를 함께 넘기고 받은 쪽이 다시 읽어 본 다음, 마지막 확인에는 5초가 걸린다.",
+        },
+        None,
+    ),
+    ("Write", {"file_path": "/a/a.py", "content": 'delay = "transition 5s"'}, PYTHON_SKILLS),
+    ("Write", {"file_path": "/a/a.ts", "content": "const transition: StateTransition = next;"}, TYPESCRIPT_SKILLS),
+    ("Write", {"file_path": "/a/a.ts", "content": "const timeout = { duration: 500 };"}, TYPESCRIPT_SKILLS),
+)
+MOTION_MESSAGE_CASES = (
+    (
+        "SendMessage",
+        {
+            "to": "x",
+            "message": "- 공통: 1초 안쪽, 누르면 바로 끝으로 넘어감, 움직임 줄이기 설정이면 짧게 사라지며 바뀜.",
+        },
+    ),
+    ("Agent", {"description": "d", "prompt": "Make the page transition 0.8s with ease-out."}),
+    ("mcp__ccd_session__start_session", {"title": "t", "prompt": "The fade-in lasts 600ms."}),
+    ("mcp__ccd_session__start_session", {"title": "t", "prompt": "Fix it.", "background": "전환은 1초 안쪽으로 묶음."}),
+)
+PASSING_MESSAGE_CASES = (
+    ("SendMessage", {"to": "x", "message": "PR을 합치고 5초 뒤 다시 확인합니다."}),
+    ("SendMessage", {"to": "x", "message": {"type": "shutdown_request"}}),
+    ("Agent", {"description": "d", "prompt": "Find the files that read the config."}),
+    ("mcp__ccd_session__start_session", {"title": "t", "prompt": "Fix the parser."}),
+)
+MOTION_COMMAND_CASES = (
+    ("cat > brief.md <<'EOF'\n전환은 0.4초로 한다\nEOF", "`brief.md` with a motion value", MOTION_SKILLS),
+    ("cat > a.css <<'EOF'\n.a { transition: opacity 1s; }\nEOF", "`a.css` with a motion value", SCREEN_MOTION_SKILLS),
+    ('codex exec -s read-only "make the menu animation 300ms"', "a `codex` prompt with a motion value", MOTION_SKILLS),
+    (
+        "codex exec - <<'EOF'\nThe fade lasts 0.5s.\nEOF",
+        "a `codex` prompt with a motion value",
+        MOTION_SKILLS,
+    ),
+    ("echo 'transition: opacity 800ms;' > a.css", "`a.css` with a motion value", SCREEN_MOTION_SKILLS),
+    ("printf '%s' '전환은 0.4초로 한다' > brief.md", "`brief.md` with a motion value", MOTION_SKILLS),
+    ("sed -i '' 's/200ms/800ms/' a.css", "`a.css` with a motion value", SCREEN_MOTION_SKILLS),
+    (
+        "printf 'transition: opacity 1s' | tee a.py a.css",
+        "`a.css` with a motion value",
+        (*PYTHON_SKILLS, *SCREEN_MOTION_SKILLS),
+    ),
+    ("printf 'fade 0.2s' | codex exec 'Implement the brief.'", "a `codex` prompt with a motion value", MOTION_SKILLS),
+)
+PASSING_MOTION_COMMANDS = (
+    'codex exec --image a.png animation-300ms.png -- "run the tests"',
+    "sed -i '' 's/linear/radial/' a.css",
+    'codex exec -s read-only "review the parser"',
+    'codex exec -o transition-300ms.log "run the tests"',
+    "codex exec - < brief.md",
+    "wc -l > counts.txt <<'EOF'\nfade 0.2s\nEOF",
+    "grep -rn 'transition: 200ms' src",
+    "echo 'fade 0.2s'",
+)
+MESSAGE_MOTION_REASON = (
+    "Writing a message with a motion value needs `ux-design` and `emil-design-eng` and `web-motion-techniques` "
+    'loaded with the Skill tool first (CLAUDE.md "Skill Triggers"), and this session has no finished Skill-tool '
+    "load of them since its start or last compaction."
 )
 COMPACT_BOUNDARY = {"type": "system", "subtype": "compact_boundary"}
 COMPACT_SUMMARY = {"type": "user", "isCompactSummary": True}
@@ -298,6 +511,152 @@ class SkillGateHookTest(unittest.TestCase):
         self.assertNotIn("The session and commit skills", reason)
         self._load(DECISIONS)
         self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
+
+    def test_motion_values_need_the_motion_skills(self) -> None:
+        for tool_name, tool_input, skills in MOTION_FILE_CASES:
+            requirement = skill_gate_hook.find_requirement(tool_name, tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, tool_input)
+
+    def test_writes_without_new_motion_values_need_only_their_own_skills(self) -> None:
+        for tool_name, tool_input, skills in PASSING_MOTION_FILE_CASES:
+            requirement = skill_gate_hook.find_requirement(tool_name, tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, tool_input)
+
+    def test_write_over_a_file_counts_only_new_motion_lines(self) -> None:
+        page = Path(self.directory.name) / "page.css"
+        unchanged = {"file_path": str(page), "content": ".a { transition: opacity 1s; }\n.b { color: red; }\n"}
+        added = {"file_path": str(page), "content": ".a { transition: opacity 1s; }\n.b { animation: spin 2s; }\n"}
+
+        page.write_text(".a { transition: opacity 1s; }\n.b {}\n")
+        self.assertEqual(skill_gate_hook.find_requirement("Write", unchanged, "/tmp").skills, SCREEN_SKILLS)
+        self.assertEqual(skill_gate_hook.find_requirement("Write", added, "/tmp").skills, SCREEN_MOTION_SKILLS)
+
+    def test_edit_is_judged_on_the_whole_file_it_changes(self) -> None:
+        page = Path(self.directory.name) / "page.css"
+        record = Path(self.directory.name) / "record.md"
+        script = Path(self.directory.name) / "motion.ts"
+        cases = (
+            (page, ".a { transition: opacity 600ms; }\n", "600ms", "800ms", SCREEN_MOTION_SKILLS),
+            (page, ".a {\n  transition-duration:\n    600ms;\n}\n", "600ms", "800ms", SCREEN_MOTION_SKILLS),
+            (
+                page,
+                ".a { transition: opacity 1s; }\n",
+                ".a { transition: opacity 1s; }",
+                ".a { transition: opacity 1s; }\n.b { transition: opacity 1s; }",
+                SCREEN_MOTION_SKILLS,
+            ),
+            (page, ".a { transition: opacity 1s; }\n.b {}\n", ".b {}", ".b { color: red; }", SCREEN_SKILLS),
+            (page, ".a { transition: opacity 1s; }\n", ".a {", ".card {", SCREEN_SKILLS),
+            (
+                page,
+                ".a { transition: opacity 200ms; }\n.b { transition: opacity 800ms; }\n",
+                ".a { transition: opacity 200ms; }\n.b { transition: opacity 800ms; }",
+                ".a { transition: opacity 800ms; }\n.b { transition: opacity 200ms; }",
+                SCREEN_MOTION_SKILLS,
+            ),
+            (page, ".a { transition: opacity\n 600ms ease; }\n", "600ms", "800ms", SCREEN_MOTION_SKILLS),
+            (script, "gsap.to('[data-label=\"}\"]', {duration: 600});\n", "600", "800", SCRIPT_MOTION_SKILLS),
+            (
+                script,
+                "element.animate([" + "{opacity: 0.5}, " * 45 + "], {duration: 600});\n",
+                "600",
+                "800",
+                SCRIPT_MOTION_SKILLS,
+            ),
+            (script, "element.animate([], {duration: 600}), render(1);\n", "render(1)", "render(2)", TYPESCRIPT_SKILLS),
+            (record, "이 움직임은 1초 안쪽으로 한다.\n", "1초", "3초", MOTION_SKILLS),
+            (record, "이 움직임은 1초 안쪽으로 한다.\n", "missing", "3초", None),
+        )
+
+        for path, existing, old_string, new_string, skills in cases:
+            tool_input = {"file_path": str(path), "old_string": old_string, "new_string": new_string}
+            path.write_text(existing)
+            requirement = skill_gate_hook.find_requirement("Edit", tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, (existing, old_string, new_string))
+
+    def test_long_runs_of_digits_are_read_quickly(self) -> None:
+        texts = ("transition: " + "1" * 5000, "transition = '" + "1" * 5000, "전환 " + "1" * 5000 + "초")
+        started = time.monotonic()
+
+        for text in texts:
+            skill_gate_hook.find_requirement("Write", {"file_path": "/a/a.md", "content": text}, "/tmp")
+        self.assertLess(time.monotonic() - started, 2)
+
+    def test_unreadable_file_counts_all_of_the_write_as_new(self) -> None:
+        folder = Path(self.directory.name) / "folder.css"
+        locked = Path(self.directory.name) / "locked.css"
+        content = ".a { transition: opacity 1s; }"
+
+        folder.mkdir()
+        locked.write_text(content)
+        locked.chmod(0)
+        for path in (folder, locked):
+            tool_input = {"file_path": str(path), "content": content}
+
+            self.assertEqual(skill_gate_hook.find_requirement("Write", tool_input, "/tmp").skills, SCREEN_MOTION_SKILLS)
+
+    def test_in_place_edit_counts_a_time_changed_in_a_file_with_motion(self) -> None:
+        brief = Path(self.directory.name) / "brief.md"
+        command = f"sed -i '' 's/1초/3초/' {brief}"
+
+        brief.write_text("전환은 1초로 한다.\n")
+        self.assertEqual(skill_gate_hook.find_requirement("Bash", {"command": command}, "/tmp").skills, MOTION_SKILLS)
+        brief.write_text("회의는 1초도 늦지 않는다.\n")
+        self.assertIsNone(skill_gate_hook.find_requirement("Bash", {"command": command}, "/tmp"))
+
+    def test_messages_with_motion_values_need_the_motion_skills(self) -> None:
+        for tool_name, tool_input in MOTION_MESSAGE_CASES:
+            requirement = skill_gate_hook.find_requirement(tool_name, tool_input, "/tmp")
+
+            self.assertEqual(
+                (requirement.target, requirement.skills) if requirement else None,
+                ("a message with a motion value", MOTION_SKILLS),
+                tool_input,
+            )
+        for tool_name, tool_input in PASSING_MESSAGE_CASES:
+            self.assertIsNone(skill_gate_hook.find_requirement(tool_name, tool_input, "/tmp"), tool_input)
+
+    def test_commands_with_motion_values_need_the_motion_skills(self) -> None:
+        for command, target, skills in MOTION_COMMAND_CASES:
+            requirement = skill_gate_hook.find_requirement("Bash", {"command": command}, "/tmp")
+
+            self.assertEqual(
+                (requirement.target, requirement.skills) if requirement else None, (target, skills), command
+            )
+        for command in PASSING_MOTION_COMMANDS:
+            requirement = skill_gate_hook.find_requirement("Bash", {"command": command}, "/tmp")
+
+            self.assertNotIn(EMIL_DESIGN_ENG, requirement.skills if requirement else (), command)
+
+    def test_motion_message_is_refused_until_the_motion_skills_load(self) -> None:
+        tool_name, tool_input = MOTION_MESSAGE_CASES[0]
+
+        self.assertIsNone(self._decide(tool_name=tool_name, tool_input=tool_input, gate_setting=GATE_OFF))
+        self.assertEqual(
+            self._read_reason(self._decide(tool_name=tool_name, tool_input=tool_input)), MESSAGE_MOTION_REASON
+        )
+        self._load(UX_DESIGN)
+        self.assertIn(
+            "needs `emil-design-eng` and `web-motion-techniques` loaded",
+            self._read_reason(self._decide(tool_name=tool_name, tool_input=tool_input)),
+        )
+        self._load(EMIL_DESIGN_ENG)
+        self._load(WEB_MOTION_TECHNIQUES)
+        self.assertIsNone(self._decide(tool_name=tool_name, tool_input=tool_input))
+
+    def test_settings_send_messages_and_briefs_to_the_gate(self) -> None:
+        settings = json.loads((REPOSITORY_ROOT / "settings.json").read_text())
+        matchers = [
+            str(entry.get("matcher") or "")
+            for entry in settings["hooks"]["PreToolUse"]
+            if any("skill-gate-hook.py" in str(hook.get("command")) for hook in entry.get("hooks", []))
+        ]
+
+        for tool_name in ("Edit", "Bash", "SendMessage", "Agent", "mcp__ccd_session__start_session"):
+            self.assertTrue(any(re.fullmatch(matcher, tool_name) for matcher in matchers), tool_name)
 
     def test_edit_is_refused_until_its_skills_load(self) -> None:
         self.assertEqual(
