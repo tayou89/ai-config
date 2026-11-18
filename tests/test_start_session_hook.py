@@ -21,6 +21,8 @@ DENY = "deny"
 DECISION_KEY = "permissionDecision"
 REASON_KEY = "permissionDecisionReason"
 CONTEXT_KEY = "additionalContext"
+CODEX_MARKER = "`Codex:`"
+BRIEF_WITHOUT_CODEX = "brief"
 CPUS = 10
 CALM = (4.0, CPUS)
 OVERLOADED = (137.0, CPUS)
@@ -28,7 +30,7 @@ AT_LIMIT = (15.0, CPUS)
 FULL_START = {
     "initiation": "user_asked",
     "title": "보고서 쓰기",
-    "prompt": "brief",
+    "prompt": "brief\nCodex: 지도 카드 구현은 Codex가 함",
     "model": "claude-opus-5-5",
     "effort": "high",
 }
@@ -44,7 +46,7 @@ class StartSessionHookTest(unittest.TestCase):
         self.assertNotIn("`model`", decision[REASON_KEY])
 
     def test_denies_card_without_model_and_effort(self) -> None:
-        tool_input = {"initiation": "own_initiative", "title": "조사", "prompt": "brief"}
+        tool_input = {"initiation": "own_initiative", "title": "조사", "prompt": BRIEF_WITHOUT_CODEX}
         decision = start_session_hook.decide(tool_input, CALM)
 
         self.assertEqual(decision[DECISION_KEY], DENY)
@@ -57,6 +59,42 @@ class StartSessionHookTest(unittest.TestCase):
 
     def test_passes_full_start_when_calm(self) -> None:
         self.assertIsNone(start_session_hook.decide(FULL_START, CALM))
+
+    def test_denies_full_start_without_codex_line(self) -> None:
+        tool_input = dict(FULL_START, prompt=BRIEF_WITHOUT_CODEX)
+        decision = start_session_hook.decide(tool_input, CALM)
+
+        self.assertEqual(decision[DECISION_KEY], DENY)
+        self.assertIn(CODEX_MARKER, decision[REASON_KEY])
+
+    def test_passes_codex_line_with_list_bold_and_leading_spaces(self) -> None:
+        prefixes = ("Codex:", "- Codex:", "* Codex:", "**Codex:**", "**Codex**:")
+
+        for prefix in prefixes:
+            for indentation in ("", "   "):
+                with self.subTest(prefix=prefix, indentation=indentation):
+                    tool_input = dict(FULL_START, prompt=f"brief\n{indentation}{prefix} implementation")
+
+                    self.assertIsNone(start_session_hook.decide(tool_input, CALM))
+
+    def test_denies_codex_mentioned_only_mid_line(self) -> None:
+        tool_input = dict(FULL_START, prompt="brief mentions Codex: later")
+        decision = start_session_hook.decide(tool_input, CALM)
+
+        self.assertEqual(decision[DECISION_KEY], DENY)
+        self.assertIn(CODEX_MARKER, decision[REASON_KEY])
+
+    def test_missing_levels_take_priority_over_missing_codex_line(self) -> None:
+        for missing in ("model", "effort"):
+            with self.subTest(missing=missing):
+                tool_input = {key: value for key, value in FULL_START.items() if key != missing}
+
+                tool_input["prompt"] = BRIEF_WITHOUT_CODEX
+                decision = start_session_hook.decide(tool_input, CALM)
+
+                self.assertEqual(decision[DECISION_KEY], DENY)
+                self.assertIn(f"`{missing}`", decision[REASON_KEY])
+                self.assertNotIn(CODEX_MARKER, decision[REASON_KEY])
 
     def test_notes_load_without_asking_when_overloaded(self) -> None:
         decision = start_session_hook.decide(FULL_START, OVERLOADED)
@@ -78,8 +116,14 @@ class StartSessionHookTest(unittest.TestCase):
 
         self.assertIn(CONTEXT_KEY, start_session_hook.decide(tool_input, OVERLOADED))
 
-    def test_proposal_start_needs_no_levels(self) -> None:
+    def test_proposal_start_without_prompt_needs_no_levels_or_codex_line(self) -> None:
         self.assertIsNone(start_session_hook.decide({"proposal_id": "task_1"}, CALM))
+
+    def test_offer_without_prompt_needs_no_codex_line(self) -> None:
+        tool_input = {key: value for key, value in FULL_START.items() if key != "prompt"}
+
+        tool_input["initiation"] = "offer"
+        self.assertIsNone(start_session_hook.decide(tool_input, CALM))
 
     def test_proposal_start_gets_load_note_when_overloaded(self) -> None:
         decision = start_session_hook.decide({"proposal_id": "task_1"}, OVERLOADED)
