@@ -96,73 +96,6 @@ const app = {
   workFiles: {} as Record<string, string>,
 }
 const WORK_FOLDER = '/Users/t/Library/Application Support/usage-panel/work'
-// The sidebar as the app keeps it for this session: its own row as
-// `get_session self` answers (none outside the app), the sections the person
-// or the band made, each section asked to be made and each move asked for, and
-// whether a move is refused, as auto mode refuses it without an allow rule;
-// whether the app cannot list or make sections, as with no window open, and
-// each sidebar tool called. The waiting files hold each session's record and
-// the band's switch.
-type SidebarSection = { id: string; kind: 'manual'; name: string }
-type OwnRow = SessionRow & { group: { id: string; name: string } | null; pinned?: boolean }
-const sidebar = {
-  own: undefined as OwnRow | undefined,
-  sections: [] as SidebarSection[],
-  created: [] as string[],
-  moves: [] as { sessionIds: unknown; sectionId: unknown }[],
-  isMoveRefused: false,
-  refusals: 0,
-  isListBroken: false,
-  isCreateBroken: false,
-  calls: [] as string[],
-}
-const waitingFiles: Record<string, string> = {}
-const WAITING_FOLDER = '/Users/t/Library/Application Support/usage-panel/waiting'
-const WAITING_SWITCH = '/Users/t/Library/Application Support/usage-panel/waiting-section.json'
-const OWN_ID = 'local_own'
-const OWN_RECORD = `${WAITING_FOLDER}/${OWN_ID}.json`
-const BUILT_IN_SECTIONS = [
-  { id: 'pinned', kind: 'pinned', name: '' },
-  { id: 'routines', kind: 'routines', name: '' },
-]
-
-const sidebarText = (value: unknown) => ({
-  content: [{ type: 'text' as const, text: JSON.stringify(value) }],
-  isError: false,
-})
-
-// What the app's sidebar tools answer: a section of a name made once, and a
-// move that files this session where it was asked to; a refused move throws,
-// as the engine's refusal does.
-const sidebarAnswer = (tool: string, args: Record<string, unknown>) => {
-  sidebar.calls.push(tool)
-  if ((tool === 'list_sections' && sidebar.isListBroken) || (tool === 'create_section' && sidebar.isCreateBroken)) {
-    return { ...sidebarText('No app window is open.'), isError: true }
-  } else if (tool === 'list_sections') {
-    return sidebarText([...BUILT_IN_SECTIONS, ...sidebar.sections, { id: 'sessions', kind: 'sessions', name: '' }])
-  } else if (tool === 'create_section') {
-    const name = String(args.name)
-    const kept = sidebar.sections.find(section => section.name === name)
-    const made: SidebarSection = kept ?? { id: `cg-${sidebar.sections.length + 1}`, kind: 'manual', name }
-
-    sidebar.created.push(name)
-    sidebar.sections = kept ? sidebar.sections : [...sidebar.sections, made]
-    return sidebarText(made)
-  } else if (tool === 'move_sessions' && sidebar.isMoveRefused) {
-    sidebar.refusals += 1
-    throw new Error('the auto mode classifier gave no verdict')
-  } else if (tool === 'move_sessions') {
-    const section = sidebar.sections.find(found => found.id === args.section_id)
-
-    sidebar.moves.push({ sessionIds: args.session_ids, sectionId: args.section_id })
-    if (sidebar.own) {
-      sidebar.own = { ...sidebar.own, group: section ? { id: section.id, name: section.name } : null }
-    }
-    return sidebarText('Moved 1 session(s).')
-  } else {
-    return { ...sidebarText(`no ${tool} here`), isError: true }
-  }
-}
 
 const claudeReading = (fiveHour: number): SessionMeasureInput => ({
   context: { tokens: 1, window: 1_000_000, percent: 15 },
@@ -257,33 +190,13 @@ const engine = (
   app.agentsHold = undefined
   app.tools = []
   app.workFiles = {}
-  sidebar.own = undefined
-  sidebar.sections = []
-  sidebar.created = []
-  sidebar.moves = []
-  sidebar.isMoveRefused = false
-  sidebar.refusals = 0
-  sidebar.isListBroken = false
-  sidebar.isCreateBroken = false
-  sidebar.calls = []
-  for (const path of Object.keys(waitingFiles)) {
-    delete waitingFiles[path]
-  }
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
   on('tool.register', (_, e) => (app.tools.push(e.name), { value: { tool: `mcp__usage-panel__${e.name}` } }))
   on('mcp.call', (_, e) => {
     app.listCalls.push(e.args)
-    if (e.server === 'ccd_sidebar') {
-      return { value: sidebarAnswer(e.tool, e.args) }
-    } else if (e.tool === 'get_session') {
-      const text = JSON.stringify(sidebar.own ?? { error: 'no such session' })
+    const content = [{ type: 'text' as const, text: JSON.stringify(app.listed) }]
 
-      return { value: { content: [{ type: 'text' as const, text }], isError: sidebar.own === undefined } }
-    } else {
-      const content = [{ type: 'text' as const, text: JSON.stringify(app.listed) }]
-
-      return { value: { content, isError: e.tool !== 'list_sessions' } }
-    }
+    return { value: { content, isError: e.tool !== 'list_sessions' } }
   })
   on('session.id', () => ({ value: 'cli-1' }))
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
@@ -318,23 +231,19 @@ const engine = (
       ? codexDisk.recordAt > 0
       : e.path === CLAUDE_SHARED
         ? claudeShared.text !== undefined
-        : e.path in sharedFiles ||
-          e.path in waitingFiles ||
-          (e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0),
+        : e.path in sharedFiles || (e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0),
   }))
   on('fs.read', (_, e) => ({
     value:
       e.path === CLAUDE_SHARED
         ? (claudeShared.text ?? '')
-        : (sharedFiles[e.path] ?? app.workFiles[e.path] ?? waitingFiles[e.path] ?? ''),
+        : (sharedFiles[e.path] ?? app.workFiles[e.path] ?? ''),
   }))
   on('fs.write', (_, e) => {
     if (e.path === CLAUDE_SHARED) {
       claudeShared.text = e.text
     } else if (e.path.startsWith(WORK_FOLDER)) {
       app.workFiles[e.path] = e.text
-    } else if (e.path.startsWith(WAITING_FOLDER) || e.path === WAITING_SWITCH) {
-      waitingFiles[e.path] = e.text
     }
     return { value: undefined }
   })
@@ -1589,278 +1498,4 @@ test('two runs started close together each take their own record', async ($, on)
   expect(rows).toEqual(['시간 3분 · 단계 4 · 토큰 2M', '시간 2분 · 단계 3 · 토큰 1M'])
   await pane.unmount()
   codexDisk.recordAt = 0
-})
-
-const WAITED_AT = '2026-11-04T06:59:00Z'
-const REPLIED_AT = '2026-11-04T07:00:20Z'
-const selfMove = (sectionId: string) => ({ sessionIds: ['self'], sectionId })
-const MOVED = { kind: 'moved', sectionId: 'cg-1', activityAt: WAITED_AT }
-
-const ownRow = (overrides: Partial<OwnRow> = {}): OwnRow => ({
-  ...row(OWN_ID, false, WAITED_AT),
-  group: null,
-  ...overrides,
-})
-
-// This session's last turn ended needing the person, who has not read it.
-const waitForPerson = () => {
-  app.savedAt = { ...app.savedAt, [OWN_ID]: (app.savedAt[OWN_ID] ?? 0) + 1 }
-  app.storeAt += 1
-  app.output = { unread: [OWN_ID], sessions: { [OWN_ID]: read('needs-input') } }
-}
-
-// The person opened the session and read it, and answered nothing yet.
-const readByPerson = () => {
-  app.storeAt += 1
-  app.output = { unread: [], sessions: {} }
-}
-
-// The person answered: a new turn runs in the session.
-const replyFromPerson = (at = REPLIED_AT) => {
-  sidebar.own = ownRow({ group: sidebar.own?.group ?? null, isRunning: true, lastActivityAt: at })
-  readByPerson()
-}
-
-const ownRecord = () => JSON.parse(waitingFiles[OWN_RECORD] ?? 'null') as unknown
-
-const startBand = async ($: Engine, clock: ReturnType<typeof engine>) => {
-  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-  await clock.advance(1)
-}
-
-test('a session waiting for the person moves itself, once, under a waiting section made for it', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-
-  expect(sidebar.created).toEqual(['답 기다림'])
-  expect(sidebar.moves).toEqual([selfMove('cg-1')])
-  expect(ownRecord()).toEqual(MOVED)
-  // The yellow count is of the other sessions: this one is not in it.
-  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBeUndefined()
-})
-
-test('a look alone keeps it in the section; a reply brings it back and forgets it', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  readByPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-1')])
-
-  replyFromPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-1'), selfMove('sessions')])
-  expect(ownRecord()).toBeNull()
-})
-
-test('it goes back to the group it came from, or to the list once that group is gone', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.sections = [{ id: 'cg-work', kind: 'manual', name: '일' }]
-  sidebar.own = ownRow({ group: { id: 'cg-work', name: '일' } })
-  waitForPerson()
-  await startBand($, clock)
-  expect(ownRecord()).toEqual({ ...MOVED, sectionId: 'cg-2', fromGroupId: 'cg-work' })
-
-  replyFromPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves.at(-1)).toEqual(selfMove('cg-work'))
-
-  sidebar.own = ownRow({ group: { id: 'cg-work', name: '일' }, lastActivityAt: '2026-11-04T07:01:00Z' })
-  waitForPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves.at(-1)).toEqual(selfMove('cg-2'))
-  sidebar.sections = sidebar.sections.filter(section => section.id !== 'cg-work')
-  replyFromPerson('2026-11-04T07:02:00Z')
-  await clock.advance(5_000)
-  expect(sidebar.moves.at(-1)).toEqual(selfMove('sessions'))
-})
-
-test('a pinned session is left where the person put it', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.own = ownRow({ pinned: true })
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-
-  expect(sidebar.created).toEqual([])
-  expect(sidebar.moves).toEqual([])
-})
-
-test('a session the person moved out stays out until it waits again', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.sections = [{ id: 'cg-other', kind: 'manual', name: '다른' }]
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  sidebar.own = ownRow({ group: { id: 'cg-other', name: '다른' } })
-  await clock.advance(5_000)
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-2')])
-  expect(ownRecord()).toEqual({ kind: 'released', activityAt: WAITED_AT })
-
-  sidebar.own = ownRow({ group: { id: 'cg-other', name: '다른' }, lastActivityAt: '2026-11-04T07:01:00Z' })
-  waitForPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-2'), selfMove('cg-2')])
-})
-
-test('a session in the section that the band did not move goes back once it does not wait', async ($, on) => {
-  const clock = engine(on)
-
-  waitingFiles[WAITING_SWITCH] = JSON.stringify({ isOn: true, sectionId: 'cg-1' })
-  sidebar.sections = [{ id: 'cg-1', kind: 'manual', name: '답 기다림' }]
-  sidebar.own = ownRow({ group: { id: 'cg-1', name: '답 기다림' } })
-  app.savedAt = { [OWN_ID]: 1 }
-  app.output = { unread: [], sessions: { [OWN_ID]: read('other') } }
-  await startBand($, clock)
-
-  expect(sidebar.moves).toEqual([selfMove('sessions')])
-})
-
-test('deleting the section turns the band off until the person turns it on again', async ($, on) => {
-  const clock = engine(on)
-
-  waitingFiles[WAITING_SWITCH] = JSON.stringify({ isOn: true, sectionId: 'cg-9' })
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-  expect(sidebar.created).toEqual([])
-  expect(sidebar.moves).toEqual([])
-  expect(JSON.parse(waitingFiles[WAITING_SWITCH] ?? '{}')).toEqual({ isOn: false })
-
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
-
-  expect((await pane.find({ key: 'waiting-switch' }))?.props.label).toBe('모으기 켜기')
-  await pane.press({ key: 'waiting-switch' })
-  await pane.unmount()
-  await clock.advance(5_000)
-  expect(sidebar.created).toEqual(['답 기다림'])
-  expect(sidebar.moves).toEqual([selfMove('cg-1')])
-})
-
-test('turning it off brings a moved session back to where it was', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
-
-  expect((await pane.find({ key: 'waiting-switch' }))?.props.label).toBe('모으기 끄기')
-  await pane.press({ key: 'waiting-switch' })
-  await pane.unmount()
-  await clock.advance(5_000)
-
-  expect(sidebar.moves).toEqual([selfMove('cg-1'), selfMove('sessions')])
-  expect(ownRecord()).toBeNull()
-  expect(JSON.parse(waitingFiles[WAITING_SWITCH] ?? '{}')).toEqual({ isOn: false, sectionId: 'cg-1' })
-})
-
-test('a refused move writes no record, is not tried again in that wait, and says why', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.isMoveRefused = true
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-  await clock.advance(5_000)
-
-  expect(sidebar.refusals).toBe(1)
-  expect(ownRecord()).toBeNull()
-  const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
-
-  expect(await pane.find({ type: 'Text', text: /허락하는 설정이 없어/ })).toBeDefined()
-  await pane.unmount()
-})
-
-test('after a restart the record on disk is taken up again', async ($, on) => {
-  const clock = engine(on)
-
-  waitingFiles[OWN_RECORD] = JSON.stringify(MOVED)
-  waitingFiles[WAITING_SWITCH] = JSON.stringify({ isOn: true, sectionId: 'cg-1' })
-  sidebar.sections = [{ id: 'cg-1', kind: 'manual', name: '답 기다림' }]
-  sidebar.own = ownRow({ group: { id: 'cg-1', name: '답 기다림' }, isRunning: true, lastActivityAt: REPLIED_AT })
-  await startBand($, clock)
-
-  expect(sidebar.moves).toEqual([selfMove('sessions')])
-  expect(ownRecord()).toBeNull()
-})
-
-test('a sidebar the app cannot list keeps the band on and is asked once in that wait', async ($, on) => {
-  const clock = engine(on)
-
-  waitingFiles[WAITING_SWITCH] = JSON.stringify({ isOn: true, sectionId: 'cg-1' })
-  sidebar.sections = [{ id: 'cg-1', kind: 'manual', name: '답 기다림' }]
-  sidebar.isListBroken = true
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-  await clock.advance(5_000)
-
-  expect(sidebar.moves).toEqual([])
-  expect(sidebar.calls.filter(tool => tool === 'list_sections')).toHaveLength(1)
-  expect(JSON.parse(waitingFiles[WAITING_SWITCH] ?? '{}')).toEqual({ isOn: true, sectionId: 'cg-1' })
-
-  sidebar.isListBroken = false
-  sidebar.own = ownRow({ lastActivityAt: '2026-11-04T07:01:00Z' })
-  waitForPerson()
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-1')])
-})
-
-test('a section the app cannot make is asked for once in that wait', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.isCreateBroken = true
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-  await clock.advance(5_000)
-
-  expect(sidebar.calls).toEqual(['create_section'])
-  expect(waitingFiles[WAITING_SWITCH]).toBeUndefined()
-})
-
-test('a move back the app refuses is tried once for each new activity', async ($, on) => {
-  const clock = engine(on)
-
-  sidebar.own = ownRow()
-  waitForPerson()
-  await startBand($, clock)
-  sidebar.isMoveRefused = true
-  replyFromPerson()
-  await clock.advance(5_000)
-  await clock.advance(5_000)
-  expect(sidebar.refusals).toBe(1)
-  expect(ownRecord()).toEqual(MOVED)
-
-  sidebar.isMoveRefused = false
-  replyFromPerson('2026-11-04T07:02:00Z')
-  await clock.advance(5_000)
-  expect(sidebar.moves).toEqual([selfMove('cg-1'), selfMove('sessions')])
-  expect(ownRecord()).toBeNull()
-})
-
-test('outside the app, with no row of its own, the band leaves the sidebar alone', async ($, on) => {
-  const clock = engine(on)
-
-  waitForPerson()
-  await startBand($, clock)
-  await clock.advance(5_000)
-
-  expect(sidebar.created).toEqual([])
-  expect(sidebar.moves).toEqual([])
 })
