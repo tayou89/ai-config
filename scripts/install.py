@@ -106,6 +106,7 @@ RUNTIME_SCRIPTS = (
     "config-sync-hook.py",
     "main-session-hook.py",
     "session_lineage.py",
+    "session_states.py",
     "project_rules.py",
     "sub-session-question-hook.py",
     "project-goal-hook.py",
