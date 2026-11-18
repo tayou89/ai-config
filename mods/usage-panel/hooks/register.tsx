@@ -38,9 +38,8 @@ import type {
   Segment,
   SessionCounts,
   SessionListFilter,
-  SessionRead,
-  SessionsOutput,
-  SessionsRequest,
+  SessionStates,
+  SessionStatesClaim,
   Shared,
   SharedFile,
   Tab,
@@ -54,8 +53,6 @@ import type {
   WorkPace,
 } from '../types'
 
-// A session's state file as the app last saved it.
-type SavedFile = { file: string; savedAt: number }
 // What the estimate tool was asked to record, once its input checked out.
 type EstimateInput = { maker: WorkMaker; minutes: number; steps?: number }
 type EstimateCheck = { input: EstimateInput; error?: undefined } | { input?: undefined; error: string }
@@ -71,16 +68,14 @@ type Usage = {
 type WorkPart = { key: string; text: string; color?: string; isBold?: boolean; isDim?: boolean }
 // A work's pieces in its usage line: when it ends, its tokens, its share of the week.
 type WorkPieces = { time: WorkPart[]; tokens: WorkPart[]; percent: WorkPart[] }
-// What was last read of a session: its file's save time, and the activity
-// stamp its transcript was last looked at for a question.
-type SessionSeen = SessionRead & { savedAt: number; askedAt?: string }
-type SessionState = keyof SessionCounts | 'idle'
+type OwnSession = Omit<ListedSession, 'startedBy'> & { parentSessionId?: string | null }
 type CacheView = { kind: 'warm'; until: string } | { kind: 'soon'; minutes: number } | { kind: 'cold'; after: string }
 // What each shared reading holds, by its file's name.
 type SharedOutputs = {
   [SHARED_NAME.codexLocal]: CodexLocalOutput
   [SHARED_NAME.codexServer]: CodexServerOutput
   [SHARED_NAME.history]: History
+  [SHARED_NAME.sessionStates]: SessionStates
 }
 type SharedName = keyof SharedOutputs
 // One shared reading asked for: one made since `since` for the key's folder.
@@ -158,7 +153,12 @@ const CLAUDE_SHARED = `${SHARED_FOLDER}/claude-limits.json`
 const CLAUDE_SHARE_EVERY_MS = 15 * 1000
 // The Codex readings and the 7-day count pass through the same folder: one
 // session reads, under a lock on the file, and the others take its reading.
-const SHARED_NAME = { codexLocal: 'codex-local', codexServer: 'codex-server', history: 'history' } as const
+const SHARED_NAME = {
+  codexLocal: 'codex-local',
+  codexServer: 'codex-server',
+  history: 'history',
+  sessionStates: 'session-states',
+} as const
 const SHARED_BUSY = 75
 // A shared reader stops itself this long before its call times out.
 const SHARED_MARGIN_MS = 5 * 1000
@@ -183,10 +183,11 @@ const SESSIONS_READ_MS = 20 * 1000
 // to itself: off, a session waiting for the person is counted in none.
 const IS_WAITING_COUNTED = true
 const SESSION_LIST = { server: 'ccd_session_mgmt', tool: 'list_sessions', limit: 500 } as const
-const APP_SESSIONS = 'Library/Application Support/Claude/claude-code-sessions'
-const APP_STORE = 'Library/Application Support/Claude/Local Storage/leveldb'
-const STORE_FILE = /\.(log|ldb)$/
-const READER_MODE = { sessions: 'sessions', cache: 'cache' } as const
+const SESSION_SELF = { tool: 'get_session', arguments: { session_id: 'self' } } as const
+// The first band to find the shared reading stale marks that it reads, so the
+// others skip the app's list until the new reading is in; a mark left by a
+// band that stopped mid-read lapses after one tick.
+const SESSION_STATES_CLAIM = `${SHARED_FOLDER}/session-states.claim.json`
 // In the sidebar's colors: yellow waits for the person, blue is finished and
 // unread; work stays grey.
 const SESSION_PARTS = [
@@ -880,156 +881,27 @@ def read_codex(arguments, kept):
 run_shared(read_codex)
 `
 
+const SESSION_STATES_JOIN = String.raw`
+sys.path.insert(0, os.path.expanduser('~/.claude/scripts'))
+from session_states import read_shared_states
+
+run_shared(read_shared_states)
+`
+
 // Each shared reading by its file's name: the script that makes it and how
 // long it may take.
 const SHARED_READERS = {
   [SHARED_NAME.codexLocal]: { script: CODEX_READER, timeoutMs: CODEX_READ_MS },
   [SHARED_NAME.codexServer]: { script: CODEX_READER, timeoutMs: CODEX_READ_MS },
   [SHARED_NAME.history]: { script: HISTORY_READER, timeoutMs: RECOUNT_READ_MS },
+  [SHARED_NAME.sessionStates]: { script: SESSION_STATES_JOIN, timeoutMs: SESSIONS_READ_MS },
 } as const
 
-// Reads what the app keeps of its sessions, without changing any of it, in
-// one of two modes. `sessions` (argument: a SessionsRequest) prints a
-// SessionsOutput: the newest write of the sidebar's unread list from the app's
-// Local Storage (LevelDB, its snappy blocks and write-ahead log decoded here),
-// each session's verdict from its state file, and, where asked, whether its
-// transcript ends on a question still open. `cache` (argument: this session's
-// id) prints a CacheOutput from the end of this session's transcript.
-const SESSIONS_READER = String.raw`
-import json, os, glob, struct, sys, datetime
+// This session's newest reply and the life of the cache it wrote.
+const CACHE_READER = String.raw`
+import json, os, glob, sys, datetime
 PROJECTS = os.path.expanduser('~/.claude/projects')
-UNREAD_KEY = b'epitaxy-unread-v1'
 TAIL_BYTES = 512 * 1024
-NEEDS_INPUT = ('blocked', 'need_input')
-LOCAL_COMMANDS = ('<command-name>', '<local-command-', '<bash-input>', '<bash-stdout>', '<bash-stderr>')
-
-def varint(b, i):
-    shift = n = 0
-    while True:
-        c = b[i]
-        i += 1
-        n |= (c & 0x7F) << shift
-        if c < 0x80:
-            return n, i
-        shift += 7
-
-def snappy(b):
-    _, i = varint(b, 0)
-    out = bytearray()
-    while i < len(b):
-        tag = b[i]
-        i += 1
-        kind = tag & 3
-        if kind == 0:
-            ln = tag >> 2
-            if ln >= 60:
-                extra = ln - 59
-                ln = int.from_bytes(b[i:i + extra], 'little')
-                i += extra
-            ln += 1
-            out += b[i:i + ln]
-            i += ln
-            continue
-        if kind == 1:
-            ln = ((tag >> 2) & 7) + 4
-            off = ((tag >> 5) << 8) | b[i]
-            i += 1
-        elif kind == 2:
-            ln = (tag >> 2) + 1
-            off = int.from_bytes(b[i:i + 2], 'little')
-            i += 2
-        else:
-            ln = (tag >> 2) + 1
-            off = int.from_bytes(b[i:i + 4], 'little')
-            i += 4
-        for _ in range(ln):
-            out.append(out[-off])
-    return bytes(out)
-
-def block(data, off, size):
-    raw = data[off:off + size]
-    return snappy(raw) if data[off + size] == 1 else raw
-
-def entries(blk):
-    restarts = struct.unpack('<I', blk[-4:])[0]
-    end = len(blk) - 4 - 4 * restarts
-    i, key = 0, b''
-    while i < end:
-        shared, i = varint(blk, i)
-        non, i = varint(blk, i)
-        vlen, i = varint(blk, i)
-        key = key[:shared] + blk[i:i + non]
-        i += non
-        yield key, blk[i:i + vlen]
-        i += vlen
-
-# Each write of the key in a table, as (sequence number, value).
-def table(path):
-    data = open(path, 'rb').read()
-    _, j = varint(data[-48:], 0)
-    _, j = varint(data[-48:], j)
-    index, j = varint(data[-48:], j)
-    size, j = varint(data[-48:], j)
-    for _, handle in entries(block(data, index, size)):
-        offset, k = varint(handle, 0)
-        length, _ = varint(handle, k)
-        for key, value in entries(block(data, offset, length)):
-            if UNREAD_KEY in key:
-                yield int.from_bytes(key[-8:], 'little') >> 8, value
-
-# Each write of the key in the write-ahead log, which holds the newest ones.
-def log(path):
-    data = open(path, 'rb').read()
-    record, i = bytearray(), 0
-    while i + 7 <= len(data):
-        length, kind = struct.unpack('<H', data[i + 4:i + 6])[0], data[i + 6]
-        if length == 0 and kind == 0:
-            i = (i // 32768 + 1) * 32768
-            continue
-        record += data[i + 7:i + 7 + length]
-        i += 7 + length
-        if kind in (1, 4):
-            batch, record = bytes(record), bytearray()
-            seq, count, k = int.from_bytes(batch[:8], 'little'), struct.unpack('<I', batch[8:12])[0], 12
-            for n in range(count):
-                is_put = batch[k] == 1
-                size, k = varint(batch, k + 1)
-                key, k = batch[k:k + size], k + size
-                value = b''
-                if is_put:
-                    size, k = varint(batch, k)
-                    value, k = batch[k:k + size], k + size
-                if UNREAD_KEY in key:
-                    yield seq + n, value
-        if 32768 - (i % 32768) < 7:
-            i = (i // 32768 + 1) * 32768
-
-# The sessions the sidebar marks unread, and those marked unread by hand. None
-# when the store cannot be read, as after the app changed how it keeps it.
-def unread(store):
-    try:
-        found = [w for p in glob.glob(os.path.join(store, '*.log')) for w in log(p)]
-        found = found or [w for p in glob.glob(os.path.join(store, '*.ldb')) for w in table(p)]
-        value = max(found)[1] if found else b''
-        if not value:
-            return []
-        text = value[1:].decode('utf-16-le') if value[:1] == b'\x00' else value[1:].decode('latin-1')
-        state = json.loads(text)['state']
-        return [i for i in state.get('unreadIds', []) + state.get('explicitUnreadIds', []) if isinstance(i, str)]
-    except Exception:
-        return None
-
-# As the app reads a finished turn for its sidebar: the turn's own wrap-up,
-# when it made one, says whether the person is needed; else the app's summary.
-def verdict(state):
-    summary = state.get('postTurnSummary') or {}
-    category = summary.get('status_category')
-    wrap_up = state.get('turnWrapUp')
-    if category == 'failed':
-        return 'failed'
-    if wrap_up is not None:
-        return 'needs-input' if wrap_up.get('needsUser') is not None else 'other'
-    return 'needs-input' if category in NEEDS_INPUT else 'other'
 
 def transcript(session_id):
     found = glob.glob(os.path.join(PROJECTS, '*', session_id + '.jsonl'))
@@ -1049,52 +921,6 @@ def entry(raw):
     except ValueError:
         return None
     return None if found.get('isSidechain') else found
-
-def blocks(found):
-    content = (found.get('message') or {}).get('content')
-    return [c for c in content if isinstance(c, dict)] if isinstance(content, list) else []
-
-# A user entry that started a turn: not the engine's own note, not tool
-# results alone, not a command run in the app.
-def is_prompt(found):
-    content = (found.get('message') or {}).get('content')
-    others = [c.get('text', '') for c in blocks(found) if c.get('type') != 'tool_result']
-    texts = [content] if isinstance(content, str) else others
-    return not found.get('isMeta') and any(not t.lstrip().startswith(LOCAL_COMMANDS) for t in texts)
-
-def is_question(c):
-    return c.get('type') == 'tool_use' and c.get('name') == 'AskUserQuestion'
-
-# An AskUserQuestion call with no result yet, before any prompt since.
-def is_asking(path):
-    answered = set()
-    for raw in reversed(tail(path)):
-        found = entry(raw) if b'"type":"user"' in raw or b'"type":"assistant"' in raw else None
-        if found is None:
-            continue
-        if found.get('type') == 'user':
-            if is_prompt(found):
-                return False
-            answered.update(c.get('tool_use_id') for c in blocks(found) if c.get('type') == 'tool_result')
-        elif any(is_question(c) and c.get('id') not in answered for c in blocks(found)):
-            return True
-    return False
-
-def session(asked):
-    state = json.load(open(asked['file'], encoding='utf-8'))
-    path = transcript(state.get('cliSessionId') or '') if asked['readsQuestion'] else None
-    return {'verdict': verdict(state), 'isAsking': path is not None and is_asking(path)}
-
-def sessions(request):
-    out = {'sessions': {}}
-    if 'store' in request:
-        out['unread'] = unread(request['store'])
-    for asked in request['sessions']:
-        try:
-            out['sessions'][asked['id']] = session(asked)
-        except (OSError, ValueError):
-            continue
-    return out
 
 def ms(stamp):
     return int(datetime.datetime.fromisoformat(stamp.replace('Z', '+00:00')).timestamp() * 1000)
@@ -1116,10 +942,7 @@ def cache(session_id):
             break
     return out
 
-if sys.argv[1] == 'cache':
-    print(json.dumps(cache(sys.argv[2])))
-else:
-    print(json.dumps(sessions(json.loads(sys.argv[2]))))
+print(json.dumps(cache(sys.argv[1])))
 `
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -1487,9 +1310,21 @@ async function recordCodexServerFailure($: EngineInterface): Promise<void> {
 async function listSessions($: EngineInterface, filter: SessionListFilter = {}): Promise<ListedSession[]> {
   const listed = await $.mcp.call(SESSION_LIST.server, SESSION_LIST.tool, { limit: SESSION_LIST.limit, ...filter })
   const text = listed.content.map(block => block.text ?? '').join('')
-  const rows = listed.isError ? [] : (JSON.parse(text) as ListedSession[])
+  const rows = listed.isError ? undefined : (JSON.parse(text) as ListedSession[])
 
-  return Array.isArray(rows) ? rows.filter(row => typeof row.sessionId === 'string') : []
+  if (Array.isArray(rows)) {
+    return rows.filter(row => typeof row.sessionId === 'string').map(row => ({
+      sessionId: row.sessionId,
+      title: row.title,
+      cwd: row.cwd,
+      isRunning: row.isRunning,
+      lastActivityAt: row.lastActivityAt,
+      link: row.link,
+      startedBy: row.startedBy,
+    }))
+  } else {
+    throw new Error('세션 목록을 읽지 못했어요')
+  }
 }
 
 // A session that started another one is a main session: its model and effort
@@ -1507,160 +1342,108 @@ async function isMainSession($: EngineInterface): Promise<boolean> {
   }
 }
 
-// Each session's state file by session id: the app keeps one per session, in
-// a folder per account and organization.
-async function sessionFiles($: EngineInterface, home: string): Promise<Map<string, SavedFile>> {
-  const root = `${home}/${APP_SESSIONS}`
-  const found = new Map<string, SavedFile>()
+// The app's own id differs from the engine's transcript id. Include this row
+// in the shared reading, so every band can leave out only itself.
+async function readOwnSession($: EngineInterface): Promise<ListedSession> {
+  const result = await $.mcp.call(SESSION_LIST.server, SESSION_SELF.tool, SESSION_SELF.arguments)
+  const text = result.content.map(block => block.text ?? '').join('')
+  const own = result.isError ? undefined : (JSON.parse(text) as OwnSession)
 
-  for (const account of await $.fs.list(root)) {
-    for (const organization of await $.fs.list(`${root}/${account.name}`)) {
-      const folder = `${root}/${account.name}/${organization.name}`
-      const files = organization.kind === 'dir' ? await $.fs.list(folder) : []
-
-      for (const file of files.filter(entry => entry.name.endsWith('.json'))) {
-        found.set(file.name.slice(0, -'.json'.length), { file: `${folder}/${file.name}`, savedAt: file.mtimeMs })
-      }
+  if (own && typeof own.sessionId === 'string') {
+    return {
+      sessionId: own.sessionId,
+      title: own.title,
+      cwd: own.cwd,
+      isRunning: own.isRunning,
+      lastActivityAt: own.lastActivityAt,
+      link: own.link,
+      startedBy: own.parentSessionId,
     }
-  }
-  return found
-}
-
-// The store's files by name, size and time: any write the app makes changes it.
-async function storeStamp($: EngineInterface, home: string): Promise<string> {
-  const files = await $.fs.list(`${home}/${APP_STORE}`)
-
-  return files
-    .filter(file => STORE_FILE.test(file.name))
-    .map(file => `${file.name}:${file.size}:${file.mtimeMs}`)
-    .sort()
-    .join('|')
-}
-
-// A finished session's state file is read again once the app saved it: one at
-// work saves it all the time, and its verdict counts only once it stops. A
-// session at work is looked at for an open question once it stood still for a
-// tick, as it does while the question waits, and once for each such stretch.
-function sessionsRequest(
-  listed: readonly ListedSession[],
-  files: ReadonlyMap<string, SavedFile>,
-  before: ReadonlyMap<string, ListedSession>,
-  seen: ReadonlyMap<string, SessionSeen>,
-  store: string | undefined,
-): SessionsRequest {
-  const asked = listed.flatMap(session => {
-    const saved = files.get(session.sessionId)
-    const last = seen.get(session.sessionId)
-    const isStill = session.isRunning && before.get(session.sessionId)?.lastActivityAt === session.lastActivityAt
-    const readsQuestion = IS_WAITING_COUNTED && isStill && last?.askedAt !== session.lastActivityAt
-    const isSaved = !session.isRunning && saved !== undefined && saved.savedAt !== last?.savedAt
-
-    return saved && (isSaved || readsQuestion)
-      ? [{ id: session.sessionId, ...saved, activityAt: session.lastActivityAt, readsQuestion }]
-      : []
-  })
-
-  return store === undefined ? { sessions: asked } : { store, sessions: asked }
-}
-
-async function readSessions($: EngineInterface, request: SessionsRequest): Promise<SessionsOutput | undefined> {
-  const argv = [PYTHON, '-I', '-c', SESSIONS_READER, READER_MODE.sessions, JSON.stringify(request)]
-  const ran = await $.process.run(argv, { timeoutMs: SESSIONS_READ_MS })
-
-  return ran.exitCode === 0 ? (JSON.parse(ran.stdout) as SessionsOutput) : undefined
-}
-
-// The sidebar's order: a question or a finished turn that needs the person,
-// then a turn at work, then a finished turn not looked at yet. A failed turn
-// is the sidebar's error mark, none of these.
-function sessionState(session: ListedSession, seen: SessionSeen | undefined, isUnread: boolean): SessionState {
-  const isAsking = session.isRunning && seen?.isAsking === true
-  const needsInput = !session.isRunning && isUnread && seen?.verdict === 'needs-input'
-
-  if (isAsking || needsInput) {
-    return IS_WAITING_COUNTED ? 'waiting' : 'idle'
-  } else if (session.isRunning) {
-    return 'working'
-  } else if (isUnread && seen?.verdict !== 'failed') {
-    return 'done'
   } else {
-    return 'idle'
+    throw new Error('이 세션의 정보를 읽지 못했어요')
   }
 }
 
-// Without the store no session counts as unread: nothing is done, and a turn
-// that needs the person waits only while its question is open.
-function countSessions(
-  listed: readonly ListedSession[],
-  seen: ReadonlyMap<string, SessionSeen>,
-  unread: readonly string[] | null,
-): SessionCounts {
-  const unreadIds = new Set(unread ?? [])
-  const states = listed.map(session =>
-    sessionState(session, seen.get(session.sessionId), unreadIds.has(session.sessionId)),
-  )
-  const total = (state: SessionState) => states.filter(s => s === state).length
+// The time another band marked that it reads the session states; 0 when no
+// mark can be read.
+async function readClaimAt($: EngineInterface, path: string): Promise<number> {
+  try {
+    const text = (await $.fs.exists(path)) ? await $.fs.read(path) : ''
+    const claim = text ? (JSON.parse(text) as SessionStatesClaim) : undefined
 
-  return { working: total('working'), waiting: total('waiting'), done: total('done') }
-}
-
-// Keeps what was read of each session asked about; one not asked about its
-// question keeps the answer it had.
-function recordSeen(seen: Map<string, SessionSeen>, request: SessionsRequest, output: SessionsOutput): void {
-  for (const asked of request.sessions) {
-    const read = output.sessions[asked.id]
-    const last = seen.get(asked.id)
-
-    if (read) {
-      seen.set(asked.id, {
-        verdict: read.verdict,
-        isAsking: asked.readsQuestion ? read.isAsking : (last?.isAsking ?? false),
-        savedAt: asked.savedAt,
-        askedAt: asked.readsQuestion ? asked.activityAt : last?.askedAt,
-      })
-    }
+    return typeof claim?.at === 'number' ? claim.at : 0
+  } catch {
+    return 0
   }
 }
 
-function isSameCounts(before: SessionCounts | null, after: SessionCounts): boolean {
-  return (
-    before !== null &&
-    before.working === after.working &&
-    before.waiting === after.waiting &&
-    before.done === after.done
-  )
+// A new reading for every band, made under a mark so the bands that find the
+// same stale reading meanwhile leave the app's list alone; none while another
+// band reads.
+async function readNewSessionStates(
+  $: EngineInterface,
+  claimPath: string,
+  now: number,
+  since: number,
+): Promise<Shared<SessionStates> | undefined> {
+  if ((await readClaimAt($, claimPath)) > since) {
+    return undefined
+  } else {
+    const claim: SessionStatesClaim = { at: now }
+
+    await $.fs.write(claimPath, JSON.stringify(claim))
+    const listed = await listSessions($)
+    const own = await readOwnSession($)
+    const rows = [...listed.filter(row => row.sessionId !== own.sessionId), own]
+    const request = {
+      name: SHARED_NAME.sessionStates,
+      key: SHARED_ANY_FOLDER,
+      since,
+      arguments: [JSON.stringify(rows)],
+    } as const
+
+    return readShared($, request)
+  }
 }
 
-// Counts the other sessions on each tick. What it read last stays with it: a
-// file is read again, and the store's unread list too, only once it changed.
-function sessionCounter($: EngineInterface, home: string): () => Promise<void> {
-  const seen = new Map<string, SessionSeen>()
-  let before = new Map<string, ListedSession>()
-  let storeAt = ''
-  let unread: string[] | null = null
+// Only the display counts here; the shared reader owns decisions and memory.
+function sharedSessionCounter($: EngineInterface, home: string): () => Promise<void> {
+  const path = `${home}/${SHARED_FOLDER}/${SHARED_NAME.sessionStates}.json`
+  const claimPath = `${home}/${SESSION_STATES_CLAIM}`
 
-  return async () => {
+  return async (): Promise<void> => {
     try {
-      const listed = await listSessions($)
-      const stamp = await storeStamp($, home)
-      const store = stamp === storeAt ? undefined : `${home}/${APP_STORE}`
-      const request = sessionsRequest(listed, await sessionFiles($, home), before, seen, store)
-      const isAsked = request.store !== undefined || request.sessions.length > 0
-      const output = isAsked ? await readSessions($, request) : undefined
+      const now = await $.clock.now()
+      const since = now - SESSIONS_EVERY_MS
+      // The engine lists the variables a module reads only from a literal name.
+      const ownId = await $.env.get('CLAUDE_CODE_HOST_SESSION_ID')
+      const kept = await readSharedEntry<SessionStates>($, path, SHARED_ANY_FOLDER)
+      const shared = kept && kept.at > since ? kept : await readNewSessionStates($, claimPath, now, since)
 
-      if (output) {
-        storeAt = request.store === undefined ? storeAt : stamp
-        unread = output.unread === undefined ? unread : output.unread
-        recordSeen(seen, request, output)
-      }
-      before = new Map(listed.map(session => [session.sessionId, session]))
-      const counts = countSessions(listed, seen, unread)
+      if (shared) {
+        const counts: SessionCounts = { working: 0, waiting: 0, done: 0 }
 
-      if (!isSameCounts(await read($, sessions), counts)) {
-        await update($, sessions, () => counts)
+        for (const [id, session] of Object.entries(shared.output.sessions)) {
+          if (id !== ownId) {
+            if (session.state === 'working' || session.state === 'done') {
+              counts[session.state] += 1
+            } else if (session.state === 'waiting' && IS_WAITING_COUNTED) {
+              counts.waiting += 1
+            }
+          }
+        }
+        const before = await read($, sessions)
+
+        if (
+          before?.working !== counts.working ||
+          before.waiting !== counts.waiting ||
+          before.done !== counts.done
+        ) {
+          await update($, sessions, () => counts)
+        }
       }
     } catch {
-      // The next tick counts again.
+      // A busy or failed reading keeps the previous counts until a later tick.
     }
   }
 }
@@ -1709,7 +1492,7 @@ async function recordCompaction($: EngineInterface, isIdleSummary: boolean): Pro
 }
 
 async function readCache($: EngineInterface): Promise<CacheOutput | undefined> {
-  const argv = [PYTHON, '-I', '-c', SESSIONS_READER, READER_MODE.cache, await $.session.id()]
+  const argv = [PYTHON, '-I', '-c', CACHE_READER, await $.session.id()]
   const ran = await $.process.run(argv, { timeoutMs: SESSIONS_READ_MS })
 
   return ran.exitCode === 0 ? (JSON.parse(ran.stdout) as CacheOutput) : undefined
@@ -2895,7 +2678,7 @@ export const register: Register = on => {
     await claudeShare.tick()
     $.clock.every(CLAUDE_SHARE_EVERY_MS, () => void claudeShare.tick())
 
-    const sessionCount = runOneAtATime(sessionCounter($, home))
+    const sessionCount = runOneAtATime(sharedSessionCounter($, home))
     void sessionCount.tick()
     $.clock.every(SESSIONS_EVERY_MS, () => void sessionCount.tick())
 

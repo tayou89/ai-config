@@ -164,32 +164,51 @@ export type Codex = {
   error?: string
 }
 
-// One row of the app's own session list (`list_sessions`), the fields counted.
-export type ListedSession = { sessionId: string; isRunning: boolean; lastActivityAt?: string; startedBy?: string }
+// Only the app's fields needed by the shared state reader.
+export interface ListedSession {
+  sessionId: string
+  title: string
+  cwd: string
+  isRunning: boolean
+  lastActivityAt: string
+  link?: string | null
+  startedBy?: string | null
+}
 // Which sessions the app's list returns: this session's family only, and archived ones too.
 export type SessionListFilter = { linked?: boolean; include_archived?: boolean }
-
-// How the sidebar reads a session's last turn: the app's summary of it, which
-// the turn's own wrap-up overrides.
-export type Verdict = 'needs-input' | 'failed' | 'other'
-
-// What the sessions reader is asked: the store of unread sessions when its
-// files changed, each session whose state file changed, and whether to look in
-// its transcript for a question still open. Each carries the file's save time
-// and the activity stamp it is asked at, kept with what is read.
-export type SessionRequest = {
-  id: string
-  file: string
-  savedAt: number
-  activityAt?: string
-  readsQuestion: boolean
+// What `scripts/session_states.py` prints for every session (version 1): the
+// listed fields a dashboard shows, and the state the band counts.
+export interface SessionRow {
+  title: string
+  cwd: string
+  link: string | null
+  startedBy: string | null
+  isRunning: boolean
+  lastActivityAt: string
 }
-export type SessionsRequest = { store?: string; sessions: SessionRequest[] }
-
-export type SessionRead = { verdict: Verdict; isAsking: boolean }
-
-// `unread` only when the store was asked for, null when it could not be read.
-export type SessionsOutput = { unread?: string[] | null; sessions: Record<string, SessionRead> }
+export interface SessionState {
+  state: 'waiting' | 'working' | 'failed' | 'done' | 'idle' | 'unknown'
+  waitingFor: string | null
+  isAnswerPending: boolean
+  reason: string | null
+  since: number | null
+  row: SessionRow
+}
+export interface Unreadable {
+  source: string
+  reason: string
+}
+export interface SessionStates {
+  version: 1
+  at: number
+  unread: string[] | null
+  sessions: Record<string, SessionState>
+  unreadable: Unreadable[]
+}
+// The mark a band leaves while it makes a new reading of the session states.
+export interface SessionStatesClaim {
+  at: number
+}
 
 // The other sessions in each of the sidebar's states: at work, waiting for the
 // person (its yellow dot), finished and unread (its blue dot).

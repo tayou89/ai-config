@@ -26,7 +26,7 @@ codex --search exec -m <model> -c model_reasoning_effort="<effort>" --skip-git-r
 
 `--search` turns on web search and goes before `exec`, which rejects it; leave it out for record collection that needs no web. `--skip-git-repo-check` lets Codex run in a folder that is not a Git repository (a run without it fails there; seen 2026-11-18). Do not use `-s read-only` for research: `codex-limits.py` counts read-only runs as running reviews, so independent reviews would wait behind it. Codex can still read files outside the run folder, such as transcripts and logs.
 
-Take `<model>` and `<effort>` from `agent-usage` section 13; change the names when `outside-review` changes its own. Run it in the background, set the entry to `running` with `codex-budget.py update <id> --state running`, and keep working on other things. `-s workspace-write` limits file writes mostly to the worktree or run folder, but extra writable paths, temporary folders, command rules, and connected tools can reach further, so the review below checks what changed. Leave out `--ephemeral` so the run shows in the Codex session log, which the budget check reads.
+Take `<model>` and `<effort>` from `agent-usage` section 13; change the names when `outside-review/run-review.py` changes its own. Run it in the background, set the entry to `running` with `codex-budget.py update <id> --state running`, and keep working on other things. `-s workspace-write` limits file writes mostly to the worktree or run folder, but extra writable paths, temporary folders, command rules, and connected tools can reach further, so the review below checks what changed. Leave out `--ephemeral` so the run shows in the Codex session log, which the budget check reads.
 
 ## 3. Review and Commit
 

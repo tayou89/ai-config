@@ -42,6 +42,7 @@
       "Skill(update-config)",
       "Skill(update-config:*)",
       "Bash(python3 ~/.claude/scripts/claude-commit.py:*)",
+      "Bash(python3 ~/.claude/skills/outside-review/run-review.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
       "mcp__ccd_session_mgmt__archive_session"
     ]
