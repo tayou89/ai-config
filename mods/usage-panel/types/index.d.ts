@@ -194,6 +194,43 @@ export type SessionsOutput = { unread?: string[] | null; sessions: Record<string
 // The other sessions in each of the sidebar's states: at work, waiting for the
 // person (its yellow dot), finished and unread (its blue dot).
 export type SessionCounts = { working: number; waiting: number; done: number }
+// A session's state as the sidebar marks it, or none of its marks.
+export type SessionState = keyof SessionCounts | 'idle'
+
+// This session's own row (`get_session self`): the listed fields, and where the
+// sidebar files it. A group of null, or none, is the ungrouped list.
+export type OwnSession = ListedSession & { group?: { id: string; name: string } | null; pinned?: boolean }
+// Where this session sits in the sidebar, as the waiting section reads it.
+export type OwnSidebarPlace = { groupId?: string; isPinned: boolean; activityAt?: string }
+// What the band keeps of this session's place, in a file of the session's own:
+// the section it moved it to, from where, and the activity it waited at; or
+// that the person moved it out during that wait.
+export type WaitingRecord =
+  | { kind: 'moved'; sectionId: string; fromGroupId?: string; activityAt?: string }
+  | { kind: 'released'; activityAt?: string }
+// The switch every session reads: on or off, and the section once made.
+export type WaitingSwitch = { isOn: boolean; sectionId?: string }
+// The activity at which the app refused, or could not make, this session's move.
+export type WaitingRefusal = { activityAt?: string }
+// One section as the sidebar lists it (`list_sections`) or makes it.
+export type SidebarSectionRow = { id: string; kind: string; name: string }
+export type WaitingInput = {
+  own: OwnSidebarPlace
+  state: SessionState
+  record?: WaitingRecord
+  sectionId?: string
+  isOn: boolean
+  refused?: WaitingRefusal
+}
+export type WaitingStep =
+  | { kind: 'stay' }
+  | { kind: 'enter'; fromGroupId?: string; activityAt?: string }
+  | { kind: 'leave'; toSectionId: string }
+  | { kind: 'release'; activityAt?: string }
+  | { kind: 'forget' }
+// What the details pane shows of the section: on or off, and whether the app
+// refused this session's move in its current wait.
+export type WaitingView = { isOn: boolean; isRefused: boolean }
 
 export type CacheTtl = '1h' | '5m'
 
@@ -286,6 +323,7 @@ declare module 'claude-code' {
       limitHistory: Shaped<LimitStep[]>
       pendingCodexEstimate: Shaped<WorkEstimate | null>
       workTick: Shaped<number>
+      waiting: Shaped<WaitingView>
     }
   }
 }
