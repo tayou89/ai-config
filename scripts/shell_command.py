@@ -73,6 +73,7 @@ FUNCTION_START_PATTERN = re.compile(
 FUNCTION_END_PATTERN = re.compile(r"^\}\s*$")
 SHELL_NAMES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash", "fish"})
 SHELL_OPTIONS_WITH_ARGUMENT = frozenset({"--rcfile", "--init-file"})
+PYTHON_PATTERN = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$")
 GIT_EXECUTABLES = frozenset({"git", "git.exe", "hub"})
 GIT_OPTIONS_WITH_ARGUMENT = frozenset({
     "--git-dir",
@@ -1133,6 +1134,19 @@ class CommandExpander:
     def _is_expandable_name(self, name: _Argument, definitions: dict[str, str], state: _ExpansionState) -> bool:
         return not name.quoted and not name.dynamic and name.text in definitions and name.text not in state.active_names
 
+
+
+def find_script_index(argv: list[str], script_name: str) -> int:
+    """Where a call names a script, run directly or by a Python interpreter with only options before it, or -1."""
+    names = [os.path.basename(argument) for argument in argv]
+
+    if names[:1] == [script_name]:
+        return 0
+    elif names and PYTHON_PATTERN.match(names[0]) and script_name in names[1:]:
+        position = names.index(script_name, 1)
+        return position if all(argument.startswith("-") for argument in argv[1:position]) else -1
+    else:
+        return -1
 
 
 def parse_git_command(argv: list[str], cwd: str | None) -> GitCommand | None:
