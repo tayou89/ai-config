@@ -2,7 +2,7 @@
 """pr-merge.py — merge a task's pull request one at a time, on fresh evidence only.
 
 Usage:
-    pr-merge.py [<pull request number, URL, or branch>]
+    pr-merge.py [--wait [--wait-minutes N] [--poll-seconds N]] [<pull request number, URL, or branch>]
 
 Run it in the task's worktree once its pull request is ready. It works only
 in a repository whose .agent-workflow.json, as committed on the base branch,
@@ -28,9 +28,25 @@ pull request that changes them gets a warning to review that change.
 
 After the merge it waits until the fetched base branch contains the merge
 commit and fast-forwards the original checkout when that checkout is clean
-and on the base branch. Run again after an interruption: a pull request
-already merged is only finished, never merged twice. It does not remove the
-worktree or the branch; worktree-cleanup.py does that as its own step.
+and on the base branch, and it fast-forwards the task branch to the merged
+head, since worktree-cleanup.py finds a squash-merged branch by that last
+commit. Run again after an interruption: a pull request already merged is
+only finished, never merged twice. It does not remove the worktree or the
+branch; worktree-cleanup.py does that as its own step.
+
+With --wait, run as one background command once the pull request is open
+(user decision, 2026-11-17), it first waits, outside the lock, until every
+required check on the head has finished. Inside the lock it then waits for
+GitHub to work out whether the pull request merges cleanly, and when the
+base moved meanwhile, the merge is clean, and every required check passed
+on the current head, it asks GitHub's update-branch endpoint to merge the
+base into the head (refused if the head moved), fetches that new head,
+waits for its checks, and merges. Holding the lock through that second wait
+queues this computer's merges, so a pull request brings in the base at most
+once. A conflict, a failed check, or the end of the wait leaves the pull
+request unmerged with the reasons printed; when the checks fail on the head
+update-branch made, that head stays on GitHub and the task branch is behind
+it until the session pulls it.
 
 Exit codes:
     0  merged, or already merged and now finished
@@ -94,6 +110,34 @@ CHECK_RUN_TYPE = "CheckRun"
 GATE_PATHS = (POLICY_FILE, ".github/workflows/", ".githooks/", "scripts/check-commit.py")
 CONFIRM_ATTEMPTS = 6
 CONFIRM_DELAY_SECONDS = 2.0
+MERGEABLE = "MERGEABLE"
+PENDING_STATES = ("PENDING", "EXPECTED")
+UPDATE_BRANCH_PATH = "repos/{{owner}}/{{repo}}/pulls/{number}/update-branch"
+DEFAULT_WAIT_MINUTES = 60.0
+DEFAULT_POLL_SECONDS = 30.0
+SECONDS_PER_MINUTE = 60.0
+
+
+@dataclass(frozen=True)
+class MergeOptions:
+    selector: str | None
+    wait: bool
+    wait_seconds: float
+    poll_seconds: float
+
+
+@dataclass(frozen=True)
+class WaitLimit:
+    """When a waiting run gives up, and how often it asks GitHub again until then."""
+
+    deadline: float
+    poll_seconds: float
+
+    def has_time_left(self) -> bool:
+        return time.monotonic() < self.deadline
+
+    def read_seconds_left(self) -> float:
+        return max(self.deadline - time.monotonic(), 0.0)
 
 
 @dataclass(frozen=True)
@@ -117,15 +161,24 @@ class MergeResult:
 
 
 def main(arguments: Sequence[str]) -> int:
-    selector = parse_options(arguments)
+    options = parse_options(arguments)
+    limit = WaitLimit(time.monotonic() + options.wait_seconds, options.poll_seconds)
 
     try:
         root = read_worktree_root()
-        number = view_pull_request(selector).number
+        number = view_pull_request(options.selector).number
 
-        with hold_integration_lock(find_common_git_directory(root), DEFAULT_WAIT_SECONDS, announce_wait):
-            result = merge_when_ready(root, view_pull_request(str(number)))
+        if options.wait:
+            wait_for_checks(root, number, limit)
+        lock_wait_seconds = read_lock_wait_seconds(options, limit)
+
+        with hold_integration_lock(find_common_git_directory(root), lock_wait_seconds, announce_wait):
+            pull_request = view_pull_request(str(number))
+            ready = bring_in_base(root, pull_request, limit) if options.wait else pull_request
+            result = merge_when_ready(root, ready)
+
             update_original_checkout(root, result.pull_request.base, result.merge_commit)
+            update_task_branch(root, result.pull_request)
         print(f"Merged {result.pull_request.url} into {result.pull_request.base} as {result.merge_commit[:12]}.")
         print("Remove the worktree with worktree-cleanup.py once nothing in it is still needed.")
         return EXIT_DONE
@@ -143,13 +196,53 @@ def main(arguments: Sequence[str]) -> int:
         return EXIT_LOCK_TIMEOUT
 
 
-def parse_options(arguments: Sequence[str]) -> str | None:
+def parse_options(arguments: Sequence[str]) -> MergeOptions:
     parser = argparse.ArgumentParser(description="Merge a task's pull request one at a time, on fresh evidence only.")
 
     parser.add_argument("pull_request", nargs="?", help="number, URL, or branch; the current branch's when omitted")
-    selector: str | None = parser.parse_args(arguments).pull_request
+    parser.add_argument(
+        "--wait",
+        action="store_true",
+        help="wait for the required checks, bring in a moved base on GitHub when it merges cleanly, then merge",
+    )
+    parser.add_argument(
+        "--wait-minutes",
+        type=parse_positive_number,
+        default=DEFAULT_WAIT_MINUTES,
+        help="how long --wait waits",
+    )
+    parser.add_argument(
+        "--poll-seconds",
+        type=parse_positive_number,
+        default=DEFAULT_POLL_SECONDS,
+        help="how often --wait asks",
+    )
+    parsed = parser.parse_args(arguments)
 
-    return selector
+    return MergeOptions(
+        selector=parsed.pull_request,
+        wait=parsed.wait,
+        wait_seconds=parsed.wait_minutes * SECONDS_PER_MINUTE,
+        poll_seconds=parsed.poll_seconds,
+    )
+
+
+def parse_positive_number(text: str) -> float:
+    """A wait or poll time; zero would ask GitHub without pause and a negative one cannot be slept."""
+    value = float(text)
+
+    if value > 0:
+        return value
+    else:
+        raise argparse.ArgumentTypeError(f"{text} is not a positive number")
+
+
+def read_lock_wait_seconds(options: MergeOptions, limit: WaitLimit) -> float:
+    """A waiting run waits for the lock as long as its wait has left, read once the wait outside the lock is over."""
+    if options.wait:
+        return max(limit.read_seconds_left(), DEFAULT_WAIT_SECONDS)
+    else:
+        return DEFAULT_WAIT_SECONDS
 
 
 def find_common_git_directory(root: Path) -> Path:
@@ -256,18 +349,92 @@ def list_state_problems(pull_request: PullRequest) -> list[str]:
 
 def list_base_problems(pull_request: PullRequest, base_tip: str) -> list[str]:
     """Whether the head contains the base branch as GitHub has it now, not as it was when the checks ran."""
-    compare_path = f"repos/{{owner}}/{{repo}}/compare/{base_tip}...{pull_request.head_commit}"
-    answer = run_required(["gh", "api", compare_path, "--jq", ".behind_by"])
+    missing = count_missing_base_commits(pull_request, base_tip)
 
-    if not answer.isdigit():
-        raise CommandError(f"GitHub's compare answer is not a count: {answer!r}")
-    elif int(answer) > 0:
+    if missing > 0:
         return [
-            f"its head lacks {answer} commits now on {pull_request.base}; merge {pull_request.base} into the task "
+            f"its head lacks {missing} commits now on {pull_request.base}; merge {pull_request.base} into the task "
             "branch, push it, and wait for its checks",
         ]
     else:
         return []
+
+
+def count_missing_base_commits(pull_request: PullRequest, base_tip: str) -> int:
+    compare_path = f"repos/{{owner}}/{{repo}}/compare/{base_tip}...{pull_request.head_commit}"
+    answer = run_required(["gh", "api", compare_path, "--jq", ".behind_by"])
+
+    if answer.isdigit():
+        return int(answer)
+    else:
+        raise CommandError(f"GitHub's compare answer is not a count: {answer!r}")
+
+
+def wait_for_checks(root: Path, number: int, limit: WaitLimit) -> PullRequest:
+    """Wait until every required check on the head has finished, passed or not; the merge step then judges them."""
+    pull_request = view_pull_request(str(number))
+    required = read_base_policy(root, pull_request.base).required_checks
+
+    while is_waiting_for_checks(pull_request, required) and limit.has_time_left():
+        time.sleep(limit.poll_seconds)
+        pull_request = view_pull_request(str(number))
+    return pull_request
+
+
+def bring_in_base(root: Path, pull_request: PullRequest, limit: WaitLimit) -> PullRequest:
+    """Inside the lock, merge a moved base into the head on GitHub when it merges cleanly, then wait for its checks.
+
+    GitHub's update-branch endpoint makes the merge commit itself, so no session commits
+    lines the base branch already brought through its own checks; a conflict is left to the
+    session, and the merge step then reports it.
+    """
+    settled = wait_for_mergeable(pull_request, limit)
+    required = read_base_policy(root, settled.base).required_checks
+
+    if is_ready_to_bring_in_base(settled, required, limit):
+        update_head_on_github(settled)
+        moved = wait_for_new_head(root, settled, limit)
+        return wait_for_checks(root, moved.number, limit)
+    else:
+        return settled
+
+
+def wait_for_mergeable(pull_request: PullRequest, limit: WaitLimit) -> PullRequest:
+    """GitHub works out whether an open pull request merges cleanly after its base moves; wait for that answer.
+
+    GitHub answers UNKNOWN for a merged pull request every time, so only an open one is waited for.
+    """
+    current = pull_request
+
+    while current.state == OPEN_STATE and current.mergeable == UNKNOWN_MERGEABLE and limit.has_time_left():
+        time.sleep(limit.poll_seconds)
+        current = view_pull_request(str(current.number))
+    return current
+
+
+def update_head_on_github(pull_request: PullRequest) -> None:
+    """Ask GitHub to merge the base into the head, refused if the head moved since it was read."""
+    update_path = UPDATE_BRANCH_PATH.format(number=pull_request.number)
+
+    print(f"Bringing {pull_request.base} into {pull_request.head_branch} on GitHub, then waiting for its checks.")
+    run_required(
+        ["gh", "api", update_path, "--method", "PUT", "-f", f"expected_head_sha={pull_request.head_commit}"],
+    )
+
+
+def wait_for_new_head(root: Path, pull_request: PullRequest, limit: WaitLimit) -> PullRequest:
+    """GitHub answers update-branch before the merge commit exists; wait until the head shows it, then fetch it.
+
+    The merge commit exists only on GitHub, and the gate-change warning and the
+    task branch's fast-forward read it from this clone.
+    """
+    current = view_pull_request(str(pull_request.number))
+
+    while current.head_commit == pull_request.head_commit and limit.has_time_left():
+        time.sleep(limit.poll_seconds)
+        current = view_pull_request(str(pull_request.number))
+    git(root, "fetch", "--quiet", REMOTE, current.head_branch)
+    return current
 
 
 def list_check_problems(checks: Sequence[dict[str, Any]], required: Sequence[str]) -> list[str]:
@@ -368,11 +535,59 @@ def update_original_checkout(root: Path, base: str, merge_commit: str) -> None:
         print(f"Could not update the original checkout ({error}); the merge itself is done.")
 
 
+def update_task_branch(root: Path, pull_request: PullRequest) -> None:
+    """Fast-forward the task branch to the head that was merged, which update-branch may have moved past it.
+
+    worktree-cleanup.py finds a squash-merged branch by its last commit, so a
+    branch left behind GitHub's merge commit would look unmerged.
+    """
+    try:
+        if read_current_branch(root) == pull_request.head_branch and not has_tracked_changes(root):
+            git(root, "fetch", "--quiet", REMOTE, pull_request.head_branch)
+            git(root, "merge", "--ff-only", "--quiet", pull_request.head_commit)
+        else:
+            print(f"Left {root} as it is: it is not a clean checkout of {pull_request.head_branch}.")
+    except CommandError as error:
+        print(f"Could not fast-forward {pull_request.head_branch} to the merged head ({error}); the merge is done.")
+
+
 def is_passed(entry: dict[str, Any]) -> bool:
     if entry.get("__typename") == CHECK_RUN_TYPE:
         return entry.get("status") == COMPLETED_STATUS and entry.get("conclusion") == SUCCESS
     else:
         return entry.get("state") == SUCCESS
+
+
+def is_finished(entry: dict[str, Any]) -> bool:
+    if entry.get("__typename") == CHECK_RUN_TYPE:
+        return entry.get("status") == COMPLETED_STATUS
+    else:
+        return entry.get("state") not in PENDING_STATES
+
+
+def is_waiting_for_checks(pull_request: PullRequest, required: Sequence[str]) -> bool:
+    """An open pull request whose required checks have not all started and finished on its head."""
+    entries = [entry for entry in pull_request.checks if read_check_name(entry) in required]
+    started = {read_check_name(entry) for entry in entries}
+
+    return pull_request.state == OPEN_STATE and (
+        not set(required) <= started or not all(is_finished(entry) for entry in entries)
+    )
+
+
+def is_ready_to_bring_in_base(pull_request: PullRequest, required: Sequence[str], limit: WaitLimit) -> bool:
+    """An open, cleanly merging pull request whose head passed its checks but lacks commits now on the base.
+
+    A head whose checks failed, or a wait already over, is left as it is rather than
+    given a merge commit nobody will wait for.
+    """
+    return (
+        pull_request.state == OPEN_STATE
+        and pull_request.mergeable == MERGEABLE
+        and limit.has_time_left()
+        and not list_check_problems(pull_request.checks, required)
+        and count_missing_base_commits(pull_request, read_remote_branch_tip(pull_request.base)) > 0
+    )
 
 
 if __name__ == "__main__":

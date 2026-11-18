@@ -3,7 +3,7 @@ name: git-commit
 description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
-<!-- Adapted from skills/git-commit/SKILL.md at aaad3886b36ccae90e1c328d447f8063021da1a5, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at cbf3ecf007637f00fca41eba361b43159b76ac4f -->
+<!-- Adapted from skills/git-commit/SKILL.md at 71b2b2b96774dc1f8af3c0ca209e582fdf3cd103, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at aca7ddaf2b60c91ab65c1b17db4b4ecdba2260ab -->
 
 # Commit Workflow
 
@@ -15,7 +15,7 @@ Use normal Git commands or the connected GitHub interface. Claude's commit wrapp
 
 Follow the workflow the repository records in `.agent-workflow.json`, which names its mode, base branch, and required checks or check commands (user decision, 2026-11-13):
 
-- **Pull request with a guarded merge** (`pull-request`, personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request, and merge it only with `python3 ~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. Never push the base branch, merge with administrator rights, or enable auto-merge.
+- **Pull request with a guarded merge** (`pull-request`, personal repositories with a GitHub remote): commit on the task branch, push it, open the pull request, and merge it only with `python3 ~/.claude/scripts/pr-merge.py`, which merges one pull request at a time per repository and only when its head contains the current base branch and every required check passed on that head. A missing, pending, cancelled, or skipped check is not a pass. With `--wait` it waits for the required checks, brings a base that moved meanwhile into the head through GitHub's update-branch when that merges cleanly, waits again, and merges. Never push the base branch, merge with administrator rights, or enable auto-merge.
 - **Local integration** (`local-integration`, a repository without a remote): integrate the task branch with `python3 ~/.claude/scripts/local-integrate.py`, which checks the merged result in a temporary worktree and moves the base only when the checks pass.
 - **Direct commits** (`direct`): commit to the base branch in the original checkout, holding the repository's lock for the whole write, check, and commit where its rules keep one.
 - **Team workflow** (`team`): follow the team's rules and ask before every merge. Keep the file out of the team's repository by listing it in `.git/info/exclude`.

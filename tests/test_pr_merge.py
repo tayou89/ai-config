@@ -20,10 +20,28 @@ EXIT_MERGED = 0
 EXIT_NOT_READY = 2
 EXIT_NO_POLICY = 3
 EXIT_COMMAND_FAILED = 4
+RUNNING_CHECK = {**PASSED_CHECK, "status": "IN_PROGRESS", "conclusion": None}
+PENDING_STATUS = {"__typename": "StatusContext", "context": "checks", "state": "PENDING"}
+FAST_WAIT = ["--wait", "--poll-seconds", "0.05"]
+UPDATE_BRANCH_CALL = ["api", "repos/{owner}/{repo}/pulls/1/update-branch", "--method", "PUT"]
+UPDATE_BRANCH_SUFFIX = "/update-branch"
 
 
 def make_check(**values: Any) -> dict[str, Any]:
     return {**PASSED_CHECK, **values}
+
+
+def make_pull_request(checks: list[dict[str, Any]], state: str) -> Any:
+    """A pr-merge.PullRequest; the script is loaded at run time, so its type is not known statically."""
+    return pr_merge.PullRequest(1, "url", state, False, "MERGEABLE", BASE, "task-a", "head", tuple(checks), None)
+
+
+def open_task(world: WorkflowWorld, number: int, branch: str, name: str) -> tuple[Path, str]:
+    worktree = world.add_worktree(branch)
+    head = world.commit_file(worktree, name, f"{name}\n", f"Feat: add {name}")
+
+    world.open_pull_request(number, branch, worktree)
+    return worktree, head
 
 
 class CheckEvaluationTest(unittest.TestCase):
@@ -64,18 +82,31 @@ class CheckEvaluationTest(unittest.TestCase):
 
         self.assertIn("has not run", pr_merge.list_check_problems([other], ["checks"])[0])
 
+    def test_waits_only_while_a_required_check_has_not_started_or_finished(self) -> None:
+        cases: dict[str, tuple[list[dict[str, Any]], str, bool]] = {
+            "not started": ([], "OPEN", True),
+            "running": ([RUNNING_CHECK], "OPEN", True),
+            "status pending": ([PENDING_STATUS], "OPEN", True),
+            "passed": ([PASSED_CHECK], "OPEN", False),
+            "failed": ([make_check(conclusion="FAILURE")], "OPEN", False),
+            "only another check": ([make_check(name="lint")], "OPEN", True),
+            "merged": ([RUNNING_CHECK], "MERGED", False),
+        }
+
+        for word, (checks, state, waits) in cases.items():
+            with self.subTest(word):
+                pull_request = make_pull_request(checks, state)
+
+                self.assertEqual(pr_merge.is_waiting_for_checks(pull_request, ["checks"]), waits)
+
 
 class MergeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.world = WorkflowWorld(POLICY)
         self.addCleanup(self.world.close)
 
-    def make_task(self, number: int, branch: str, name: str) -> tuple[Any, str]:
-        worktree = self.world.add_worktree(branch)
-        head = self.world.commit_file(worktree, name, f"{name}\n", f"Feat: add {name}")
-
-        self.world.open_pull_request(number, branch, worktree)
-        return worktree, head
+    def make_task(self, number: int, branch: str, name: str) -> tuple[Path, str]:
+        return open_task(self.world, number, branch, name)
 
     def merge(self, worktree: Any, *arguments: str) -> Any:
         return self.world.run_script("pr-merge", list(arguments), worktree)
@@ -263,6 +294,139 @@ class MergeTest(unittest.TestCase):
         while not any(call[: len(prefix)] == prefix for call in self.world.list_gh_calls()):
             self.assertLess(time.monotonic(), deadline, "the gh call never came")
             time.sleep(0.1)
+
+
+class WaitTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.world = WorkflowWorld(POLICY)
+        self.addCleanup(self.world.close)
+
+    def make_task(self, number: int, branch: str, name: str) -> tuple[Path, str]:
+        return open_task(self.world, number, branch, name)
+
+    def set_check_sequence(self, head: str, sequence: list[list[dict[str, Any]]]) -> None:
+        state = self.world.load_state()
+
+        state.setdefault("checkSequences", {})[head] = sequence
+        self.world.save_state(state)
+
+    def wait_and_merge(self, worktree: Path, *arguments: str) -> Any:
+        return self.world.run_script("pr-merge", [*FAST_WAIT, *arguments], worktree)
+
+    def list_calls(self, prefix: list[str]) -> list[list[str]]:
+        return [call for call in self.world.list_gh_calls() if call[: len(prefix)] == prefix]
+
+    def test_waits_for_running_checks_and_then_merges(self) -> None:
+        worktree, head = self.make_task(1, "task-a", "a.txt")
+        self.set_check_sequence(head, [[], [RUNNING_CHECK], [RUNNING_CHECK], [PASSED_CHECK]])
+        result = self.wait_and_merge(worktree)
+
+        self.assertEqual(result.returncode, EXIT_MERGED, result.stderr)
+        self.assertEqual(len(self.list_calls(["pr", "merge"])), 1)
+        self.assertTrue((self.world.original / "a.txt").exists())
+
+    def test_stops_waiting_on_a_failed_check_without_merging(self) -> None:
+        worktree, head = self.make_task(1, "task-a", "a.txt")
+        self.set_check_sequence(head, [*[[RUNNING_CHECK]] * 4, [make_check(conclusion="FAILURE")]])
+        result = self.wait_and_merge(worktree)
+
+        self.assertEqual(result.returncode, EXIT_NOT_READY)
+        self.assertIn("failure", result.stderr)
+        self.assertEqual(self.list_calls(["pr", "merge"]), [])
+
+    def test_leaves_a_moved_base_out_of_a_head_whose_checks_failed(self) -> None:
+        worktree, head = self.make_task(1, "task-a", "a.txt")
+        self.world.set_checks(head, [make_check(conclusion="FAILURE")])
+        self.world.push_base_commit("other.txt", "other\n")
+        result = self.wait_and_merge(worktree)
+
+        self.assertEqual(result.returncode, EXIT_NOT_READY)
+        self.assertIn("failure", result.stderr)
+        self.assertEqual(self.list_calls(UPDATE_BRANCH_CALL), [])
+
+    def test_gives_up_at_the_end_of_the_wait(self) -> None:
+        worktree, head = self.make_task(1, "task-a", "a.txt")
+        self.world.set_checks(head, [RUNNING_CHECK])
+        result = self.wait_and_merge(worktree, "--wait-minutes", "0.005")
+
+        self.assertEqual(result.returncode, EXIT_NOT_READY)
+        self.assertIn("in_progress", result.stderr)
+        self.assertEqual(self.list_calls(["pr", "merge"]), [])
+
+    def test_brings_in_a_moved_base_on_github_then_merges_and_cleanup_finds_it(self) -> None:
+        worktree, head = self.make_task(1, "task-a", "a.txt")
+        self.world.push_base_commit("other.txt", "other\n")
+        self.world.update_state(afterUpdateChecks=[*[[RUNNING_CHECK]] * 3, [PASSED_CHECK]])
+        result = self.wait_and_merge(worktree)
+        updates = self.list_calls(UPDATE_BRANCH_CALL)
+        merged_head = self.world.load_state()["pulls"]["1"]["mergedHead"]
+        merges = self.list_calls(["pr", "merge"])
+        cleanup = self.world.run_script("worktree-cleanup", [str(worktree)], self.world.root)
+
+        self.assertEqual(result.returncode, EXIT_MERGED, result.stderr)
+        self.assertNotIn("could not list", result.stdout)
+        self.assertEqual(updates, [[*UPDATE_BRANCH_CALL, "-f", f"expected_head_sha={head}"]])
+        self.assertNotEqual(merged_head, head)
+        self.assertEqual(merges, [["pr", "merge", "1", "--squash", "--match-head-commit", merged_head]])
+        self.assertTrue((self.world.original / "a.txt").exists())
+        self.assertTrue((self.world.original / "other.txt").exists())
+        self.assertEqual(cleanup.returncode, EXIT_MERGED, cleanup.stderr)
+        self.assertFalse(worktree.exists())
+
+    def test_leaves_a_conflicting_moved_base_to_the_session(self) -> None:
+        worktree, _ = self.make_task(1, "task-a", "a.txt")
+        self.world.push_base_commit("a.txt", "the base's own a\n")
+        state = self.world.load_state()
+        state["pulls"]["1"]["mergeable"] = "CONFLICTING"
+        self.world.save_state(state)
+        result = self.wait_and_merge(worktree)
+
+        self.assertEqual(result.returncode, EXIT_NOT_READY)
+        self.assertIn("conflicts", result.stderr)
+        self.assertEqual(self.list_calls(UPDATE_BRANCH_CALL), [])
+        self.assertEqual(self.list_calls(["pr", "merge"]), [])
+
+    def test_waits_for_github_to_check_for_conflicts(self) -> None:
+        worktree, _ = self.make_task(1, "task-a", "a.txt")
+        self.world.update_state(mergeableSequences={"1": [*["UNKNOWN"] * 5, "MERGEABLE"]})
+        result = self.wait_and_merge(worktree)
+
+        self.assertEqual(result.returncode, EXIT_MERGED, result.stderr)
+
+    def test_a_merged_pull_request_is_finished_without_waiting_on_its_conflict_check(self) -> None:
+        worktree, _ = self.make_task(1, "task-a", "a.txt")
+        self.assertEqual(self.world.run_script("pr-merge", [], worktree).returncode, EXIT_MERGED)
+        self.world.update_state(mergeableSequences={"1": ["UNKNOWN"]})
+        started = time.monotonic()
+        result = self.wait_and_merge(worktree, "--wait-minutes", "1")
+
+        self.assertEqual(result.returncode, EXIT_MERGED, result.stderr)
+        self.assertIn("already merged", result.stdout)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_refuses_a_poll_time_that_is_not_positive(self) -> None:
+        worktree, _ = self.make_task(1, "task-a", "a.txt")
+
+        for value in ("0", "-1", "soon"):
+            with self.subTest(value):
+                result = self.world.run_script("pr-merge", ["--wait", "--poll-seconds", value], worktree)
+
+                self.assertNotEqual(result.returncode, EXIT_MERGED)
+                self.assertIn("--poll-seconds", result.stderr)
+        self.assertEqual(self.list_calls(["pr", "merge"]), [])
+
+    def test_two_waiting_merges_land_both_and_bring_in_the_base_once(self) -> None:
+        first, _ = self.make_task(1, "task-a", "a.txt")
+        second, _ = self.make_task(2, "task-b", "b.txt")
+        self.world.update_state(mergeDelaySeconds=1.0)
+        processes = [self.world.start_script("pr-merge", FAST_WAIT, worktree) for worktree in (first, second)]
+        outcomes = [(process.wait(timeout=120), *process.communicate()) for process in processes]
+        updates = [call for call in self.list_calls(["api"]) if call[1].endswith(UPDATE_BRANCH_SUFFIX)]
+
+        self.assertEqual([code for code, _, _ in outcomes], [EXIT_MERGED, EXIT_MERGED], outcomes)
+        self.assertEqual(len(updates), 1)
+        self.assertTrue((self.world.original / "a.txt").exists())
+        self.assertTrue((self.world.original / "b.txt").exists())
 
 
 class LockTest(unittest.TestCase):
