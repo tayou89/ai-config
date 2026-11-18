@@ -678,11 +678,12 @@ test('the Codex line names the model and effort the next run takes, just before 
   await clock.advance(1)
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...ABOVE, surface })
-    const line = await ui.find({ key: 'codex' })
-    const keys = (line?.children ?? []).map(child => (child as { props?: { key?: string } }).props?.key)
+    const keysIn = async (key: string): Promise<(string | undefined)[]> =>
+      ((await ui.find({ key }))?.children ?? []).map(child => (child as { props?: { key?: string } }).props?.key)
 
     expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
-    expect(keys.slice(-2)).toEqual(['codex-setting', 'codex-details'])
+    expect((await keysIn('codex')).slice(-1)).toEqual(['codex-end'])
+    expect(await keysIn('codex-end')).toEqual(['codex-setting', 'codex-details'])
     await ui.unmount()
   }
 

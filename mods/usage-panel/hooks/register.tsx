@@ -13,7 +13,7 @@ import {
   overLevel,
   workPace,
 } from './work'
-import type { EngineInterface, FsEntry, Register, ToolCallResult } from 'claude-code'
+import type { EngineInterface, FsEntry, Register, RenderChildren, ToolCallResult } from 'claude-code'
 import type {
   Cache,
   CacheOutput,
@@ -2993,7 +2993,7 @@ export const register: Register = on => {
     // them alike: a bare Text or Button beside these Boxes sat lower. The
     // children are written out in each Box, never passed through a fragment:
     // the desktop drew a fragment as a block and stacked the ring above its text.
-    const slot = (key: string, child: unknown) => (
+    const slot = (key: string, child: RenderChildren) => (
       <Box key={key} flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
         {child}
       </Box>
@@ -3082,6 +3082,15 @@ export const register: Register = on => {
     // draws a Button's label rather than its children.
     const detailsButton = (key: string) =>
       slot(key, <Button key={key} label={DETAILS_GLYPH} plain dimColor onPress={() => void openDetails($)} />)
+
+    // The chevron keeps close to the piece before it: the line's gap between
+    // pieces, on top of the desktop button's own padding, set it far apart.
+    const lineEnd = (key: string, last: RenderChildren, detailsKey: string) => (
+      <Box key={key} flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
+        {last}
+        {detailsButton(detailsKey)}
+      </Box>
+    )
 
     const item = (
       key: string,
@@ -3247,42 +3256,37 @@ export const register: Register = on => {
     const codexSetting = workSetting ?? codexState.configured
     const isCodexSettingOld = workSetting === undefined && isReadingOld(codexState.configuredAt, now)
     const codexSettingAsOf = codexState.configuredAt === undefined ? '' : local(codexState.configuredAt, offset).hm
+    const codexWorkItem = workItem('codex')
+    const codexSettingItem = codexSetting ? (
+      <Box key="codex-setting" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
+        <Text size="caption" dimColor={isCodexSettingOld}>
+          <Text bold>{codexSetting.model}</Text>
+          {codexSetting.effort ? ` ${codexSetting.effort}` : ''}
+        </Text>
+        {isCodexSettingOld ? (
+          <Text size="caption" dimColor>
+            {`·${codexSettingAsOf} 기준`}
+          </Text>
+        ) : null}
+      </Box>
+    ) : null
     // A run this session started shows even before any Codex reading came.
     const codexLine = hasCodex(codexState) || latestWork(ownWorks, 'codex') ? (
       <Box key="codex" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="md">
         {mark('codex-mark', CODEX_SVG, CODEX_NAME)}
         {limitItems('codex-', codexState.limits, codexState.limitsAt)}
-        {workItem('codex')}
-        {codexSetting ? (
-          <Box key="codex-setting" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
-            <Text size="caption" dimColor={isCodexSettingOld}>
-              <Text bold>{codexSetting.model}</Text>
-              {codexSetting.effort ? ` ${codexSetting.effort}` : ''}
-            </Text>
-            {isCodexSettingOld ? (
-              <Text size="caption" dimColor>
-                {`·${codexSettingAsOf} 기준`}
-              </Text>
-            ) : null}
-          </Box>
-        ) : null}
-        {detailsButton('codex-details')}
+        {codexSettingItem ? codexWorkItem : null}
+        {lineEnd('codex-end', codexSettingItem ?? codexWorkItem, 'codex-details')}
       </Box>
     ) : null
-
+    const claudeWorkItem = workItem('claude')
+    const contextItem = item('context', state.contextPercent ?? 0, 'Context', '', contextLevel(state.contextPercent ?? 0))
     const usageLine = (
       <Box key="usage" flexDirection="row" flexWrap="wrap" alignItems="center" columnGap="md">
         {mark('claude-mark', CLAUDE_SVG, CLAUDE_NAME)}
         {limitItems('', state.limits, state.limitsAt)}
-        {item(
-          'context',
-          state.contextPercent ?? 0,
-          'Context',
-          '',
-          contextLevel(state.contextPercent ?? 0),
-        )}
-        {workItem('claude')}
-        {detailsButton('details')}
+        {claudeWorkItem ? contextItem : null}
+        {lineEnd('usage-end', claudeWorkItem ?? contextItem, 'details')}
       </Box>
     )
 
