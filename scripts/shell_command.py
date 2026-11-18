@@ -171,6 +171,8 @@ SCRIPT_ORIGIN_PREFIX = "script "
 TEE_PROGRAM = "tee"
 IN_PLACE_EDITORS = frozenset({"sed", "gsed", "perl"})
 _IN_PLACE_SHORT_OPTION = "i"
+_MACOS_SED_IN_PLACE_SHORT_OPTION = "I"
+_GNU_SED_OPTIONS_WITH_VALUE = frozenset({"l"})
 _SED_IN_PLACE_OPTION = "--in-place"
 _SED_SCRIPT_OPTIONS = frozenset({"e", "f"})
 _SED_LONG_SCRIPT_OPTIONS = frozenset({"--expression", "--file"})
@@ -1238,7 +1240,8 @@ def _list_sed_file_indices(arguments: list[str], macos_options: bool) -> list[in
     macOS sed takes the argument after a bare `-i` as the backup suffix and stops reading
     options at its first operand; GNU sed takes only an attached suffix and reads options
     anywhere before `--`. An empty or dot-led argument after `-i` is a suffix in both, since
-    GNU sed fails on such a script and edits nothing.
+    GNU sed fails on such a script and edits nothing. macOS sed also edits in place with `-I`,
+    which GNU sed lacks, and GNU sed's `-l` takes a value where macOS sed's takes none.
     """
     operand_indices: list[int] = []
     has_script = False
@@ -1274,7 +1277,11 @@ def _list_sed_file_indices(arguments: list[str], macos_options: bool) -> list[in
                     if position == len(argument) - 1:
                         index += 1
                     break
-                elif option == _IN_PLACE_SHORT_OPTION:
+                elif option in _GNU_SED_OPTIONS_WITH_VALUE and not macos_options:
+                    if position == len(argument) - 1:
+                        index += 1
+                    break
+                elif option == _IN_PLACE_SHORT_OPTION or (macos_options and option == _MACOS_SED_IN_PLACE_SHORT_OPTION):
                     has_in_place_option = True
                     if position == len(argument) - 1 and index + 1 < len(arguments):
                         suffix = arguments[index + 1]
