@@ -10,7 +10,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +20,7 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 BUDGET_SCRIPT = REPOSITORY_ROOT / "skills" / "agent-usage" / "codex-budget.py"
 LIMITS_SCRIPT = REPOSITORY_ROOT / "skills" / "outside-review" / "codex-limits.py"
 KST = timezone(timedelta(hours=9))
+RESEARCH_FOLDER = "/repo-codex-research"
 
 
 def load_module(path: Path, name: str) -> ModuleType:
@@ -151,6 +152,30 @@ class MeasurementTest(unittest.TestCase):
 
         self.assertEqual(parsed, datetime(2026, 11, 22, 20, 0, 0, 500000, tzinfo=timezone.utc))
 
+    def test_running_research_share_subtracts_folder_use_without_going_below_zero(self) -> None:
+        now = moment(17, 12)
+        reservation = budget.Reservation(
+            "x",
+            budget.KIND_RESEARCH,
+            5.0,
+            "topic",
+            RESEARCH_FOLDER,
+            "session",
+            moment(17, 9),
+            budget.STATE_RUNNING,
+        )
+
+        for weight, expected in ((2e6, 2.0), (6e6, 0.0)):
+            with self.subTest(weight=weight):
+                events = [
+                    budget.UsageEvent(moment(17, 8), 10e6, RESEARCH_FOLDER, None, None),
+                    budget.UsageEvent(moment(17, 9), 1e6, RESEARCH_FOLDER, None, None),
+                    budget.UsageEvent(moment(17, 10), weight, RESEARCH_FOLDER + "/notes", None, None),
+                    budget.UsageEvent(moment(17, 11), 10e6, RESEARCH_FOLDER + "-other", None, None),
+                ]
+
+                self.assertAlmostEqual(budget.unfilled_share(reservation, events, 1e-6, now), expected)
+
 
 class VerdictTest(unittest.TestCase):
     def test_spare_share_is_used_whatever_claude_expects(self) -> None:
@@ -207,7 +232,7 @@ class LedgerTest(unittest.TestCase):
             kind=kind,
             percent=percent,
             topic="topic",
-            worktree="/nowhere-codex-topic" if kind == "implementation" else "",
+            worktree="/nowhere-codex-topic" if kind != budget.KIND_REVIEW else "",
             session="session",
             claude_percent=40.0,
             claude_resets="2026-11-22T20:00:00Z",
@@ -242,6 +267,74 @@ class LedgerTest(unittest.TestCase):
             for thread in threads:
                 thread.join()
         self.assertEqual(sorted(results), [0, budget.EXIT_REFUSED])
+
+    def test_research_reservation_without_a_folder_is_refused(self) -> None:
+        arguments = [str(BUDGET_SCRIPT), "reserve", "--kind", budget.KIND_RESEARCH, "--percent", "2", "--topic", "topic"]
+        errors = io.StringIO()
+
+        with mock.patch.object(sys, "argv", arguments), redirect_stderr(errors):
+            with self.assertRaises(SystemExit) as raised:
+                budget.main()
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("a research reservation needs --worktree or --folder", errors.getvalue())
+        self.assertFalse(budget.LEDGER_FILE.exists())
+
+    def test_research_folder_alias_leaves_its_use_out_of_daily_reviews(self) -> None:
+        now = moment(17, 12)
+        parser = budget._build_parser()
+        options = [
+            "reserve",
+            "--kind",
+            budget.KIND_RESEARCH,
+            "--percent",
+            "2",
+            "--topic",
+            "topic",
+            "--folder",
+            RESEARCH_FOLDER,
+            "--claude-percent",
+            "40",
+            "--claude-resets",
+            "2026-11-22T20:00:00Z",
+        ]
+        arguments = parser.parse_args(options)
+        events = [
+            budget.UsageEvent(moment(16, 10), 1e6, "/repo", 1.0, 1.0),
+            budget.UsageEvent(moment(16, 11), 3e6, RESEARCH_FOLDER + "/notes", 4.0, 1.0),
+            budget.UsageEvent(moment(17, 10), 5e6, "/repo", 9.0, 1.0),
+        ]
+
+        budget._check_reserve_arguments(parser, arguments)
+        with mock.patch.object(budget, "_now_local", return_value=moment(16, 9)), redirect_stdout(io.StringIO()):
+            self.assertEqual(budget.run_reserve(arguments), 0)
+        reservations = budget._read_reservations(now)
+        reservation = next(iter(reservations.values()))
+        status = budget._compute_status(
+            75.0,
+            moment(18, 9),
+            budget.ClaudeLimits(None, None),
+            events,
+            reservations,
+            now,
+        )
+
+        self.assertEqual(reservation.kind, budget.KIND_RESEARCH)
+        self.assertEqual(reservation.worktree, RESEARCH_FOLDER)
+        self.assertAlmostEqual(status.report["review_per_weekday"], 1.0)
+
+    def test_research_review_waiting_and_done_hold_no_share(self) -> None:
+        code, answer = self.reserve(budget.KIND_RESEARCH, 20.0)
+
+        self.assertEqual(code, 0)
+        for state in (budget.STATE_REVIEW_WAITING, "done"):
+            with self.subTest(state=state):
+                self.assertTrue(self.update(str(answer["id"]), state)["updated"])
+                now = datetime.now(timezone.utc)
+                arguments = self.reserve_arguments(budget.KIND_RESEARCH, 20.0)
+                status = budget._load_status(arguments, now, budget._read_codex_limits())
+
+                self.assertEqual(status.open_reserved, 0.0)
+                self.assertEqual(status.available, 25.0)
 
     def test_closing_returns_the_share_once(self) -> None:
         _, first = self.reserve("implementation", 20.0)
