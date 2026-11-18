@@ -43,8 +43,7 @@
       "Skill(update-config:*)",
       "Bash(python3 ~/.claude/scripts/claude-commit.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
-      "mcp__ccd_session_mgmt__archive_session",
-      "mcp__ccd_sidebar__move_sessions"
+      "mcp__ccd_session_mgmt__archive_session"
     ]
   },
   "model": "opus[1m]",
