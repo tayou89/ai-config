@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,9 @@ FIRST_VAULT_FOLDER = "/Users/someone/vault"
 SECOND_VAULT_FOLDER = "/home/someone/notes/vault"
 SCHEDULED_TASKS_DIRECTORY = "scheduled-tasks"
 GIT_REPOSITORY_NAME = re.compile(r"([^/]+?)(?:\.git)?/?$")
+SHEBANG = b"#!"
+SCRIPT_SUFFIXES = (".py", ".sh")
+NOT_EXECUTABLE_MODE = 0o644
 SPECIFICATION = importlib.util.spec_from_file_location("install", INSTALL_SCRIPT)
 install = importlib.util.module_from_spec(SPECIFICATION)
 sys.modules[SPECIFICATION.name] = install
@@ -91,6 +95,21 @@ class StubCommands:
 
 def find_any_command(command: str) -> str:
     return f"/usr/bin/{command}"
+
+
+def list_shebang_scripts(root: Path) -> List[Path]:
+    """Every .py and .sh file whose first line is a shebang, outside hidden folders such as .git and worktrees."""
+    scripts = []
+
+    for folder, directories, files in os.walk(root):
+        directories[:] = [name for name in directories if not name.startswith(".") and name != "__pycache__"]
+        candidates = [Path(folder) / name for name in files if name.endswith(SCRIPT_SUFFIXES)]
+        scripts.extend(path for path in candidates if path.read_bytes().startswith(SHEBANG))
+    return sorted(scripts)
+
+
+def is_executable(path: Path) -> bool:
+    return bool(path.stat().st_mode & stat.S_IXUSR)
 
 
 def make_checkout(parent: Path, name: str) -> Path:
@@ -391,6 +410,15 @@ class RegistrationTest(unittest.TestCase):
             install.check_registered_entries(root)
 
 
+class ScriptModeTest(unittest.TestCase):
+    def test_every_script_with_a_shebang_is_executable(self):
+        scripts = list_shebang_scripts(REPOSITORY_ROOT)
+        not_executable = [path.relative_to(REPOSITORY_ROOT).as_posix() for path in scripts if not is_executable(path)]
+
+        self.assertIn(REPOSITORY_ROOT / "scripts" / "pr-merge.py", scripts)
+        self.assertEqual(not_executable, [])
+
+
 class InstallerTest(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
@@ -500,6 +528,23 @@ class InstallerTest(unittest.TestCase):
         sections = self._check()
 
         self.assertEqual(sections, {install.NOT_INSTALLED_SECTION: [], install.LOCAL_ONLY_SECTION: []})
+
+    def test_execute_bits_alone_are_reported_and_set(self):
+        self._run_installer(apply=True)
+        script = self._platform.claude_home / "scripts" / "claude-commit.py"
+        content = script.read_bytes()
+        script.chmod(NOT_EXECUTABLE_MODE)
+        expected = f"mode scripts/claude-commit.py -> {script}"
+        dry_run = self._run_installer(apply=False)
+        not_installed = self._check()[install.NOT_INSTALLED_SECTION]
+        applied = self._run_installer(apply=True)
+
+        self.assertEqual(dry_run._changes, [expected])
+        self.assertEqual(not_installed, [expected])
+        self.assertEqual(applied._changes, [expected])
+        self.assertTrue(is_executable(script))
+        self.assertEqual(script.read_bytes(), content)
+        self.assertEqual(self._run_installer(apply=True)._changes, [])
 
     def test_install_records_the_checkout(self):
         self._run_installer(apply=True)
