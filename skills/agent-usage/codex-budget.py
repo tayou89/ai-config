@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Codex's weekly share for reviews first and hand the rest to implementation bundles.
+"""Keep Codex's weekly share for reviews first and hand the rest to implementation and research runs.
 
     codex-budget.py status
     codex-budget.py reserve --kind implementation --percent 5 --topic T --worktree PATH --session ID
