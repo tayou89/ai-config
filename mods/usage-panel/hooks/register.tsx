@@ -1921,8 +1921,8 @@ const CODEX_SVG =
 
 // A work's pieces in a usage line, each after its own mark: a stopwatch for
 // when it ends (the clock is the cache's), a coin stack for its tokens, a dial
-// for its share of the week. A list glyph opens the details.
-const DETAILS_GLYPH = '≡'
+// for its share of the week. A chevron opens the details.
+const DETAILS_GLYPH = '›'
 const STOPWATCH_SVG =
   '<svg xmlns="http://www.w3.org/2000/svg" width="11" height="11" viewBox="0 0 16 16"><g fill="none" stroke="#8A877F" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="9.3" r="5.2"/><path d="M6.4 1.8h3.2M8 9.3V6.4"/></g></svg>'
 const TOKENS_SVG =
@@ -3077,18 +3077,11 @@ export const register: Register = on => {
       return work ? workBox(maker, work) : null
     }
 
-    // The details open from a list mark at the end of each usage line: a
-    // glyph in a Text, since a Button holds only text, and a label that names
-    // it for a reader that cannot see it.
+    // The details open from a chevron at the end of each usage line. The
+    // mark is the label itself: a Button holds no image, and the desktop app
+    // draws a Button's label rather than its children.
     const detailsButton = (key: string) =>
-      slot(
-        key,
-        <Button key={key} label="Details" plain onPress={() => void openDetails($)}>
-          <Text size="caption" dimColor>
-            {DETAILS_GLYPH}
-          </Text>
-        </Button>,
-      )
+      slot(key, <Button key={key} label={DETAILS_GLYPH} plain dimColor onPress={() => void openDetails($)} />)
 
     const item = (
       key: string,

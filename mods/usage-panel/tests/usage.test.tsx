@@ -358,7 +358,7 @@ test('the line above the prompt sums the limits and opens the details', async ($
     expect((await ui.find({ type: 'Text', text: /^Context / }))?.text).toBe('Context 15%')
     expect(await ui.find({ type: 'Text', text: /151K\/1M/ })).toBeUndefined()
     expect(await ui.find({ type: 'Text', text: /^Last/ })).toBeUndefined()
-    expect((await ui.find({ key: 'details' }))?.text).toBe('≡')
+    expect((await ui.find({ key: 'details' }))?.text).toBe('›')
     await ui.press({ key: 'details' })
     await ui.unmount()
   }
@@ -612,7 +612,7 @@ test('a Codex line follows the Claude line with its limits; its last run waits i
     expect((await ui.find({ type: 'Text', text: /^↻18:10$/ }))?.text).toBe('↻18:10')
     expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
     expect(await ui.find({ type: 'Text', text: /^Last|^In / })).toBeUndefined()
-    expect((await ui.find({ key: 'codex-details' }))?.text).toBe('≡')
+    expect((await ui.find({ key: 'codex-details' }))?.text).toBe('›')
     await ui.press({ key: 'codex-details' })
     await ui.unmount()
   }
