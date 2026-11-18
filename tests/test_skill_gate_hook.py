@@ -47,6 +47,10 @@ TYPESCRIPT = "typescript"
 UX_DESIGN = "ux-design"
 FRONTEND_DESIGN = "frontend-design"
 DECISIONS = "decisions-and-collaboration"
+SESSIONS = "session-management"
+GIT_COMMIT = "git-commit"
+WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
+QUESTION_TOOL = "AskUserQuestion"
 PYTHON_SKILLS = (CODE_STYLE, PYTHON)
 TYPESCRIPT_SKILLS = (CODE_STYLE, TYPESCRIPT)
 SCREEN_SKILLS = (UX_DESIGN, FRONTEND_DESIGN)
@@ -214,6 +218,86 @@ class SkillGateHookTest(unittest.TestCase):
             requirement = skill_gate_hook.find_requirement(name, tool_input, "/tmp")
 
             self.assertEqual(requirement.skills if requirement else None, skills, tool_input)
+
+    def test_questions_about_sessions_or_commits_need_the_skill_that_decides_them(self) -> None:
+        one = [{"label": "네, 맡겨 주세요"}]
+        two = [{"label": "새 세션에서"}, {"label": "여기서 계속"}]
+        options = [{"label": "Push", "description": "a"}, {"label": "Wait", "description": "b"}]
+        timing = [{"label": "Start", "description": "a"}, {"label": "Later", "description": "b"}]
+        colors = [{"label": "파랑", "description": "이 세션에서 정한 색"}, {"label": "빨강", "description": "b"}]
+        cases = [
+            (WRAP_UP_TOOL, {"ask": "영어 답 막는 고침을 설정 관리 세션에 맡길까요?", "actions": one}, (SESSIONS,)),
+            (WRAP_UP_TOOL, {"ask": "어디서 이어 갈까요?", "actions": two}, (DECISIONS, SESSIONS)),
+            (WRAP_UP_TOOL, {"ask": "끝난 세션 셋을 닫을까요?", "actions": [{"label": "닫기"}]}, (SESSIONS,)),
+            (WRAP_UP_TOOL, {"ask": "디자인 세션에 함께 전달할까요?", "actions": [{"label": "네"}]}, (SESSIONS,)),
+            (WRAP_UP_TOOL, {"ask": "지도 카드 화면을 캡처대로 커밋할까요?", "actions": [{"label": "네, 커밋"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "검사가 끝나면 합치고 설치할까요?", "actions": json.dumps(one)}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "이대로 둘까요?", "actions": [{"action": "commit", "label": "Commit"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "끝낼까요?", "actions": [{"action": "create_pr"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "이어 갈까요?", "actions": [{"action": "new_session"}]}, (SESSIONS,)),
+            (
+                WRAP_UP_TOOL,
+                {"ask": "Merge it and archive this session?", "actions": two},
+                (DECISIONS, SESSIONS, GIT_COMMIT),
+            ),
+            (
+                QUESTION_TOOL,
+                {"questions": [{"question": "Start the review in a new session?", "options": timing}]},
+                (DECISIONS, SESSIONS),
+            ),
+            (QUESTION_TOOL, {"questions": [{"question": "Which first?", "options": options}]}, (DECISIONS, GIT_COMMIT)),
+            (WRAP_UP_TOOL, {"ask": "PR을 열까요?", "actions": [{"label": "열기"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "Review both PRs first?", "actions": [{"label": "Yes"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "Keep merging the fixes?", "actions": [{"label": "Yes"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "고친 내용을 합친 뒤 볼까요?", "actions": [{"label": "네"}]}, (GIT_COMMIT,)),
+            (WRAP_UP_TOOL, {"ask": "Approve the wording?", "actions": [{"label": "Approve"}]}, None),
+            (WRAP_UP_TOOL, {"ask": "Is this commitment clear?", "actions": [{"label": "Yes"}]}, None),
+            (
+                QUESTION_TOOL,
+                {"questions": [{"question": "Push the branch now?", "options": options[:1]}]},
+                (GIT_COMMIT,),
+            ),
+            (QUESTION_TOOL, {"questions": [{"question": "어느 색으로 할까요?", "options": colors}]}, (DECISIONS,)),
+            (WRAP_UP_TOOL, {"ask": "두 표를 하나로 정리할까요?", "actions": [{"label": "정리하기"}]}, None),
+            (WRAP_UP_TOOL, {"recap": "세션을 시작했고 커밋했습니다.", "ask": "표를 고칠까요?", "actions": [{"label": "고치기"}]}, None),
+            (WRAP_UP_TOOL, {"recap": "세션을 시작했고 커밋했습니다."}, None),
+        ]
+
+        for name, tool_input, skills in cases:
+            requirement = skill_gate_hook.find_requirement(name, tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, tool_input)
+
+    def test_session_question_is_refused_until_the_session_skill_loads(self) -> None:
+        tool_input = {"recap": "r", "ask": "이 고침을 설정 관리 세션에 맡길까요?", "actions": [{"label": "네, 맡겨 주세요"}]}
+
+        self.assertEqual(
+            self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input)),
+            "Writing a question about a session needs `session-management` loaded with the Skill tool first (CLAUDE.md \"Skill Triggers\"), and this session has no finished Skill-tool load of it since its start or last compaction. The session and commit skills say which of these steps are taken without asking.",
+        )
+        self._load(SESSIONS)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
+
+    def test_commit_question_is_refused_until_the_commit_skill_loads(self) -> None:
+        tool_input = {"recap": "r", "ask": "커밋하고 올릴까요?", "actions": [{"label": "네"}]}
+
+        self.assertEqual(
+            self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input)),
+            "Writing a question about committing, pushing, or merging needs `git-commit` loaded with the Skill tool first (CLAUDE.md \"Skill Triggers\"), and this session has no finished Skill-tool load of it since its start or last compaction. The session and commit skills say which of these steps are taken without asking.",
+        )
+        self._load(GIT_COMMIT)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
+
+    def test_choice_question_reason_names_only_what_is_missing(self) -> None:
+        tool_input = {"recap": "r", "ask": "새 세션에서 할까요?", "actions": [{"label": "새 세션"}, {"label": "여기서"}]}
+
+        self._load(SESSIONS)
+        reason = self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
+
+        self.assertIn("needs `decisions-and-collaboration` loaded", reason)
+        self.assertNotIn("The session and commit skills", reason)
+        self._load(DECISIONS)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
 
     def test_edit_is_refused_until_its_skills_load(self) -> None:
         self.assertEqual(

@@ -3,7 +3,7 @@ name: milestone-delivery
 description: Milestone workflow for a project whose rules explicitly adopt milestone delivery: a planning report at each planning-scope approval, approved designs and milestone plan with a versioned feature list, automatic checks between demos, an always-ask list, and a milestone-end report. Do not apply it in other projects.
 ---
 
-<!-- Adapted from skills/milestone-delivery/SKILL.md at 4d64d1458712b586a29c0c83ae32a44d9227d485 -->
+<!-- Adapted from skills/milestone-delivery/SKILL.md at 567b017b7f9ea914b8a4e9a190a37e27f719e701 -->
 
 # Milestone Delivery
 
@@ -27,7 +27,7 @@ Apply only after a project's rules explicitly adopt milestone delivery (user dec
 - Keep the feature list as JSON from the vault template: the approved version with the user's approval words and date, then one entry per user-visible behavior with its parent item in the project's task list, steps, an executable acceptance check, and `passes`.
 - During implementation change only `passes`. Any other change needs the user's approval and a new version that records it; the project's automatic checks reject a changed definition without a new version.
 - `passes` tracks progress only. The milestone is complete when every acceptance check passes on the current commit, and the report cites that run. When a passed feature fails again, set it back to false and log the failing check.
-- Verify each feature end to end in a browser as a user would, not only with unit tests.
+- Verify each feature end to end in the running product as a user would (a browser for a web app), not only with unit tests.
 - Work on one feature at a time, commit after each, and append to the progress log what was done, what is next, and which checks fail.
 - Start each session by reading the progress log, the git log, and the feature list.
 

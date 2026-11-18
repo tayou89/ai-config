@@ -8,10 +8,20 @@ reaches the user before any hook runs, so PostToolUse can only remind the
 model afterwards, from the transcript. Some text never reaches the
 transcript and the newest message may not be written yet when the hook
 runs, so the reminder is best effort.
+
+No tool call follows a closing message, so Stop checks it from
+last_assistant_message and continues the turn once when it is in another
+language; it also moves the check position past it, so the next reminder does
+not repeat it. Language drifted most right after a summary, so SessionStart
+after a compaction adds a one-line note. Whether a reminder written in the
+user's language works better than an English one is not known yet, so half
+the sessions get the notes in each language, a measurement to read around
+2026-11-21, after which the losing variant is removed.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -26,6 +36,8 @@ class _Language(NamedTuple):
     name: str
     letter_pattern: re.Pattern[str]
     letter_weight: float
+    reminder: str
+    summary_note: str
 
 
 class _Field(NamedTuple):
@@ -35,13 +47,27 @@ class _Field(NamedTuple):
 
 _LANGUAGE_VARIABLE = "REPLY_LANGUAGE"
 _LANGUAGES = {
-    "ko": _Language(name="Korean 존댓말", letter_pattern=re.compile(r"[가-힣]"), letter_weight=2.5),
+    "ko": _Language(
+        name="Korean 존댓말",
+        letter_pattern=re.compile(r"[가-힣]"),
+        letter_weight=2.5,
+        reminder='[LANGUAGE REMINDER] 방금 사용자에게 쓴 글이 한국어가 아니었습니다: "{quote}". 도구 사이 진행 문장까지, 사용자가 읽는 글은 모두 한국어 존댓말로 씁니다.',
+        summary_note="[LANGUAGE REMINDER] 대화가 방금 요약되었습니다. 도구 사이 진행 문장까지, 사용자가 읽는 글은 계속 한국어 존댓말로 씁니다.",
+    ),
 }
+_ENGLISH_REMINDER = '[LANGUAGE REMINDER] Your last message to the user was not in {name}: "{quote}". Write every line the user sees in {name} from now on, including progress lines between tool calls.'
+_ENGLISH_SUMMARY_NOTE = "[LANGUAGE REMINDER] The conversation was just summarized. Every line the user reads stays in {name}, including progress lines between tool calls."
+_CLOSING_REASON = '[REPLY LANGUAGE] The closing message was not in {name}: "{quote}". The user reads it, so a short follow-up can give the same answer in {name}, keeping code, paths, and names as they are.'
 _PRE_TOOL_USE = "PreToolUse"
 _POST_TOOL_USE = "PostToolUse"
+_STOP = "Stop"
+_SESSION_START = "SessionStart"
+_COMPACT_SOURCE = "compact"
 _DECISION_DENY = "deny"
+_DECISION_BLOCK = "block"
 _HOOK_OUTPUT_KEY = "hookSpecificOutput"
 _HOOK_EVENT_KEY = "hookEventName"
+_ADDITIONAL_CONTEXT_KEY = "additionalContext"
 _MESSAGE_KEY = "message"
 _TYPE_KEY = "type"
 _TEXT_KEY = "text"
@@ -65,6 +91,7 @@ _IGNORED_SPANS = (
 _MINIMUM_RATIO = 0.3
 _FIELD_MINIMUM_LATIN = 4
 _PROSE_MINIMUM_LATIN = 10
+_QUOTE_LENGTH = 100
 _TRANSCRIPT_TAIL_BYTES = 131072
 _STATE_DIRECTORY = "claude-reply-language"
 _TEMPORARY_DIRECTORY_VARIABLES = ("TMPDIR", "TEMP", "TMP")
@@ -131,6 +158,10 @@ def _make_output(hook_input: dict[str, Any], language: _Language) -> dict[str, A
         return _make_field_decision(hook_input, language)
     elif event == _POST_TOOL_USE:
         return _make_prose_reminder(hook_input, language)
+    elif event == _STOP and not hook_input.get("stop_hook_active"):
+        return _make_closing_decision(hook_input, language)
+    elif event == _SESSION_START and hook_input.get("source") == _COMPACT_SOURCE:
+        return _make_summary_note(hook_input, language)
     else:
         return None
 
@@ -157,21 +188,54 @@ def _make_field_decision(hook_input: dict[str, Any], language: _Language) -> dic
 
 
 def _make_prose_reminder(hook_input: dict[str, Any], language: _Language) -> dict[str, Any] | None:
+    foreign = [text for text in _read_session_texts(hook_input) if _is_foreign(text, language, _PROSE_MINIMUM_LATIN)]
+
+    if foreign:
+        session_id = _to_text(hook_input.get("session_id"))
+        template = language.reminder if _is_native_half(session_id) else _ENGLISH_REMINDER
+        reminder = template.format(name=language.name, quote=foreign[-1][:_QUOTE_LENGTH])
+
+        return {_HOOK_OUTPUT_KEY: {_HOOK_EVENT_KEY: _POST_TOOL_USE, _ADDITIONAL_CONTEXT_KEY: reminder}}
+    else:
+        return None
+
+
+def _make_closing_decision(hook_input: dict[str, Any], language: _Language) -> dict[str, Any] | None:
+    message = _to_text(hook_input.get("last_assistant_message"))
+
+    _advance_check_position(hook_input)
+    if _is_foreign(message, language, _PROSE_MINIMUM_LATIN):
+        reason = _CLOSING_REASON.format(name=language.name, quote=message[:_QUOTE_LENGTH])
+
+        return {"decision": _DECISION_BLOCK, "reason": reason}
+    else:
+        return None
+
+
+def _advance_check_position(hook_input: dict[str, Any]) -> None:
+    try:
+        _read_session_texts(hook_input)
+    except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
+        print(f"reply-language-hook: could not advance the check position: {error}", file=sys.stderr)
+
+
+def _make_summary_note(hook_input: dict[str, Any], language: _Language) -> dict[str, Any]:
+    session_id = _to_text(hook_input.get("session_id"))
+    template = language.summary_note if _is_native_half(session_id) else _ENGLISH_SUMMARY_NOTE
+    note = template.format(name=language.name)
+
+    return {_HOOK_OUTPUT_KEY: {_HOOK_EVENT_KEY: _SESSION_START, _ADDITIONAL_CONTEXT_KEY: note}}
+
+
+def _read_session_texts(hook_input: dict[str, Any]) -> list[str]:
+    """Texts written since the last check, which moves the check position past them; none without a transcript."""
     transcript_path = _to_text(hook_input.get("transcript_path"))
     session_id = _to_text(hook_input.get("session_id"))
 
     if transcript_path and session_id:
-        texts = _read_unchecked_texts(transcript_path, _get_state_path(session_id))
-        foreign = [text for text in texts if _is_foreign(text, language, _PROSE_MINIMUM_LATIN)]
-
-        if foreign:
-            reminder = f'[LANGUAGE REMINDER] Your last message to the user was not in {language.name}: "{foreign[-1][:100]}". Write every line the user sees in {language.name} from now on, including progress lines between tool calls.'
-
-            return {_HOOK_OUTPUT_KEY: {_HOOK_EVENT_KEY: _POST_TOOL_USE, "additionalContext": reminder}}
-        else:
-            return None
+        return _read_unchecked_texts(transcript_path, _get_state_path(session_id))
     else:
-        return None
+        return []
 
 
 def _read_unchecked_texts(transcript_path: str, state_path: str) -> list[str]:
@@ -276,6 +340,10 @@ def _measure(text: str, language: _Language) -> tuple[int, int]:
 
 def _is_main_assistant_entry(entry: dict[str, Any]) -> bool:
     return entry.get(_TYPE_KEY) == _ASSISTANT_TYPE and not entry.get("isSidechain")
+
+
+def _is_native_half(session_id: str) -> bool:
+    return bool(session_id) and hashlib.sha256(session_id.encode(_ENCODING)).digest()[0] % 2 == 0
 
 
 def _is_foreign(text: str, language: _Language, minimum_latin: int) -> bool:
