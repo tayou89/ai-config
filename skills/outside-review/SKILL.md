@@ -1,8 +1,7 @@
 ---
 name: outside-review
-description: Have another model family review the current work read-only through the Codex CLI, then reproduce each finding before fixing it.
+description: Have another model family review the current work read-only through the Codex CLI, then reproduce each finding before fixing it. Run it without asking at every independent-review checkpoint (before presenting a decision, a large change to the main deliverable, a release, or a large commit), or when the user invokes it.
 argument-hint: "[what to review]"
-disable-model-invocation: true
 ---
 
 # Outside Review
