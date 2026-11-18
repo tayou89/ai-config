@@ -46,6 +46,7 @@ PYTHON = "python"
 TYPESCRIPT = "typescript"
 UX_DESIGN = "ux-design"
 FRONTEND_DESIGN = "frontend-design"
+DECISIONS = "decisions-and-collaboration"
 PYTHON_SKILLS = (CODE_STYLE, PYTHON)
 TYPESCRIPT_SKILLS = (CODE_STYLE, TYPESCRIPT)
 SCREEN_SKILLS = (UX_DESIGN, FRONTEND_DESIGN)
@@ -196,6 +197,23 @@ class SkillGateHookTest(unittest.TestCase):
             requirement = skill_gate_hook.find_requirement(f"mcp__figma-server__{name}", tool_input, "/tmp")
 
             self.assertEqual(requirement.skills if requirement else None, skills, name)
+
+    def test_questions_with_choices_need_the_decision_skill(self) -> None:
+        two = [{"label": "A", "description": "a"}, {"label": "B", "description": "b"}]
+        buttons = [{"label": "네, 진행"}, {"label": "고칠 곳 있음"}]
+        cases = [
+            ("AskUserQuestion", {"questions": [{"question": "어느 쪽?", "options": two}]}, (DECISIONS,)),
+            ("AskUserQuestion", {"questions": [{"question": "어느 쪽?", "options": two[:1]}]}, None),
+            ("mcp__ccd_turn__wrap_up", {"recap": "r", "ask": "할까요?", "actions": buttons}, (DECISIONS,)),
+            ("mcp__ccd_turn__wrap_up", {"recap": "r", "ask": "할까요?", "actions": json.dumps(buttons)}, (DECISIONS,)),
+            ("mcp__ccd_turn__wrap_up", {"recap": "r", "ask": "할까요?", "actions": buttons[:1]}, None),
+            ("mcp__ccd_turn__wrap_up", {"recap": "r"}, None),
+        ]
+
+        for name, tool_input, skills in cases:
+            requirement = skill_gate_hook.find_requirement(name, tool_input, "/tmp")
+
+            self.assertEqual(requirement.skills if requirement else None, skills, tool_input)
 
     def test_edit_is_refused_until_its_skills_load(self) -> None:
         self.assertEqual(
