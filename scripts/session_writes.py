@@ -41,6 +41,7 @@ recorded writes to files it handed over):
 
 from __future__ import annotations
 
+import bisect
 import functools
 import json
 import math
@@ -55,7 +56,14 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
-from own_lines import ContestedLine, FileHistory, RecordedWrite, build_own_content, list_foreign_lines
+from own_lines import (
+    CommitPoint,
+    ContestedLine,
+    FileHistory,
+    RecordedWrite,
+    build_own_content,
+    list_foreign_lines,
+)
 from session_lineage import find_session_record, read_cli_session_id
 from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
 
@@ -112,6 +120,8 @@ _GIT_TIMEOUT_SECONDS = 10
 _RENAME_OR_COPY_STATUSES = "RC"
 _REPORT_COMMAND = "report"
 _HEAD_REVISION = "HEAD"
+_FILE_COMMIT_FORMAT = "--format=%H %ct %P"
+_COMMIT_TIME_RESOLUTION_SECONDS = 1.0
 _TEXT_ENCODING = "utf-8"
 _LOSSLESS_ERRORS = "surrogateescape"
 _EXIT_USAGE = 4
@@ -372,6 +382,15 @@ class _Adoption:
     time: float
 
 
+@dataclass(frozen=True)
+class _FileCommit:
+    """A commit that changed the file: its name, its committer time, and its first parent (None for a root commit)."""
+
+    commit: str
+    time: float
+    parent: str | None
+
+
 _EVENT_FIELDS = frozenset(event_field.name for event_field in fields(WriteEvent))
 _UNKNOWN_FIELDS = frozenset(unknown_field.name for unknown_field in fields(UnknownWrite))
 
@@ -623,9 +642,11 @@ def load_file_history(
     if own:
         foreign = _list_foreign_writes(session_id, owners, root, path, events)
         own_writes = tuple(_make_recorded_write(event, foreign) for event in own)
-        unexplained = _list_unexplained_steps(root, own, foreign, current_text)
+        edges = _list_foreign_edges(root, own, foreign)
+        unexplained = _list_unexplained_steps(root, own, edges, current_text)
+        points = _find_commit_points(root, path, own, [*own, *foreign], edges, current_text)
 
-        return FileHistory(_read_blob(root, own[0].before), own_writes, current_text, unexplained)
+        return FileHistory(_read_blob(root, own[0].before), own_writes, current_text, unexplained, points)
     else:
         return None
 
@@ -1476,30 +1497,40 @@ def _is_taken_before_own_writes(aligned: Sequence[WriteEvent], event: WriteEvent
     return False
 
 
-def _list_unexplained_steps(
+def _list_foreign_edges(
     root: str,
     own: Sequence[WriteEvent],
     foreign: Sequence[WriteEvent | UnknownWrite],
+) -> list[tuple[str, str, float]]:
+    """Other sessions' recorded writes as (before, after, end) texts, those that can bridge a gap in the own chain.
+
+    Contents are compared as text, as the line weave compares them, so a
+    file that is gone and an empty one are the same. Only another session's
+    recorded contents explain a gap: a snapshot that failed or a call still
+    running says nothing about what it wrote. Writes that ended before this
+    session's first one cannot bridge a gap, so their contents are not read.
+    """
+    return [
+        (_read_blob(root, event.before), _read_blob(root, event.after), event.end)
+        for event in foreign
+        if isinstance(event, WriteEvent) and event.end >= own[0].start
+    ]
+
+
+def _list_unexplained_steps(
+    root: str,
+    own: Sequence[WriteEvent],
+    edges: Sequence[tuple[str, str, float]],
     working_text: str,
 ) -> frozenset[int]:
     """The gaps in this session's chain of writes that no chain of other sessions' writes bridges.
 
     A gap is what changed after one own write and before the next, or after
     the last one; its step is the number of the own write after it, or one
-    past the last. Contents are compared as text, as the line weave compares
-    them, so a file that is gone and an empty one are the same. Only another
-    session's recorded contents explain a gap: a snapshot that failed or a
-    call still running says nothing about what it wrote, so such a gap stays
-    unexplained and the commit asks. Writes that ended before this session's
-    first one cannot bridge a gap, so their contents are not read.
+    past the last. A gap no edge bridges stays unexplained and the commit asks.
     """
     ends = [_read_blob(root, event.after) for event in own]
     starts = [*(_read_blob(root, event.before) for event in own[1:]), working_text]
-    edges = [
-        (_read_blob(root, event.before), _read_blob(root, event.after), event.end)
-        for event in foreign
-        if isinstance(event, WriteEvent) and event.end >= own[0].start
-    ]
     gaps = enumerate(zip(own, ends, starts), start=2)
 
     return frozenset(
@@ -1507,6 +1538,102 @@ def _list_unexplained_steps(
         for step, (previous, end, start) in gaps
         if end != start and not _is_bridged(end, start, previous.start, edges)
     )
+
+
+def _find_commit_points(
+    root: str,
+    path: str,
+    own: Sequence[WriteEvent],
+    writes: Sequence[WriteEvent | UnknownWrite],
+    edges: Sequence[tuple[str, str, float]],
+    working_text: str,
+) -> tuple[CommitPoint, ...]:
+    """The commits of the file since this session's first write, each with the file as the records show it then.
+
+    Git keeps whole seconds, so an own write that ended within the commit's
+    second may have come before it or after: a point is made for each count
+    of own writes it may have followed. The file then is what the last
+    recorded write of anyone left that ended by the commit's second and
+    before the next own write began. A count is left out when no own write
+    precedes it, or when other sessions' writes do not lead from the own
+    write before it through that content to the own write after it, since
+    something the record does not see changed the file then. A point whose
+    commit holds anything but its parent plus this session's lines of then
+    adds nothing when the lines are built. Git history that cannot be read
+    gives none, as the points only spare questions.
+    """
+    ends = [event.end for event in own]
+    following = [*(_read_blob(root, event.before) for event in own[1:]), working_text]
+    recorded = sorted((event for event in writes if isinstance(event, WriteEvent)), key=_get_event_end)
+    points: list[CommitPoint] = []
+
+    for file_commit in _list_file_commits(root, path, own[0].start):
+        moment = file_commit.time + _COMMIT_TIME_RESOLUTION_SECONDS
+        earliest = max(bisect.bisect_left(ends, file_commit.time), 1)
+
+        for count in range(earliest, bisect.bisect_right(ends, moment) + 1):
+            bound = min(moment, own[count].start) if count < len(own) else moment
+            file_then = _find_file_then(root, recorded, bound)
+
+            if file_then is not None and _is_on_chain(root, own[count - 1], file_then, following[count - 1], edges):
+                points.append(_make_commit_point(root, path, file_commit, count, file_then))
+    return tuple(points)
+
+
+def _list_file_commits(root: str, path: str, since: float) -> list[_FileCommit]:
+    """The commits in HEAD's history that changed the file from a time on, oldest first; none if git fails."""
+    output = _try_git(
+        root,
+        "log",
+        "--reverse",
+        f"--since=@{math.floor(since)}",
+        _FILE_COMMIT_FORMAT,
+        _HEAD_REVISION,
+        "--",
+        path,
+    )
+    lines = decode_content(output).splitlines() if output is not None else []
+
+    return [_parse_file_commit(line) for line in lines if line.strip()]
+
+
+def _parse_file_commit(line: str) -> _FileCommit:
+    """One `%H %ct %P` line: the commit, its committer time, and its parents, of which the first is kept."""
+    commit, committed_time, *parents = line.split()
+
+    return _FileCommit(commit, float(committed_time), parents[0] if parents else None)
+
+
+def _find_file_then(root: str, recorded: Sequence[WriteEvent], moment: float) -> str | None:
+    """The content the last recorded write that ended by a moment left, or None when none had ended."""
+    ended = [event for event in recorded if event.end <= moment]
+
+    if ended:
+        return _read_blob(root, ended[-1].after)
+    else:
+        return None
+
+
+def _is_on_chain(
+    root: str,
+    previous: WriteEvent,
+    file_then: str,
+    following: str,
+    edges: Sequence[tuple[str, str, float]],
+) -> bool:
+    """Whether other sessions' writes lead from an own write through a content to what came after it."""
+    previous_after = _read_blob(root, previous.after)
+
+    return _is_bridged(previous_after, file_then, previous.start, edges) and _is_bridged(
+        file_then, following, previous.start, edges
+    )
+
+
+def _make_commit_point(root: str, path: str, file_commit: _FileCommit, count: int, file_then: str) -> CommitPoint:
+    parent_text = _read_blob(root, _read_committed_blob(root, file_commit.parent, path))
+    committed_text = _read_blob(root, _read_committed_blob(root, file_commit.commit, path))
+
+    return CommitPoint(count, file_then, parent_text, committed_text)
 
 
 def _is_bridged(start: str, target: str, since: float, edges: Sequence[tuple[str, str, float]]) -> bool:

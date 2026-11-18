@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 import unittest
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -1201,9 +1201,35 @@ class OwnLinesCase:
     entangled: tuple[str, ...] = ()
     contested_writes: tuple[int, ...] = ()
     expected_contested: tuple[tuple[str, str], ...] = ()
+    commit_points: tuple[tuple[int, str, str, str], ...] = ()
 
 
 LOG_BASE = "# log\n\n## base\ntext\n"
+SHARED_REST = "\n## base\ntext\n"
+SHARED_MINE_A = "\n## mine a\n\nmy text\n- decided:\n  - a\n"
+SHARED_MINE_A_EDITED = "\n## mine a\n\nmy edited text\n- decided:\n  - a\n"
+SHARED_MINE_B = "\n## mine b\n\nmore\n- decided:\n  - b\n"
+SHARED_THEIRS = "\n## theirs\n\ntheir text\n- decided:\n  - t\n"
+SHARED_THEIR_LAST = "  - t\n"
+SHARED_NEW_FILE = "shared-log.md"
+SHARED_START = "# log\n" + SHARED_REST
+SHARED_COMMITTED = "# log\n" + SHARED_MINE_B + SHARED_MINE_A + SHARED_REST
+SHARED_AT_COMMIT = "# log\n" + SHARED_THEIRS + SHARED_MINE_B + SHARED_MINE_A + SHARED_REST
+SHARED_NOW = "# log\n" + SHARED_THEIRS + SHARED_MINE_B + SHARED_MINE_A_EDITED + SHARED_REST
+SHARED_WRITES = (
+    (SHARED_START, "# log\n" + SHARED_MINE_A + SHARED_REST),
+    ("# log\n" + SHARED_THEIRS + SHARED_MINE_A + SHARED_REST, SHARED_AT_COMMIT),
+    (SHARED_AT_COMMIT, SHARED_NOW),
+)
+ENTRY_TRIALS = 1500
+ENTRY_COMMON_LINES = ("\n", "- done:\n", "- decided:\n", "  - none\n")
+ENTRY_ASK_LIMIT = 0.1
+ENTRY_OTHER_CHANCE = 0.7
+ENTRY_OWN_ADD_CHANCE = 0.5
+ENTRY_WRITES = 3
+OWN_OWNER = "own"
+THEIR_OWNER = "theirs"
+BASE_OWNER = "base"
 MINE_1 = "\n## mine 1\nmy text\n"
 THEIRS = "\n## theirs\ntheir text\n"
 MINE_2 = "\n## mine 2\nmore\n"
@@ -1532,6 +1558,15 @@ OWN_LINES_CASES = (
         "a\r\nb\r\n",
         "a\r\nB\r\nmine\r\n",
     ),
+    OwnLinesCase(
+        "my sections committed apart from theirs, then one edited",
+        SHARED_START,
+        SHARED_WRITES,
+        SHARED_NOW,
+        SHARED_COMMITTED,
+        "# log\n" + SHARED_MINE_B + SHARED_MINE_A_EDITED + SHARED_REST,
+        commit_points=((2, SHARED_AT_COMMIT, SHARED_START, SHARED_COMMITTED),),
+    ),
 )
 OWN_LINES_SPECIFICATION = importlib.util.spec_from_file_location("own_lines", OWN_LINES_MODULE)
 own_lines = importlib.util.module_from_spec(OWN_LINES_SPECIFICATION)
@@ -1653,7 +1688,108 @@ def make_history(case: OwnLinesCase) -> own_lines.FileHistory:
         for index, (before, after) in enumerate(case.writes)
     )
 
-    return own_lines.FileHistory(case.first_before, writes, case.working_tree)
+    points = tuple(own_lines.CommitPoint(*point) for point in case.commit_points)
+
+    return own_lines.FileHistory(case.first_before, writes, case.working_tree, commit_points=points)
+
+
+class EntryLog:
+    """A shared log of entries whose lines repeat a few texts, with the writer of every line known."""
+
+    def __init__(self, generator: random.Random) -> None:
+        self._generator = generator
+        self._texts: list[str] = []
+        self._owners: list[str] = []
+        self._entries = [self._make_entry(BASE_OWNER), self._make_entry(BASE_OWNER)]
+
+    def add_entry(self, owner: str) -> None:
+        self._entries.insert(self._generator.randint(0, len(self._entries)), self._make_entry(owner))
+
+    def edit_own_line(self) -> None:
+        """Reword a note in one of this session's entries, or add an entry when it has none yet."""
+        notes = [
+            (entry, position)
+            for entry in self._entries
+            for position, index in enumerate(entry)
+            if self._owners[index] == OWN_OWNER and self._texts[index].startswith(OWN_OWNER)
+        ]
+
+        if notes:
+            entry, position = self._generator.choice(notes)
+            entry[position] = self._add_line(self._texts[entry[position]].replace("\n", " edited\n"), OWN_OWNER)
+        else:
+            self.add_entry(OWN_OWNER)
+
+    def render(self, left_out: str | None = None) -> str:
+        lines = (self._texts[index] for entry in self._entries for index in entry if self._owners[index] != left_out)
+
+        return LOG_TITLE + "".join(lines)
+
+    def _make_entry(self, owner: str) -> list[int]:
+        number = len(self._texts)
+        common = self._generator.sample(ENTRY_COMMON_LINES, 2)
+        texts = [f"## {owner} {number}\n", "\n", *common, f"{owner} note {number}\n", "\n"]
+
+        return [self._add_line(text, owner) for text in texts]
+
+    def _add_line(self, text: str, owner: str) -> int:
+        self._texts.append(text)
+        self._owners.append(owner)
+        return len(self._texts) - 1
+
+
+@dataclass(frozen=True)
+class EntryCommits:
+    """Two own-lines commits of an entry log, each with the content that holds exactly the own lines then."""
+
+    first: own_lines.OwnCommitContent
+    first_expected: str
+    second: own_lines.OwnCommitContent
+    second_expected: str
+
+
+def add_entry_writes(
+    log: EntryLog,
+    generator: random.Random,
+    writes: list[own_lines.RecordedWrite],
+    count: int,
+) -> None:
+    """Add own writes to the log, each after another writer's entry by chance; the first one adds an entry."""
+    for _ in range(count):
+        if generator.random() < ENTRY_OTHER_CHANCE:
+            log.add_entry(THEIR_OWNER)
+        before = log.render()
+
+        if writes and generator.random() >= ENTRY_OWN_ADD_CHANCE:
+            log.edit_own_line()
+        else:
+            log.add_entry(OWN_OWNER)
+        writes.append(own_lines.RecordedWrite(before, log.render(), False))
+
+
+def commit_entry_log_twice(generator: random.Random) -> EntryCommits:
+    """Own writes among another writer's entries, an own-lines commit after some of them, and one after the rest."""
+    log = EntryLog(generator)
+    base = log.render()
+    writes: list[own_lines.RecordedWrite] = []
+
+    add_entry_writes(log, generator, writes, generator.randint(1, ENTRY_WRITES - 1))
+    if generator.random() < ENTRY_OTHER_CHANCE:
+        log.add_entry(THEIR_OWNER)
+    at_commit = log.render()
+    first = own_lines.build_own_content(base, own_lines.FileHistory(writes[0].before, tuple(writes), at_commit))
+    first_expected = log.render(THEIR_OWNER)
+    point = own_lines.CommitPoint(len(writes), at_commit, base, first.text)
+
+    add_entry_writes(log, generator, writes, ENTRY_WRITES - len(writes))
+    history = own_lines.FileHistory(writes[0].before, tuple(writes), log.render(), commit_points=(point,))
+    second = own_lines.build_own_content(first.text, history)
+
+    return EntryCommits(first, first_expected, second, log.render(THEIR_OWNER))
+
+
+def is_asked(content: own_lines.OwnCommitContent) -> bool:
+    return bool(content.entangled or content.contested)
 
 
 class OwnLinesTest(unittest.TestCase):
@@ -1665,6 +1801,38 @@ class OwnLinesTest(unittest.TestCase):
                 self.assertEqual(content.text, case.expected)
                 self.assertEqual(content.entangled, case.entangled)
                 self.assertEqual(contested, case.expected_contested)
+
+    def test_commit_point_unlike_its_commit_adds_nothing(self) -> None:
+        """Without the commit, or with one a hook changed, base matches no recorded content and the lines are asked."""
+        case = next(case for case in OWN_LINES_CASES if case.commit_points)
+        hooked = ((2, SHARED_AT_COMMIT, SHARED_START, SHARED_COMMITTED + PERSON_TEXT),)
+
+        for points in ((), hooked):
+            with self.subTest(points=points):
+                content = own_lines.build_own_content(case.base, make_history(replace(case, commit_points=points)))
+
+                self.assertTrue(content.contested)
+
+    def test_random_entry_logs_commit_own_lines_twice(self) -> None:
+        """Another writer adds entries of the same repeating lines while this session commits its lines twice.
+
+        The first commit holds exactly the own lines or asks, and so does the
+        second, which starts from the first as a commit point; it seldom asks.
+        """
+        generator = random.Random(RANDOM_SEED)
+        asked = 0
+
+        for trial in range(ENTRY_TRIALS):
+            with self.subTest(trial=trial):
+                commits = commit_entry_log_twice(generator)
+                is_first_right = commits.first.text == commits.first_expected
+                is_second_asked = is_asked(commits.second)
+                is_second_right = commits.second.text == commits.second_expected
+
+                self.assertTrue(is_asked(commits.first) or is_first_right)
+                self.assertTrue(is_asked(commits.first) or is_second_asked or is_second_right)
+                asked += is_second_asked
+        self.assertLess(asked, ENTRY_TRIALS * ENTRY_ASK_LIMIT)
 
     def test_random_histories_never_commit_wrong_content(self) -> None:
         """Random interleavings with known authorship: a commit that goes through holds exactly the own changes.
@@ -2920,6 +3088,56 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
         self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
         self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE), (self.fixture.repository / LOG_FILE).read_bytes())
+
+    def write_shared_log(self) -> None:
+        """My section, theirs above it, then mine below theirs, as sessions add to the top of a shared log."""
+        self.fixture.edit(OWN_SESSION, LOG_FILE, LOG_TITLE, LOG_TITLE + SHARED_MINE_A)
+        self.fixture.edit(OTHER_SESSION, LOG_FILE, LOG_TITLE, LOG_TITLE + SHARED_THEIRS)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, SHARED_THEIR_LAST, SHARED_THEIR_LAST + SHARED_MINE_B)
+
+    def test_own_lines_again_after_committing_apart_from_theirs(self) -> None:
+        """My sections went in without theirs, so base matches no recorded content until the commit is replayed."""
+        self.write_shared_log()
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, MY_TEXT, MY_EDITED_TEXT)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(
+            self.fixture.read_committed_bytes(LOG_FILE).decode(),
+            LOG_TITLE + SHARED_MINE_B + SHARED_MINE_A_EDITED + SHARED_REST,
+        )
+        self.assertIn(SHARED_THEIRS, (self.fixture.repository / LOG_FILE).read_text())
+
+    def test_new_file_committed_apart_from_theirs_twice(self) -> None:
+        """The first commit's parent has no such file, so the replayed commit starts from empty content."""
+        self.fixture.write(OWN_SESSION, SHARED_NEW_FILE, LOG_TITLE + SHARED_MINE_A, "w")
+        self.fixture.edit(OTHER_SESSION, SHARED_NEW_FILE, LOG_TITLE, LOG_TITLE + SHARED_THEIRS)
+        self.fixture.edit(OWN_SESSION, SHARED_NEW_FILE, SHARED_THEIR_LAST, SHARED_THEIR_LAST + SHARED_MINE_B)
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, SHARED_NEW_FILE)
+        self.fixture.edit(OWN_SESSION, SHARED_NEW_FILE, MY_TEXT, MY_EDITED_TEXT)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, SHARED_NEW_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, 0, second.stdout + second.stderr)
+        self.assertEqual(
+            self.fixture.read_committed_bytes(SHARED_NEW_FILE).decode(),
+            LOG_TITLE + SHARED_MINE_B + SHARED_MINE_A_EDITED,
+        )
+
+    def test_unrecorded_change_after_committing_apart_is_asked(self) -> None:
+        """A change the record cannot see after the commit still stops the next one."""
+        log = self.fixture.repository / LOG_FILE
+
+        self.write_shared_log()
+        first = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+        log.write_text(log.read_text() + PERSON_TEXT)
+        self.fixture.edit(OWN_SESSION, LOG_FILE, MY_TEXT, MY_EDITED_TEXT)
+        second = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
+
+        self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+        self.assertEqual(second.returncode, FOREIGN_LINES_EXIT, second.stdout + second.stderr)
 
     def test_command_beside_my_edit_stays_mine(self) -> None:
         """A command run beside this session's Edit starts from the same file and records the Edit's change again."""
