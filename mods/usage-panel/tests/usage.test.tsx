@@ -1,7 +1,7 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionMeasureInput } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
-import type { CacheOutput, ListedSession, SessionsOutput, SessionsRequest } from '../types'
+import type { CacheOutput, ListedSession, SessionState, SessionStates } from '../types'
 
 type SessionRow = ListedSession & { isArchived: boolean }
 // A drawn surface, as far as finding a Text by its text goes.
@@ -67,31 +67,34 @@ const CLAUDE_SHARED = '/Users/t/Library/Caches/usage-panel/claude-limits.json'
 // how the reader behaves this time: busy (another session reads) or held until
 // released (a read still going).
 const SHARED = '/Users/t/Library/Caches/usage-panel/'
+const SESSION_STATES_FILE = '/session-states.json'
 const sharedFiles: Record<string, string> = {}
 const sharedReader = { isBusy: false, hold: undefined as Promise<void> | undefined, calls: 0 }
 const LOCAL_KEYS = ['snapshot', 'last', 'working', 'finished', 'running']
 const SERVER_KEYS = ['limits', 'configured', 'error']
 // What the mod did at start: the 7-day counts it ran and the panes it closed.
 const started = { recounts: 0, closed: [] as string[] }
-// The other sessions as the app keeps them: its session list, its state files'
-// save times, its store's time, what the sessions reader prints, and each
-// request the reader was given; this session's transcript as read for the cache;
-// the app's id for this session (none outside the app) and each list asked for.
-const APP_SESSIONS = '/Users/t/Library/Application Support/Claude/claude-code-sessions'
-const APP_STORE = '/Users/t/Library/Application Support/Claude/Local Storage/leveldb'
+// The app list and the shared reader's completed decisions are independent
+// fixtures: Python tests cover how the decisions are made.
 const app = {
   listed: [] as SessionRow[],
-  savedAt: {} as Record<string, number>,
-  storeAt: 1,
-  output: { sessions: {} } as SessionsOutput,
-  requests: [] as SessionsRequest[],
+  output: { version: 1, at: 0, unread: [], sessions: {}, unreadable: [] } as SessionStates,
+  requests: [] as ListedSession[][],
   transcript: {} as CacheOutput,
   hostId: undefined as string | undefined,
+  own: {
+    sessionId: 'local_self',
+    title: 'Own session',
+    cwd: '/fixture',
+    isRunning: false,
+    lastActivityAt: '2026-11-04T06:59:00Z',
+    parentSessionId: 'local_parent',
+  },
+  selfCalls: 0,
   listCalls: [] as Record<string, unknown>[],
-  // How often the agents were listed, and a list held until released.
+  sessionExit: 0,
   agentLists: 0,
   agentsHold: undefined as Promise<void> | undefined,
-  // The tools the mod registered, and the work files on disk, by path.
   tools: [] as string[],
   workFiles: {} as Record<string, string>,
 }
@@ -125,18 +128,21 @@ const readShared = async (
   const file = JSON.parse(sharedFiles[path] ?? '{}') as { entries?: Record<string, { at: number }> }
   const kept = file.entries?.[key]
 
-  if (mode) {
+  if (mode === 'local' || mode === 'server') {
     sharedReader.calls += 1
   }
   await sharedReader.hold
   if (!Number.isInteger(since)) {
     return { exitCode: 1, stdout: '', stderr: 'ValueError: since is not whole milliseconds' }
+  } else if (path.endsWith(SESSION_STATES_FILE) && app.sessionExit !== 0) {
+    return { exitCode: app.sessionExit, stdout: '', stderr: 'fixture reader failure' }
   } else if (sharedReader.isBusy) {
     return { exitCode: 75, stdout: '', stderr: '' }
   } else if (kept && kept.at > since) {
     return { exitCode: 0, stdout: JSON.stringify(kept), stderr: '' }
   } else {
-    const shared = { at: Math.floor(now), output: sharedOutput(mode, codexOutput, now) }
+    const output = path.endsWith(SESSION_STATES_FILE) ? app.output : sharedOutput(mode, codexOutput, now)
+    const shared = { at: Math.floor(now), output }
 
     sharedFiles[path] = JSON.stringify({ entries: { ...file.entries, [key]: shared } })
     return { exitCode: 0, stdout: JSON.stringify(shared), stderr: '' }
@@ -179,9 +185,9 @@ const engine = (
   started.recounts = 0
   started.closed = []
   app.listed = []
-  app.savedAt = {}
-  app.storeAt = 1
-  app.output = { sessions: {} }
+  app.output = { version: 1, at: 0, unread: [], sessions: {}, unreadable: [] }
+  app.selfCalls = 0
+  app.sessionExit = 0
   app.requests = []
   app.transcript = {}
   app.hostId = undefined
@@ -193,10 +199,17 @@ const engine = (
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
   on('tool.register', (_, e) => (app.tools.push(e.name), { value: { tool: `mcp__usage-panel__${e.name}` } }))
   on('mcp.call', (_, e) => {
-    app.listCalls.push(e.args)
-    const content = [{ type: 'text' as const, text: JSON.stringify(app.listed) }]
+    if (e.tool === 'get_session') {
+      app.selfCalls += 1
+      const content = [{ type: 'text' as const, text: JSON.stringify(app.own) }]
 
-    return { value: { content, isError: e.tool !== 'list_sessions' } }
+      return { value: { content, isError: false } }
+    } else {
+      app.listCalls.push(e.args)
+      const content = [{ type: 'text' as const, text: JSON.stringify(app.listed) }]
+
+      return { value: { content, isError: e.tool !== 'list_sessions' } }
+    }
   })
   on('session.id', () => ({ value: 'cli-1' }))
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
@@ -205,13 +218,12 @@ const engine = (
   on('process.run', async (_, e) => {
     const [path = '', key = '', since = '0', , mode] = e.argv.slice(4)
     if (path.startsWith(SHARED)) {
+      if (path.endsWith(SESSION_STATES_FILE)) {
+        app.requests.push(JSON.parse(mode ?? '') as ListedSession[])
+      }
       return { value: await readShared(path, key, Number(since), mode, codexOutput, clock.now()) }
     }
-    if (e.argv[4] === 'sessions') {
-      app.requests.push(JSON.parse(e.argv[5] ?? '') as SessionsRequest)
-      return { value: { exitCode: 0, stdout: JSON.stringify(app.output), stderr: '' } }
-    }
-    if (e.argv[4] === 'cache') return { value: { exitCode: 0, stdout: JSON.stringify(app.transcript), stderr: '' } }
+    if (e.argv[3]?.includes('def cache(')) return { value: { exitCode: 0, stdout: JSON.stringify(app.transcript), stderr: '' } }
     if (e.argv[0] === 'date') return { value: { exitCode: 0, stdout: '+0900\n', stderr: '' } }
     if (e.argv[0] === 'git' && !hasGit) return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
     if (e.argv[0] === 'git' && e.argv.includes('status'))
@@ -244,6 +256,8 @@ const engine = (
       claudeShared.text = e.text
     } else if (e.path.startsWith(WORK_FOLDER)) {
       app.workFiles[e.path] = e.text
+    } else if (e.path.startsWith(SHARED)) {
+      sharedFiles[e.path] = e.text
     }
     return { value: undefined }
   })
@@ -266,15 +280,6 @@ const engine = (
           isLink: false,
         })),
       }
-    }
-    if (e.path === APP_STORE) return { value: [{ name: '000003.log', kind: 'file', size: 1, mtimeMs: app.storeAt, isLink: false }] }
-    if (e.path === `${APP_SESSIONS}/account/organization`)
-      return {
-        value: Object.entries(app.savedAt).map(([id, mtimeMs]) => ({ name: `${id}.json`, kind: 'file', size: 1, mtimeMs, isLink: false })),
-      }
-    if (e.path.startsWith(APP_SESSIONS)) {
-      const name = e.path === APP_SESSIONS ? 'account' : 'organization'
-      return { value: [{ name, kind: 'dir', size: 0, mtimeMs: 0, isLink: false }] }
     }
     return {
       value: e.path.startsWith(CODEX_HOME)
@@ -962,12 +967,25 @@ test('a 7-day count another session made within ten minutes is taken, and Recoun
 
 const row = (sessionId: string, isRunning: boolean, lastActivityAt = '2026-11-04T06:59:00Z'): SessionRow => ({
   sessionId,
+  title: `Title ${sessionId}`,
+  cwd: '/fixture/project',
   isRunning,
   lastActivityAt,
   isArchived: false,
 })
 
-const read = (verdict: 'needs-input' | 'failed' | 'other', isAsking = false) => ({ verdict, isAsking })
+function sessionOutput(states: Record<string, SessionState['state']>): SessionStates {
+  const sessions = Object.fromEntries(Object.entries(states).map(([id, state]) => [id, {
+    state,
+    waitingFor: state === 'waiting' ? 'dialog' : null,
+    isAnswerPending: false,
+    reason: null,
+    since: 0,
+    row: { ...row(id, state === 'working'), link: null, startedBy: null },
+  }]))
+
+  return { version: 1, at: 0, unread: [], sessions, unreadable: [] }
+}
 
 const sessionLine = async (surface: 'terminal' | 'desktop', mount: (s: 'terminal' | 'desktop') => Promise<{ find: (q: { key: string }) => Promise<{ text?: string } | undefined>; unmount: () => Promise<void> }>) => {
   const ui = await mount(surface)
@@ -977,15 +995,12 @@ const sessionLine = async (surface: 'terminal' | 'desktop', mount: (s: 'terminal
   return found?.text
 }
 
-test('the place line counts the other sessions as the sidebar marks them', async ($, on) => {
+test('the place line counts the shared states and leaves failed, unknown and idle out', async ($, on) => {
   const clock = engine(on)
 
-  app.listed = [row('a', true), row('b', true), row('c', false), row('d', false), row('e', false), row('f', false)]
-  app.savedAt = { a: 1, b: 1, c: 1, d: 1, e: 1, f: 1 }
-  app.output = {
-    unread: ['c', 'd', 'f', 'archived'],
-    sessions: { a: read('other'), b: read('needs-input'), c: read('needs-input'), d: read('other'), e: read('needs-input'), f: read('failed') },
-  }
+  const states = { a: 'working', b: 'working', c: 'waiting', d: 'done', e: 'idle', f: 'failed', g: 'unknown' } as const
+
+  app.output = sessionOutput(states)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
 
@@ -997,81 +1012,122 @@ test('the place line counts the other sessions as the sidebar marks them', async
     expect((await ui.find({ type: 'Text', text: /^1 done$/ }))?.props.color).toBe('suggestion')
     await ui.unmount()
   }
-  expect(app.requests[0]?.store).toBe(APP_STORE)
-  // The sessions at work keep saving their files: theirs are not read.
-  expect(app.requests[0]?.sessions.map(asked => asked.id)).toEqual(['c', 'd', 'e', 'f'])
 })
 
 test('a count of none is left out, and no other session leaves the place line as it was', async ($, on) => {
   const clock = engine(on)
 
-  app.listed = [row('a', true)]
-  app.savedAt = { a: 1 }
-  app.output = { unread: [], sessions: { a: read('other') } }
+  app.output = sessionOutput({ a: 'working' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
   expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working')
-
-  app.listed = []
+  app.output = sessionOutput({})
   await clock.advance(5_000)
   expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBeUndefined()
 })
 
-test('a store it cannot read leaves done and the finished turns waiting out, and the rest counted', async ($, on) => {
+test('a store it cannot read still shows working and waiting decisions from the reader', async ($, on) => {
   const clock = engine(on)
 
-  app.listed = [row('a', true), row('c', false), row('d', false)]
-  app.savedAt = { a: 1, c: 1, d: 1 }
-  app.output = { unread: null, sessions: { a: read('other'), c: read('needs-input'), d: read('other') } }
+  app.output = { ...sessionOutput({ a: 'working', b: 'waiting', c: 'idle' }), unread: null }
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
 
-  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working')
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working · 1 waiting')
 })
 
-test('a file or the store is read again only once the app saved it', async ($, on) => {
+test('26 a fresh shared file supplies counts without listing sessions that tick', async ($, on) => {
   const clock = engine(on)
 
-  app.listed = [row('a', false), row('b', false)]
-  app.savedAt = { a: 1, b: 1 }
-  app.output = { unread: ['a'], sessions: { a: read('other'), b: read('other') } }
+  seedShared('session-states', '', clock.now(), sessionOutput({ a: 'working', b: 'done' }))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
+  expect(app.listCalls).toHaveLength(0)
+  expect(app.requests).toHaveLength(0)
+  expect(app.selfCalls).toBe(0)
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working · 1 done')
+  seedShared('session-states', '', clock.now() + 4_000, sessionOutput({ a: 'waiting' }))
   await clock.advance(5_000)
-  expect(app.requests).toHaveLength(1)
 
-  app.savedAt = { a: 1, b: 2 }
-  await clock.advance(5_000)
-  app.storeAt = 2
+  expect(app.listCalls).toHaveLength(0)
+  expect(app.requests).toHaveLength(0)
+  expect(app.selfCalls).toBe(0)
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 waiting')
+})
+
+test('27 a stale shared file and busy reader keep the displayed counts', async ($, on) => {
+  const clock = engine(on)
+
+  app.output = sessionOutput({ a: 'working' })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  app.output = sessionOutput({ a: 'done' })
+  app.sessionExit = 75
   await clock.advance(5_000)
 
-  expect(app.requests.slice(1).map(request => [request.store, request.sessions.map(asked => asked.id)])).toEqual([
-    [undefined, ['b']],
-    [APP_STORE, []],
+  expect(app.listCalls).toHaveLength(2)
+  expect(app.requests).toHaveLength(2)
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working')
+  app.sessionExit = 0
+  await clock.advance(5_000)
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 done')
+})
+
+test('29 the own app session is excluded from this band counts', async ($, on) => {
+  const clock = engine(on)
+
+  app.hostId = 'local_self'
+  seedShared('session-states', '', clock.now(), sessionOutput({ local_self: 'working', other: 'done' }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+
+  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 done')
+})
+
+test('a band that finds another band reading the stale states leaves the app list alone', async ($, on) => {
+  const clock = engine(on)
+
+  const otherClaimAt = clock.now() - 1_000
+
+  seedShared('session-states', '', clock.now() - 10_000, sessionOutput({ a: 'working' }))
+  sharedFiles[`${SHARED}session-states.claim.json`] = JSON.stringify({ at: otherClaimAt })
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+
+  expect(app.listCalls).toHaveLength(0)
+  expect(app.requests).toHaveLength(0)
+  // Past one tick the other band's mark has lapsed, and this band reads.
+  await clock.advance(5_000)
+  expect(app.listCalls).toHaveLength(1)
+  expect((JSON.parse(sharedFiles[`${SHARED}session-states.claim.json`] ?? '{}') as { at: number }).at).toBeGreaterThan(
+    otherClaimAt + 5_000,
+  )
+})
+
+test('a stale reading supplies only listed fields and the own row with its parent', async ($, on) => {
+  const clock = engine(on)
+
+  app.listed = [row('other', true)]
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+
+  expect(app.requests[0]).toEqual([
+    { sessionId: 'other', title: 'Title other', cwd: '/fixture/project', isRunning: true, lastActivityAt: '2026-11-04T06:59:00Z' },
+    { sessionId: 'local_self', title: 'Own session', cwd: '/fixture', isRunning: false, lastActivityAt: '2026-11-04T06:59:00Z', startedBy: 'local_parent' },
   ])
 })
 
-test('a session at work that stands still is looked at once for a question still open', async ($, on) => {
+test('a failed shared reader keeps the last counts', async ($, on) => {
   const clock = engine(on)
 
-  app.listed = [row('a', true, '2026-11-04T06:59:00Z')]
-  app.savedAt = { a: 1 }
-  app.output = { unread: [], sessions: { a: read('other') } }
+  app.output = sessionOutput({ a: 'waiting' })
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
-  app.output = { sessions: { a: read('other', true) } }
+  app.output = sessionOutput({})
+  app.sessionExit = 1
   await clock.advance(5_000)
+
   expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 waiting')
-  await clock.advance(5_000)
-
-  app.listed = [row('a', true, '2026-11-04T07:00:10Z')]
-  await clock.advance(5_000)
-  app.output = { sessions: { a: read('other', false) } }
-  await clock.advance(5_000)
-
-  // The first tick reads the store alone: the session at work keeps saving its file.
-  expect(app.requests.map(request => request.sessions.map(asked => asked.readsQuestion))).toEqual([[], [true], [true]])
-  expect(await sessionLine('desktop', surface => $.ui.mount({ ...ABOVE, surface }))).toBe('1 working')
 })
 
 const step = (turnId: string) => ({
