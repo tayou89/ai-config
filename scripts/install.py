@@ -18,7 +18,9 @@ upstream, so a run from a task branch or its worktree never installs work
 that is not merged (user decision, 2026-11-13).
 
 Files the repository owns (rules, skills, scripts, mods) are copied as they
-are. settings.json is merged key by key so lines only this computer has are
+are, execute permission included; an installed copy whose content matches
+but whose execute permission differs only has its permission set.
+settings.json is merged key by key so lines only this computer has are
 kept. CLAUDE.md and the Codex AGENTS.md are merged three ways against the
 copy installed last time, so lines added on this computer survive and lines
 the repository removed disappear. When no earlier copy is recorded and the
@@ -63,6 +65,7 @@ import os
 import platform
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -95,6 +98,7 @@ BACKUP_PREFIX = "ai-config-install-"
 MOD_MARKETPLACE_FILE = Path(".claude-plugin") / "marketplace.json"
 MOD_PRESERVED_PATHS = ("claude-plans", ".claude-plugin/types")
 IGNORED_NAMES = ("__pycache__", ".DS_Store", ".mypy_cache", ".ruff_cache", ".pytest_cache")
+EXECUTE_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
 RUNTIME_SCRIPTS = (
     "back-reference-hook.py",
     "bulletin-hook.py",
@@ -733,6 +737,10 @@ def iterate_files(directory: Path) -> Iterator[Path]:
             yield path
 
 
+def read_execute_bits(path: Path) -> int:
+    return path.stat().st_mode & EXECUTE_BITS
+
+
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -1020,12 +1028,18 @@ class Installer:
                     self._handle_extra_file(path, root)
 
     def _sync_file(self, source: Path, destination: Path, root: Path) -> None:
+        relative_path = source.relative_to(REPOSITORY_ROOT).as_posix()
+
         if not (destination.is_file() and filecmp.cmp(source, destination, shallow=False)):
-            self._changes.append(f"copy {source.relative_to(REPOSITORY_ROOT).as_posix()} -> {destination}")
+            self._changes.append(f"copy {relative_path} -> {destination}")
             if self._options.apply:
                 self._back_up(destination, root)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
+        elif read_execute_bits(source) != read_execute_bits(destination):
+            self._changes.append(f"mode {relative_path} -> {destination}")
+            if self._options.apply:
+                shutil.copymode(source, destination)
 
     def _handle_extra_file(self, path: Path, root: Path) -> None:
         if self._options.prune:
