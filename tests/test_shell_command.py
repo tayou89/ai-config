@@ -7,7 +7,9 @@ bare `-i` as the backup suffix and stops reading options at its first operand,
 while GNU sed takes no separate suffix and reads options anywhere, so when the
 flavor is unknown the files of both readings count; an empty or dot-led argument
 after `-i` is a suffix in both (GNU sed would fail on such a script and edit
-nothing). The macOS cases were checked against /usr/bin/sed on 2026-11-18.
+nothing). macOS sed also edits in place with `-I`, which GNU sed lacks, and GNU
+sed's `-l` takes a value. The macOS cases were checked against /usr/bin/sed on
+2026-11-18.
 """
 
 from __future__ import annotations
@@ -55,6 +57,14 @@ WRITTEN_FILE_CASES: dict[str, tuple[str, list[str]]] = {
     "sed -i with a one-letter GNU script": ("sed -i p README.md", ["README.md"]),
     "sed -i with an empty suffix before -e": ("sed -i '' -e 's/A/B/' f", ["f"]),
     "gsed is sed": ("gsed -i 's/A/B/' f", ["f"]),
+    "macOS sed -I with an empty suffix": ("sed -I '' 's/A/B/' f", ["f"]),
+    "macOS sed -I with a separate suffix": ("sed -I .bak 's/A/B/' f", ["f"]),
+    "macOS sed -I with an attached suffix": ("sed -I.bak 's/A/B/' f", ["f"]),
+    "macOS sed clustered -EI": ("sed -EI '' 's/A/B/' f", ["f"]),
+    "macOS sed -I before -e": ("sed -I '' -e 's/A/B/' f g", ["f", "g"]),
+    "macOS sed -I takes the script as its suffix, GNU sed has no -I": ("sed -I 's/A/B/' f", []),
+    "GNU sed -l takes a separate value": ("sed -l 5 -i 's/A/B/' f", ["f"]),
+    "GNU sed -l takes an attached value": ("sed -l5 -i 's/A/B/' f", ["f"]),
     "GNU sed abbreviates --in-place": ("sed --in=.bak 's/A/B/' f", ["f"]),
     "GNU sed abbreviates --expression": ("sed --expr 's/A/B/' --in-pl f", ["f"]),
     "sed -f with an attached file name i is not in place": ("sed -fi edits.sed f", []),
