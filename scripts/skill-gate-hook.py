@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refuse writing code, screen files, notes-folder reports, and Figma designs until the skills their triggers name are loaded.
+"""Refuse writing code, screen files, notes-folder reports, Figma designs, and questions with choices until their skills load.
 
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
@@ -91,6 +91,14 @@ _PYTHON = "python"
 _UX_DESIGN = "ux-design"
 _FRONTEND_DESIGN = "frontend-design"
 _REPORT_WRITING = "report-writing"
+_DECISIONS = "decisions-and-collaboration"
+_QUESTION_TOOL = "AskUserQuestion"
+_WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
+_QUESTIONS_KEY = "questions"
+_OPTIONS_KEY = "options"
+_ACTIONS_KEY = "actions"
+_CHOICE_COUNT = 2
+_CHOICE_TARGET = "a question with two or more choices"
 _TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 _PYTHON_EXTENSIONS = frozenset({".py", ".pyi", ".ipynb"})
 _SCREEN_EXTENSIONS = frozenset(
@@ -202,8 +210,37 @@ def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None
         design_tool = tool_name.rsplit(_MCP_SEPARATOR, 1)[-1]
 
         return _make_requirement(f"with `{design_tool}`", _list_design_tool_skills(design_tool, tool_input))
+    elif _is_choice_question(tool_name, tool_input):
+        return _make_requirement(_CHOICE_TARGET, [_DECISIONS])
     else:
         return None
+
+
+def _is_choice_question(tool_name: str, tool_input: dict[str, Any]) -> bool:
+    """A question dialog with two or more options, or a next-step box with two or more buttons."""
+    if tool_name == _QUESTION_TOOL:
+        questions = [question for question in _read_list(tool_input.get(_QUESTIONS_KEY)) if isinstance(question, dict)]
+
+        return any(len(_read_list(question.get(_OPTIONS_KEY))) >= _CHOICE_COUNT for question in questions)
+    elif tool_name == _WRAP_UP_TOOL:
+        return len(_read_list(tool_input.get(_ACTIONS_KEY))) >= _CHOICE_COUNT
+    else:
+        return False
+
+
+def _read_list(value: Any) -> list[Any]:
+    """A list as given, or as JSON text, which is how a tool's array argument sometimes arrives."""
+    if isinstance(value, list):
+        return value
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return []
+        else:
+            return parsed if isinstance(parsed, list) else []
+    else:
+        return []
 
 
 def _list_design_tool_skills(design_tool: str, tool_input: dict[str, Any]) -> list[str]:
