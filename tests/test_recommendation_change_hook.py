@@ -17,6 +17,7 @@ PRE_TOOL_USE = "PreToolUse"
 STOP = "Stop"
 HOOK_OUTPUT_KEY = "hookSpecificOutput"
 NOTICE_PREFIX = "[RECOMMENDATION CHANGE]"
+TIMING_NOTE = "When it appeared is its place in order against the earlier recommendation, or a time read from a clock or a record, not an estimate."
 BLOCK = "block"
 
 
@@ -61,6 +62,14 @@ class RecommendationChangeHookTest(unittest.TestCase):
         self.assertEqual(output["decision"], BLOCK)
         self.assertIn(NOTICE_PREFIX, output["reason"])
         self.assertIn("추천을 E로 바꾸겠", output["reason"])
+
+    def test_says_where_the_timing_comes_from(self) -> None:
+        recap_input = {"recap": "추천을 C에서 E로 바꿨습니다."}
+        notice = str(self._run_pre(WRAP_UP_TOOL, recap_input)[HOOK_OUTPUT_KEY]["additionalContext"])
+        reason = str(self._run_stop("그래서 추천을 E로 바꾸겠습니다.", stop_hook_active=False)["reason"])
+
+        self.assertTrue(notice.endswith(TIMING_NOTE), notice)
+        self.assertTrue(reason.endswith(TIMING_NOTE), reason)
 
     def test_continues_closing_message_with_changed_result_list(self) -> None:
         message = "검토 지적을 반영했습니다. 그 결과 추천이 1-C·2-B·3-B에서 1-D·2-D·3-C로 바뀌었습니다."
