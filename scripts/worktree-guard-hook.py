@@ -34,7 +34,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from shell_command import CommandCall, ExpansionLimitError, expand_shell_command, parse_git_command
+from shell_command import (
+    CommandCall,
+    ExpansionLimitError,
+    expand_shell_command,
+    find_script_index,
+    parse_git_command,
+)
 from workflow_policy import (
     GIT_DIRECTORY_NAME,
     find_repository_root,
@@ -143,7 +149,7 @@ def _list_call_reasons(call: CommandCall) -> list[str]:
         return [*file_reasons, *_list_folder_reasons(work_dir, f"git {git_command.subcommand}")]
     elif git_command and work_dir and _is_unguarded_worktree_change(git_command.subcommand, git_command.arguments):
         return [*file_reasons, *_list_worktree_removal_reasons(work_dir, f"git worktree {git_command.arguments[0]}")]
-    elif call.cwd and any(os.path.basename(argument) == _COMMIT_WRAPPER_NAME for argument in call.argv):
+    elif call.cwd and find_script_index(call.argv, _COMMIT_WRAPPER_NAME) >= 0:
         return [*file_reasons, *_list_folder_reasons(call.cwd, "the commit wrapper")]
     else:
         return file_reasons
