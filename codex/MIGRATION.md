@@ -21,7 +21,7 @@ The detailed code style remains a personal preference: braces, positive conditio
 | Mandatory soak tests and automatic test-stash pop | Use bounded soak tests when in scope; inspect and apply only the specific authorized test patch. |
 | PR prose split by line count | Keep required Purpose/Background/Changes/Verification, but choose paragraphs/lists by meaning under the shared writing principles. |
 | Automatic Claude settings sync, Discord forwarding, session commands | Not migrated: tool-specific behavior and unrelated external actions. No credentials are copied. Codex command rules in `codex/rules/` (one allow rule for the ego browser command, added 2026-11-11) are merged into `~/.codex/rules/` three ways. |
-| User-invoked `deep-prompt`, `outside-review`, and `domain-pass` skills (added 2026-11-05) | Not migrated yet: they are written for Claude slash commands and subagents, and `outside-review` calls Codex itself as the other model family. |
+| `deep-prompt` and `domain-pass` (user-invoked) and `outside-review` (run at review checkpoints) skills (added 2026-11-05) | Not migrated yet: they are written for Claude slash commands and subagents, and `outside-review` calls Codex itself as the other model family. |
 
 ## Clarified Technical Assumptions
 

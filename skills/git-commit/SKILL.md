@@ -41,7 +41,7 @@ git diff --stat
 - **Build artifact consistency**: if `.ts` changed with `.js`/`.js.map`, verify build output matches source
 - **Build side effects**: check for unrelated file changes after `tsc` (LF/CRLF diffs etc). Restore unrelated changes with `git restore`. Exception: `tsbuildinfo` is always meaningful during TS migration.
 
-Report: "Code review done — no issues" if clean. If issues found, report specifically and confirm with user. Flag files that should be excluded.
+Report: "Code review done — no issues" if clean. If issues found, fix those within the task, report each specifically, and ask the user only as section 5 says (user decision, 2026-11-18). Flag files that should be excluded.
 
 ## 3a. Release Commit Bundling
 
@@ -72,7 +72,7 @@ Check on your own, in this order, and fix what fails before running the wrapper:
 2. **Secrets:** no `.env`, keys, or tokens. The wrapper refuses credential files and live-looking tokens on added lines.
 3. **Checks:** type, lint, and test runs pass when code changed. The shared configuration repository also runs its pre-commit check.
 4. **Message:** the rules in section 4, including those the wrapper cannot check (why rather than what, no shorthand a reader cannot decode).
-5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run.
+5. **Large change:** when the staged change touches 200 or more lines outside documents and lock files, run a checklist review of the staged diff against this skill and `code-style` in a subagent at the checklist-review row of the model table (smaller model, high effort), fix what it finds, and pass `--reviewed`. The wrapper refuses a large change without it (exit 7). Pass `--reviewed` only after that review has run. A large commit is also an independent-review checkpoint (`agent-usage` section 7), so run that review too, without asking, and never offer committing without a review as a choice (user decision, 2026-11-18).
 
 Stop and ask the user only when a check fails and cannot be fixed within the task, or when the shell guard asks. When the wrapper refuses lines it cannot show as yours (exit 8: lines marked `?` or `!`, or listed as not this session's), do not ask in chat: if another session can commit its tangled lines first, message it and wait; otherwise rerun once with `--include-unrecorded <file>` for every file the refusal lists, and the shell guard's one dialog, which lists those lines, is the user's decision (user decisions, 2026-11-11 and 2026-11-16). If the user declines it, commit without that file and say so. Rules, skills, hooks, and shared settings are the exception: show the change and get the user's review before applying it, then commit, push, and install it without asking again (user decision, 2026-11-09).
 
