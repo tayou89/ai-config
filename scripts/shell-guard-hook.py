@@ -69,6 +69,7 @@ from shell_command import (
     CommandCall,
     GitCommand,
     expand_shell_command,
+    find_script_index,
     join_directory,
     parse_git_command,
 )
@@ -176,7 +177,6 @@ COMMIT_WRAPPER_NAME = "claude-commit.py"
 SESSION_WRITES_NAME = "session_writes.py"
 ADOPT_COMMAND = "adopt"
 FROM_OPTION = "--from"
-PYTHON_PATTERN = re.compile(r"^python(?:\d+(?:\.\d+)?)?(?:\.exe)?$")
 DYNAMIC_MARKER = "$"
 COMMIT_SUBCOMMAND = "commit"
 PUSH_SUBCOMMAND = "push"
@@ -746,19 +746,6 @@ def parse_wrapper_arguments(arguments: list[str]) -> CommitArguments | None:
 
 def find_commit_wrapper_index(argv: list[str]) -> int:
     return find_script_index(argv, COMMIT_WRAPPER_NAME)
-
-
-def find_script_index(argv: list[str], script_name: str) -> int:
-    """Where a call names a script, run directly or by a Python interpreter with only options before it, or -1."""
-    names = [os.path.basename(argument) for argument in argv]
-
-    if names[:1] == [script_name]:
-        return 0
-    elif names and PYTHON_PATTERN.match(names[0]) and script_name in names[1:]:
-        position = names.index(script_name, 1)
-        return position if all(argument.startswith("-") for argument in argv[1:position]) else -1
-    else:
-        return -1
 
 
 def describe_credentials(paths: list[str], base: str | None) -> list[str]:
