@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -21,13 +22,23 @@ CAPTION_TOOL = "SendUserFile"
 SESSION_TOOL = "mcp__ccd_session__start_session"
 PRE_TOOL_USE = "PreToolUse"
 POST_TOOL_USE = "PostToolUse"
+STOP = "Stop"
+SESSION_START = "SessionStart"
+COMPACT = "compact"
 LANGUAGE_VARIABLE = "REPLY_LANGUAGE"
 TEMPORARY_DIRECTORY_VARIABLE = "TMPDIR"
 HOOK_OUTPUT_KEY = "hookSpecificOutput"
 KOREAN = "ko"
 DENY = "deny"
+BLOCK = "block"
 SESSION_ID = "test-session"
 REMINDER_PREFIX = "[LANGUAGE REMINDER]"
+CLOSING_PREFIX = "[REPLY LANGUAGE]"
+ENGLISH_REMINDER = '[LANGUAGE REMINDER] Your last message to the user was not in Korean 존댓말: "{quote}". Write every line the user sees in Korean 존댓말 from now on, including progress lines between tool calls.'
+NATIVE_REMINDER_START = "[LANGUAGE REMINDER] 방금 사용자에게 쓴 글이 한국어가 아니었습니다"
+NATIVE_REMINDER = NATIVE_REMINDER_START + ': "{quote}". 도구 사이 진행 문장까지, 사용자가 읽는 글은 모두 한국어 존댓말로 씁니다.'
+ENGLISH_SUMMARY_NOTE = "[LANGUAGE REMINDER] The conversation was just summarized. Every line the user reads stays in Korean 존댓말, including progress lines between tool calls."
+NATIVE_SUMMARY_NOTE = "[LANGUAGE REMINDER] 대화가 방금 요약되었습니다. 도구 사이 진행 문장까지, 사용자가 읽는 글은 계속 한국어 존댓말로 씁니다."
 ENGLISH_LINE = "Now editing the wrapper to add the token scan."
 KOREAN_LINE = "이제 래퍼에 토큰 검사를 더하겠습니다."
 TAIL_BYTES = 131072
@@ -204,6 +215,123 @@ class ReplyLanguageHookTest(unittest.TestCase):
         self._append_text("a1", "m1", ENGLISH_LINE)
         self.assertIn(REMINDER_PREFIX, self._get_context(self._run_post()))
 
+    def test_continues_english_closing_once(self) -> None:
+        output = self._run_stop(ENGLISH_LINE)
+
+        self.assertEqual((output or {}).get("decision"), BLOCK)
+        self.assertEqual(
+            (output or {}).get("reason"),
+            f'{CLOSING_PREFIX} The closing message was not in Korean 존댓말: "{ENGLISH_LINE}". The user reads it, so a short follow-up can give the same answer in Korean 존댓말, keeping code, paths, and names as they are.',
+        )
+
+    def test_quotes_start_of_long_english_closing(self) -> None:
+        closing = "I found the cause. " * 20
+        reason = str((self._run_stop(closing) or {}).get("reason", ""))
+
+        self.assertIn(f'"{closing[:100]}"', reason)
+
+    def test_passes_closing_that_needs_no_rewrite(self) -> None:
+        code_closing = "```python\nprint('hello world from the test runner')\n```\n`scripts/reply-language-hook.py`"
+
+        for closing in (KOREAN_LINE, "Done.", code_closing, "", "   "):
+            self.assertIsNone(self._run_stop(closing), closing)
+
+    def test_passes_missing_closing(self) -> None:
+        hook_input = {"hook_event_name": STOP, "session_id": SESSION_ID, "stop_hook_active": False}
+
+        self.assertIsNone(self._run_hook(hook_input, KOREAN))
+
+    def test_does_not_continue_twice(self) -> None:
+        self.assertIsNone(self._run_stop(ENGLISH_LINE, stop_hook_active=True))
+
+    def test_closing_check_needs_known_language(self) -> None:
+        self.assertIsNone(self._run_stop(ENGLISH_LINE, language=None))
+
+    def test_continues_closing_without_readable_transcript(self) -> None:
+        output = self._run_stop(ENGLISH_LINE, transcript_path=str(self._root / "missing.jsonl"))
+
+        self.assertEqual((output or {}).get("decision"), BLOCK)
+
+    def test_closing_check_moves_check_position(self) -> None:
+        self._append_text("a1", "m1", ENGLISH_LINE)
+        self._run_stop(ENGLISH_LINE)
+        self.assertIsNone(self._run_post())
+
+    def test_reminds_after_summary_in_session_half_language(self) -> None:
+        for native in (True, False):
+            session_id = self._find_session(native)
+            context = self._get_context(self._run_session_start(COMPACT, session_id))
+
+            self.assertEqual(context, NATIVE_SUMMARY_NOTE if native else ENGLISH_SUMMARY_NOTE, session_id)
+
+    def test_other_session_starts_get_no_notice(self) -> None:
+        session_id = self._find_session(native=True)
+
+        for source in ("startup", "resume", "clear", ""):
+            self.assertIsNone(self._run_session_start(source, session_id), source)
+        self.assertIsNone(self._run_session_start(COMPACT, session_id, language=None))
+
+    def test_summary_note_is_english_without_session_id(self) -> None:
+        context = self._get_context(self._run_session_start(COMPACT, ""))
+
+        self.assertEqual(context, ENGLISH_SUMMARY_NOTE)
+
+    def test_reminder_is_written_in_session_half_language(self) -> None:
+        for native in (True, False):
+            session_id = self._find_session(native)
+            expected = NATIVE_REMINDER if native else ENGLISH_REMINDER
+
+            self._transcript.write_text("", encoding="utf-8")
+            self._append_text(f"{session_id}-a1", "m1", ENGLISH_LINE)
+            self.assertEqual(self._get_context(self._run_post(session_id)), expected.format(quote=ENGLISH_LINE))
+
+    def test_session_keeps_its_reminder_language(self) -> None:
+        session_id = self._find_session(native=True)
+
+        self._append_text("a1", "m1", ENGLISH_LINE)
+        first = self._get_context(self._run_post(session_id))
+        self._append_text("a2", "m2", "Now running the whole test suite again.")
+        second = self._get_context(self._run_post(session_id))
+
+        self.assertTrue(first.startswith(NATIVE_REMINDER_START))
+        self.assertTrue(second.startswith(NATIVE_REMINDER_START))
+
+    def _run_stop(
+        self,
+        closing: str,
+        stop_hook_active: bool = False,
+        language: str | None = KOREAN,
+        transcript_path: str | None = None,
+    ) -> dict[str, Any] | None:
+        hook_input = {
+            "hook_event_name": STOP,
+            "session_id": SESSION_ID,
+            "transcript_path": transcript_path or str(self._transcript),
+            "stop_hook_active": stop_hook_active,
+            "last_assistant_message": closing,
+        }
+
+        return self._run_hook(hook_input, language)
+
+    def _run_session_start(self, source: str, session_id: str, language: str | None = KOREAN) -> dict[str, Any] | None:
+        hook_input = {
+            "hook_event_name": SESSION_START,
+            "session_id": session_id,
+            "transcript_path": str(self._transcript),
+            "source": source,
+        }
+
+        return self._run_hook(hook_input, language)
+
+    def _find_session(self, native: bool) -> str:
+        candidates = (f"ab-test-{index}" for index in range(100))
+
+        return next(session_id for session_id in candidates if self._is_native_half(session_id) == native)
+
+    def _is_native_half(self, session_id: str) -> bool:
+        """The hook's split: an even first byte of the id's SHA-256 gets reminders in the user's language."""
+        return hashlib.sha256(session_id.encode("utf-8")).digest()[0] % 2 == 0
+
     def _append_text(self, uuid: str, message_id: str, text: str, sidechain: bool = False) -> None:
         message = {"id": message_id, "content": [{"type": "text", "text": text}]}
         entry = {"type": "assistant", "uuid": uuid, "isSidechain": sidechain, "message": message}
@@ -221,10 +349,10 @@ class ReplyLanguageHookTest(unittest.TestCase):
 
         return self._run_hook(hook_input, language)
 
-    def _run_post(self) -> dict[str, Any] | None:
+    def _run_post(self, session_id: str = SESSION_ID) -> dict[str, Any] | None:
         hook_input = {
             "hook_event_name": POST_TOOL_USE,
-            "session_id": SESSION_ID,
+            "session_id": session_id,
             "transcript_path": str(self._transcript),
             "tool_name": "Bash",
             "tool_input": {},

@@ -23,6 +23,7 @@ _WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
 _HOOK_OUTPUT_KEY = "hookSpecificOutput"
 _HOOK_EVENT_KEY = "hookEventName"
 _NOTICE_PREFIX = "[RECOMMENDATION CHANGE]"
+_TIMING_NOTE = "When it appeared is its place in order against the earlier recommendation, or a time read from a clock or a record, not an estimate."
 _RULE_SUMMARY = "`work-principles` 7 allows a change only on a fact, a requirement the user says must be met, or a result that first appeared after the earlier recommendation; an option the user asked to see or their reaction to a result does not count."
 _CHANGE_PATTERN = re.compile(
     r"추천(?:을|은|이|도|으로|안을|\s?표시(?:를|도|는)?|\s?(?=바꿈))"
@@ -79,7 +80,7 @@ def _make_wrap_up_notice(tool_input: dict[str, Any]) -> dict[str, Any] | None:
     change = _search_change(fields)
 
     if change:
-        notice = f'{_NOTICE_PREFIX} The next-step box says a recommendation changed ("{change}"). {_RULE_SUMMARY} The closing message is where that evidence and when it appeared can be named.'
+        notice = f'{_NOTICE_PREFIX} The next-step box says a recommendation changed ("{change}"). {_RULE_SUMMARY} The closing message is where that evidence and when it appeared can be named. {_TIMING_NOTE}'
 
         return {_HOOK_OUTPUT_KEY: {_HOOK_EVENT_KEY: _PRE_TOOL_USE, "additionalContext": notice}}
     else:
@@ -92,7 +93,7 @@ def _make_closing_decision(message: str) -> dict[str, Any] | None:
     change = next((found for found in changes if found), "")
 
     if change:
-        reason = f'{_NOTICE_PREFIX} The closing message says a recommendation changed ("{change}") without saying when its evidence appeared. {_RULE_SUMMARY} A short follow-up can name that evidence and when it appeared, or say the earlier recommendation stands when there is none.'
+        reason = f'{_NOTICE_PREFIX} The closing message says a recommendation changed ("{change}") without saying when its evidence appeared. {_RULE_SUMMARY} A short follow-up can name that evidence and when it appeared, or say the earlier recommendation stands when there is none. {_TIMING_NOTE}'
 
         return {"decision": "block", "reason": reason}
     else:

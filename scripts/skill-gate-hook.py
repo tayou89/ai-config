@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Refuse writing code, screen files, notes-folder reports, Figma designs, and questions with choices until their skills load.
+"""Refuse gated writes and questions until the skills that decide them load.
+
+Code, screen files, notes-folder reports, and Figma designs need their writing
+skills. Question dialogs and next-step boxes need the decision skill for two
+or more choices, the session skill when they mention a session, and the commit
+skill when they mention committing, pushing, or merging. Only questions,
+option labels, and next-step action names count, not recaps, headers, or descriptions.
 
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
@@ -92,13 +98,32 @@ _UX_DESIGN = "ux-design"
 _FRONTEND_DESIGN = "frontend-design"
 _REPORT_WRITING = "report-writing"
 _DECISIONS = "decisions-and-collaboration"
+_SESSION_MANAGEMENT = "session-management"
+_GIT_COMMIT = "git-commit"
 _QUESTION_TOOL = "AskUserQuestion"
 _WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
 _QUESTIONS_KEY = "questions"
+_QUESTION_KEY = "question"
 _OPTIONS_KEY = "options"
+_ASK_KEY = "ask"
 _ACTIONS_KEY = "actions"
+_ACTION_KEY = "action"
+_LABEL_KEY = "label"
 _CHOICE_COUNT = 2
-_CHOICE_TARGET = "a question with two or more choices"
+_QUESTION_TARGET_PARTS = {
+    _DECISIONS: "with two or more choices",
+    _SESSION_MANAGEMENT: "about a session",
+    _GIT_COMMIT: "about committing, pushing, or merging",
+}
+# English words are bounded by Latin letters on both sides, since a Korean particle right after one ("PR을") is a word character to \b.
+_SESSION_WORDS = re.compile(r"세션|(?<![A-Za-z])sessions?(?![A-Za-z])", re.IGNORECASE)
+_COMMIT_WORDS = re.compile(
+    r"커밋|푸시|푸쉬|병합|머지|합[치친쳐쳤칠칩]"
+    r"|(?<![A-Za-z])(?:commit(?:s|ted|ting)?|push(?:es|ed|ing)?|merg(?:e|es|ed|ing)|pull\s+requests?|PRs?)(?![A-Za-z])",
+    re.IGNORECASE,
+)
+_SESSION_ACTION = "new_session"
+_COMMIT_ACTIONS = frozenset({"commit", "create_pr", "merge"})
 _TYPESCRIPT_EXTENSIONS = frozenset({".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
 _PYTHON_EXTENSIONS = frozenset({".py", ".pyi", ".ipynb"})
 _SCREEN_EXTENSIONS = frozenset(
@@ -126,6 +151,7 @@ _PYTHON_PROGRAM = re.compile(r"(?:python|pypy)\d*(?:\.\d+)?")
 _JAVASCRIPT_PROGRAMS = frozenset({"node", "nodejs", "bun", "tsx", "ts-node"})
 _INLINE_PROGRAM_TARGET = "this command's inline program"
 _DENY_REASON = "Writing {target} needs {skills} loaded with the Skill tool first (CLAUDE.md \"Skill Triggers\"), and {owner} has no finished Skill-tool load of {pronoun} since {since}."
+_QUESTION_DENY_NOTE = " The session and commit skills say which of these steps are taken without asking."
 _SESSION_OWNER = "this session"
 _SESSION_SINCE = "its start or last compaction"
 _AGENT_OWNER = "this agent"
@@ -210,10 +236,46 @@ def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None
         design_tool = tool_name.rsplit(_MCP_SEPARATOR, 1)[-1]
 
         return _make_requirement(f"with `{design_tool}`", _list_design_tool_skills(design_tool, tool_input))
-    elif _is_choice_question(tool_name, tool_input):
-        return _make_requirement(_CHOICE_TARGET, [_DECISIONS])
+    elif tool_name in (_QUESTION_TOOL, _WRAP_UP_TOOL):
+        return _find_question_requirement(tool_name, tool_input)
     else:
         return None
+
+
+def _find_question_requirement(tool_name: str, tool_input: dict[str, Any]) -> Requirement | None:
+    texts = _list_question_texts(tool_name, tool_input)
+    action_names = set(_list_item_values(tool_input.get(_ACTIONS_KEY), _ACTION_KEY))
+    skills: list[str] = []
+
+    if _is_choice_question(tool_name, tool_input):
+        skills.append(_DECISIONS)
+    if _SESSION_ACTION in action_names or any(_SESSION_WORDS.search(text) for text in texts):
+        skills.append(_SESSION_MANAGEMENT)
+    if action_names & _COMMIT_ACTIONS or any(_COMMIT_WORDS.search(text) for text in texts):
+        skills.append(_GIT_COMMIT)
+    target = "a question " + " and ".join(_QUESTION_TARGET_PARTS[skill] for skill in skills)
+
+    return _make_requirement(target, skills)
+
+
+def _list_question_texts(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
+    """The question and its choice labels; app action names are read apart, as names rather than words."""
+    if tool_name == _QUESTION_TOOL:
+        questions = [question for question in _read_list(tool_input.get(_QUESTIONS_KEY)) if isinstance(question, dict)]
+        texts: list[str] = []
+
+        for question in questions:
+            labels = _list_item_values(question.get(_OPTIONS_KEY), _LABEL_KEY)
+
+            texts.extend([str(question.get(_QUESTION_KEY) or ""), *labels])
+        return texts
+    else:
+        return [str(tool_input.get(_ASK_KEY) or ""), *_list_item_values(tool_input.get(_ACTIONS_KEY), _LABEL_KEY)]
+
+
+def _list_item_values(items: Any, key: str) -> list[str]:
+    """One field of each object in a list that may arrive as JSON text."""
+    return [str(item.get(key) or "") for item in _read_list(items) if isinstance(item, dict)]
 
 
 def _is_choice_question(tool_name: str, tool_input: dict[str, Any]) -> bool:
@@ -390,14 +452,18 @@ def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
 
 def _make_deny_reason(hook_input: dict[str, Any], target: str, missing: Sequence[str]) -> str:
     is_agent = bool(hook_input.get(_AGENT_ID_KEY)) and hook_input.get(_AGENT_TYPE_KEY) != _FORK_AGENT_TYPE
-
-    return _DENY_REASON.format(
+    reason = _DENY_REASON.format(
         target=target,
         skills=" and ".join(f"`{skill}`" for skill in missing),
         owner=_AGENT_OWNER if is_agent else _SESSION_OWNER,
         pronoun="them" if len(missing) > 1 else "it",
         since=_AGENT_SINCE if is_agent else _SESSION_SINCE,
     )
+
+    if _SESSION_MANAGEMENT in missing or _GIT_COMMIT in missing:
+        return reason + _QUESTION_DENY_NOTE
+    else:
+        return reason
 
 
 def _list_missing_skills(hook_input: dict[str, Any], required: Sequence[str]) -> list[str]:

@@ -38,7 +38,7 @@ When, how many, and which model family follow `decisions-and-collaboration` "Ind
 
 ## 8. Plan Rigor = Code Rigor
 
-Apply the same verification depth to plans as to code. Every classification ("fixable", "unavoidable", "redundant") must cite concrete evidence (line numbers, type resolution trace, actual compile/test output). Never trust agent summaries without verifying key claims against actual code. For type-related issues, trace the full type resolution chain step by step before classifying.
+Apply the same verification depth to plans as to code. Every classification ("fixable", "unavoidable", "redundant") must cite concrete evidence (line numbers, type resolution trace, actual compile/test output). Never trust agent summaries without verifying key claims against the actual code, document, or source they summarize. For type-related issues, trace the full type resolution chain step by step before classifying.
 
 ## 9. Reviewer Scope
 
@@ -46,7 +46,7 @@ A reviewer covers the **full change scope**, not a file range. File-range splitt
 
 ## 10. Rule-Based Checklist Review
 
-Review agents must **load all applicable skills** (code-style, typescript, etc.) with the Skill tool and read the project CLAUDE.md, then check each rule against the changed code systematically. Never review from memory or general impression — always verify rule-by-rule against the loaded text.
+Review agents must **load all applicable skills** (code-style, typescript, etc.) with the Skill tool and read the project CLAUDE.md, then check each rule against the changed code, document, or screen systematically. Never review from memory or general impression — always verify rule-by-rule against the loaded text.
 
 ## 11. Verification Depth
 

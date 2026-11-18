@@ -43,8 +43,7 @@
       "Skill(update-config:*)",
       "Bash(python3 ~/.claude/scripts/claude-commit.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
-      "mcp__ccd_session_mgmt__archive_session",
-      "mcp__ccd_sidebar__move_sessions"
+      "mcp__ccd_session_mgmt__archive_session"
     ]
   },
   "model": "opus[1m]",
@@ -72,6 +71,16 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/project-goal-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
             "timeout": 10
           }
         ]
@@ -205,6 +214,11 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/recommendation-change-hook.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
             "timeout": 10
           }
         ]
