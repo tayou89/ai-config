@@ -3,6 +3,7 @@
 
     codex-budget.py status
     codex-budget.py reserve --kind implementation --percent 5 --topic T --worktree PATH --session ID
+    codex-budget.py reserve --kind research --percent 2 --topic T --folder PATH --session ID
     codex-budget.py reserve --kind review --percent 3 --topic T --session ID
     codex-budget.py update ID --state running|review-waiting|done|failed|abandoned
 
@@ -44,6 +45,7 @@ EXIT_UNREADABLE = 2
 EXIT_REFUSED = 3
 EXIT_UNKNOWN_RESERVATION = 4
 KIND_IMPLEMENTATION = "implementation"
+KIND_RESEARCH = "research"
 KIND_REVIEW = "review"
 STATE_RESERVED = "reserved"
 STATE_RUNNING = "running"
@@ -249,7 +251,7 @@ def unfilled_share(
 ) -> float:
     if reservation.state == STATE_REVIEW_WAITING or is_expired(reservation, now):
         return 0.0
-    elif reservation.kind == KIND_IMPLEMENTATION and reservation.worktree:
+    elif reservation.kind != KIND_REVIEW and reservation.worktree:
         spent = _spent_in_folder(events, reservation.worktree, reservation.created, percent_per_weight)
 
         return max(0.0, reservation.percent - spent)
@@ -665,10 +667,10 @@ def _build_parser() -> argparse.ArgumentParser:
     for command in (status, reserve):
         command.add_argument("--claude-percent", type=float)
         command.add_argument("--claude-resets")
-    reserve.add_argument("--kind", choices=(KIND_IMPLEMENTATION, KIND_REVIEW), required=True)
+    reserve.add_argument("--kind", choices=(KIND_IMPLEMENTATION, KIND_RESEARCH, KIND_REVIEW), required=True)
     reserve.add_argument("--percent", type=_positive_percent, required=True)
     reserve.add_argument("--topic", required=True)
-    reserve.add_argument("--worktree", default="")
+    reserve.add_argument("--worktree", "--folder", dest="worktree", default="")
     reserve.add_argument("--session", default="")
     update.add_argument("identifier")
     update.add_argument("--state", choices=(STATE_RUNNING, STATE_REVIEW_WAITING, *CLOSED_STATES), required=True)
@@ -676,8 +678,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _check_reserve_arguments(parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> None:
-    if arguments.command == "reserve" and arguments.kind == KIND_IMPLEMENTATION and not arguments.worktree:
-        parser.error("an implementation reservation needs --worktree, so its use is not counted as review use")
+    if arguments.command == "reserve" and arguments.kind != KIND_REVIEW and not arguments.worktree:
+        parser.error(f"a {arguments.kind} reservation needs --worktree or --folder, so its use is not counted as review use")
 
 
 if __name__ == "__main__":
