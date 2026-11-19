@@ -11,6 +11,9 @@ sh -c, eval, scripts, cd and git -C) and applies these checks:
         lines this session's write record does not show as its own
   ask   taking over another session's uncommitted files
         (session_writes.py adopt) while that session is not archived
+        (neither applies in a task worktree, where the commit wrapper
+        reads the folder's owner and worktree-guard-hook.py asks before a
+        takeover; user decision, 2026-11-18)
   ask   a git push that is not routine: force, deletion, mirror, tags,
         all branches, another remote or ref, unknown options, or a
         repository that sets shellGuard.askBeforePush
@@ -54,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from commit_arguments import CommitArguments, CommitArgumentsError, parse_commit_arguments
+from folder_owner import find_linked_worktree
 from secret_files import get_credential_reason, read_file_head
 from session_lineage import find_session_record, is_archived, read_session_title
 from session_writes import (
@@ -74,7 +78,6 @@ from shell_command import (
     parse_git_command,
 )
 from workflow_policy import WorkflowMode, find_repository_root, read_checkout_policy, read_original_checkout
-
 
 TERMINAL_TOOL = "mcp__terminal__run_in_terminal"
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -580,7 +583,7 @@ def find_unrecorded_include_reasons(calls: list[CommandCall], session_id: str | 
 
     for call in calls:
         arguments = read_commit_wrapper_arguments(call.argv)
-        included = arguments.included_paths if arguments is not None else ()
+        included = arguments.included_paths if arguments is not None and not is_task_worktree_call(call) else ()
 
         offer = offer_include(call, arguments, session_id) if arguments is not None and included else None
 
@@ -686,7 +689,11 @@ def try_list_unproven_lines(session_id: str, root: str, path: str, blob: str | N
 
 def find_adoption_reasons(calls: list[CommandCall]) -> list[str]:
     """Ask before a takeover of files from a session the app has not archived, since it may still commit them."""
-    takeovers = [(call, takeover) for call in calls if (takeover := read_adoption_arguments(call.argv)) is not None]
+    takeovers = [
+        (call, takeover)
+        for call in calls
+        if not is_task_worktree_call(call) and (takeover := read_adoption_arguments(call.argv)) is not None
+    ]
     reasons: list[str] = []
 
     for call, (sender, files) in takeovers:
@@ -695,6 +702,12 @@ def find_adoption_reasons(calls: list[CommandCall]) -> list[str]:
         if not is_archived(record):
             reasons.append(make_adoption_reason(call, sender, files, record))
     return reasons
+
+
+def is_task_worktree_call(call: CommandCall) -> bool:
+    """In a task worktree the commit wrapper reads the folder's owner, and the folder guard asks before a takeover,
+    so neither dialog about recorded lines applies there."""
+    return call.cwd is not None and find_linked_worktree(Path(call.cwd).resolve()) is not None
 
 
 def read_adoption_arguments(argv: list[str]) -> tuple[str, list[str]] | None:

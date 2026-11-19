@@ -56,6 +56,8 @@ from datetime import datetime
 from enum import Enum
 from pathlib import Path
 
+from folder_owner import FROM_OPTION, TAKE_COMMAND, find_linked_worktree
+from folder_owner import main as run_folder_owner
 from own_lines import (
     CommitPoint,
     ContestedLine,
@@ -64,10 +66,9 @@ from own_lines import (
     build_own_content,
     list_foreign_lines,
 )
-from session_lineage import find_session_record, read_cli_session_id
+from session_lineage import CLI_SESSION_VARIABLE, find_session_record, read_cli_session_id
 from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
 
-_SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _RECORD_DIRECTORY_NAME = "session-writes"
@@ -396,7 +397,7 @@ _UNKNOWN_FIELDS = frozenset(unknown_field.name for unknown_field in fields(Unkno
 
 
 def read_session_id() -> str | None:
-    return os.environ.get(_SESSION_VARIABLE) or None
+    return os.environ.get(CLI_SESSION_VARIABLE) or None
 
 
 def has_record(session_id: str) -> bool:
@@ -698,33 +699,6 @@ def is_whole_file_own(session_id: str, root: str, path: str, base_blob: str | No
         return False
 
 
-def has_other_session_writes(session_id: str, root: str, since: float) -> bool:
-    """Whether another session wrote in the repository at or after a time, or has a call there that may still run.
-
-    The commit wrapper asks it about a linked worktree from when the worktree
-    was added. Writes this session took over count as its own. A record or
-    pending file that cannot be read counts as a write, and so does a time
-    before the records' lifetime, whose records may already be gone, so a
-    doubtful case keeps the own-lines check.
-    """
-    try:
-        sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
-        events = [(session, event) for session in sessions if session != session_id for event in _read_events(session)]
-        adopted = {(adoption.root, adoption.path) for adoption in _read_adoptions(session_id)}
-        owners = {key: _find_owners(session_id, *key) for key in adopted}
-    except SessionWritesError:
-        return True
-    else:
-        is_before_records = since < time.time() - _RECORD_LIFETIME_SECONDS
-        written = any(
-            event.root == root and event.end >= since and not _is_adopted_write(owners, session, event)
-            for session, event in events
-        )
-        running = any(_is_pending_in(pending, root, since) for pending in _list_other_pendings(session_id))
-
-        return is_before_records or written or running
-
-
 def is_line_tracked(root: str, path: str) -> bool:
     """Whether the file is a regular text file small enough to separate line by line."""
     file = Path(root, path)
@@ -893,14 +867,28 @@ def _print_report(paths: Sequence[str]) -> int:
             print(_describe_file(session_id, os.path.realpath(path)))
         return 0
     else:
-        message = f"No {_SESSION_VARIABLE}: this shell is not a Claude session, so there is no write record."
+        message = f"No {CLI_SESSION_VARIABLE}: this shell is not a Claude session, so there is no write record."
 
         print(message, file=sys.stderr)
         return 1
 
 
 def _adopt_files(sender_text: str, paths: Sequence[str]) -> int:
-    """Take over the files another session handed this one, each with that session's recorded writes up to now."""
+    """Take over the files another session handed this one, each with that session's recorded writes up to now.
+
+    In a task worktree the commit wrapper reads the folder's owner instead
+    of the write record, so taking over there takes the whole folder.
+    """
+    worktree = find_linked_worktree(Path(os.getcwd()).resolve())
+
+    if worktree is not None:
+        print(f"{worktree.root} is a task worktree, so its owner is what counts: taking the folder over.")
+        return run_folder_owner([TAKE_COMMAND, FROM_OPTION, sender_text, str(worktree.root)])
+    else:
+        return _adopt_recorded_files(sender_text, paths)
+
+
+def _adopt_recorded_files(sender_text: str, paths: Sequence[str]) -> int:
     session_id = read_session_id()
     sender = resolve_session_id(sender_text)
     scope = find_repository_paths(os.getcwd(), paths) if session_id else None
@@ -1235,17 +1223,6 @@ def _is_owned(owners: dict[str, float], session: str, event: WriteEvent | Unknow
     return session in owners and event.end <= owners[session]
 
 
-def _is_adopted_write(
-    owners: dict[tuple[str, str], dict[str, float]],
-    session: str,
-    event: WriteEvent | UnknownWrite,
-) -> bool:
-    """Whether another session's write to a file is one this session took over, by the owners of each file it took."""
-    file_owners = owners.get((event.root, event.path)) if event.path is not None else None
-
-    return file_owners is not None and _is_owned(file_owners, session, event)
-
-
 def _read_adoptions(session_id: str) -> list[_Adoption]:
     """The files the session took over, oldest first, without lines that do not read as one."""
     record = get_record_directory() / session_id / _ADOPTIONS_FILE
@@ -1322,21 +1299,6 @@ def _list_other_pendings(session_id: str) -> list[Path]:
         for pending in get_record_directory().glob(f"*/*{_PENDING_SUFFIX}")
         if pending.parent.name != session_id and (_read_modified_time(pending) or 0.0) >= limit
     ]
-
-
-def _is_pending_in(pending: Path, root: str, since: float) -> bool:
-    """Whether a pending call snapshots the repository and ran at or after a time; one that does not parse does."""
-    try:
-        call = _parse_pending_call(pending.read_text(encoding=_TEXT_ENCODING))
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError, TypeError, KeyError, AttributeError):
-        return True
-    else:
-        roots = {scope.root for scope in [*(snapshot.get_scope() for snapshot in call.snapshots), *call.unknown]}
-        never_ran_at = _find_never_ran_time(pending.parent.name, pending.name[: -len(_PENDING_SUFFIX)])
-
-        return root in roots and (never_ran_at is None or never_ran_at >= since)
 
 
 def _read_running_call(pending: Path, root: str, path: str) -> UnknownWrite | None:
