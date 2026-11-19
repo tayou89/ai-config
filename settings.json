@@ -42,6 +42,7 @@
       "Skill(update-config)",
       "Skill(update-config:*)",
       "Bash(python3 ~/.claude/scripts/claude-commit.py:*)",
+      "Bash(python3 ~/.claude/skills/outside-review/run-review.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
       "mcp__ccd_session_mgmt__archive_session"
     ]
@@ -113,7 +114,7 @@
         ]
       },
       {
-        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|AskUserQuestion|mcp__terminal__run_in_terminal|mcp__ccd_turn__wrap_up|mcp__.*__(use_figma|upload_assets|create_new_file|send_code_to_figma)",
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|AskUserQuestion|SendMessage|Agent|mcp__terminal__run_in_terminal|mcp__ccd_turn__wrap_up|mcp__ccd_session__start_session|mcp__.*__(use_figma|upload_assets|create_new_file|send_code_to_figma)",
         "hooks": [
           {
             "type": "command",

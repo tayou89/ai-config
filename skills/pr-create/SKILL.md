@@ -1,11 +1,11 @@
 ---
 name: pr-create
-description: Create or update a GitHub pull request with gh pr create. Apply whenever a PR is opened or its body rewritten; the body needs Purpose, Background, Changes, and Verification sections.
+description: Create or update a GitHub pull request with gh pr create. Apply whenever a PR is opened or its body rewritten; the body opens with what changed and whether the user must act, in plain words, keeps checks, risks, and undo, and ends with the developer record.
 ---
 
 # PR Creation Workflow
 
-Use this skill when creating GitHub pull requests via `gh pr create`. PRs MUST include **Purpose** and **Background** sections so reviewers can grasp *why* before looking at the diff. A diff without context forces reviewers to reverse-engineer intent — state the problem and reasoning first, then the solution.
+Use this skill when creating GitHub pull requests via `gh pr create`. The user reads every pull request without the code at hand, so the body states what changed for them and whether they must act before any developer detail, and still keeps every fact a reviewer needs.
 
 ## 1. Pre-PR Review
 
@@ -24,82 +24,54 @@ Where `<base>` is the target branch (usually `main`, `dev`). If a PR already exi
 
 - Format: `<Type>: <short subject>` matching commit style (`Feat:`, `Fix:`, `Refactor:`, `Chore:`, `Merge:`)
 - ≤72 chars (50-60 recommended)
-- English subject only.
+- English subject only, though the notification email shows it as its subject: a squash merge of more than one commit saves the title as the history's subject (GitHub's default), and commit messages are English.
 
-## 3. PR Body — Required Sections
+## 3. PR Body
 
-The body MUST include all four sections, in this order. Section headers can be either English (`## Purpose`) or the project's local language equivalent — choose what matches the repository convention. The semantic requirement is fixed; the header label is local.
+In a repository with its own pull request template or team rules, follow those. Elsewhere, write the body for the user: they read each pull request without the code at hand, in a notification email or on the pull request page, and do not know developer terms (user decision, 2026-11-18); reviewers and later sessions read the same page for the record. Put what changes and whether the user must act first and background toward the end, keep every fact a reviewer needs in a developer record at the end, and write in the user's language and everyday words, as `collaboration-core` "Plain replies and labels" describes.
 
-```
-## Purpose
-
-<2-5 sentences explaining WHY this update is needed. State the user/system impact,
-the safety/correctness gap being closed, or the business reason. Do NOT describe
-the diff here.>
-
-## Background
-
-<Context that led to the work: sweep/audit findings, upstream spec or contract,
-prior incident, alternatives considered. Reference relevant files, line numbers,
-or external systems. Reviewers should understand the problem space without
-opening the diff.>
-
-## Changes
-
-<Commit-by-commit breakdown. Each commit hash + subject line, then bullets listing
-the substantive change. Group by module/component if applicable.>
-
-## Verification
-
-<How the change was tested: type-check, lint, unit/integration tests, runtime
-smoke test logs, screenshots. Be specific — "tested locally" alone is insufficient.
-State what passed and what was skipped or deferred.>
-```
-
-Optional final section (when applicable):
+Use these parts in this order, with headings in the user's language (Korean shown):
 
 ```
-## Follow-ups
+<One or two sentences before any heading: what is now different for the
+user or for sessions.>
 
-<Anything intentionally deferred to follow-up PRs: scope splits, post-merge
-testing, future refactors. Helps reviewers see what's NOT in this PR.>
+**할 일:** <없습니다, with who merges it and when it takes effect; or the
+action and its deadline>
+
+### 달라지는 점
+<Two to four points: what the user or a session sees before and after.>
+
+### 바꾼 까닭
+<The problem, its cause, and the user decision behind it.>
+
+### 확인한 것
+<What was checked and what it showed, and what was not checked.>
+
+### 남은 위험
+<What can still go wrong and what happens then, and work left for later.>
+
+### 되돌리기
+<How to undo it, and what undoing cannot reverse: data written, messages
+sent, orders placed, a deploy already live.>
+
+<details>
+<summary>개발 기록 (원인, 바뀐 코드, 시험)</summary>
+
+<The plan and the decision quote, the technical cause, each commit's hash and
+subject, changed files and functions, exact commands and results, reviews and
+models, cases not handled.>
+
+</details>
 ```
 
-### Section content guidance
-
-**Purpose — focus on WHY**
-- Good: "The service's retry logic and its test double diverged, making integration tests unreliable."
-- Bad: "Add retry handling to the upload, email, and payment clients." (that's WHAT, belongs in Changes)
-
-**Background — focus on what reviewers need to know upstream**
-- Sweep / audit findings that motivated the work (tables of findings welcome)
-- Upstream spec or contract being implemented (cite files + line numbers)
-- Prior incident or pain point being addressed
-- Decision history — alternatives considered, why this approach
-
-**Changes — group by atomic unit**
-- One subsection per commit OR per logical module
-- Each subsection: commit hash + subject + bullet list of substantive changes
-- Skip changes already obvious from the commit subject
-
-**Verification — be precise**
-- Type-check / lint results with the command and outcome (e.g. `tsc --noEmit → 0 errors`)
-- Test results (which tests, pass/fail count)
-- Runtime/integration logs (which processes, duration, error grep result)
-- Skipped or deferred verification — explicitly state and explain
-
-### Readability
-
-Reviewers skim. Optimize every section for scannability.
-
-- Structure over prose: bullets, sub-headings, or tables for any section longer than 3 lines.
-- Inline-code mandatory: backtick every identifier, path, command, env var. References use `path:Lnn`.
-- No repetition across sections — each must add what previous sections cannot.
-- Active voice, short verbs. Wrap ~100 chars.
-
-### Language policy for body content
-
-PR title and the skill rule text are English. Body **content** language follows user preference and project convention — the PR may be written in the team's working language. Code references, commit hashes, command output, and external system names stay in their original form (usually English).
+- Before creating, read the opening and the 할 일 line alone: they must say what changed, what it means for the user, and whether to act.
+- Before the developer record, use no paths, identifiers, commit hashes, or command options, except one the user will type; plain counts are fine. In the record, backtick every identifier, path, and command.
+- Never leave out 확인한 것, 남은 위험, or 되돌리기, and write 없습니다 there only after checking.
+- Keep the parts before the developer record within about 1,200 characters, moving detail into the record rather than dropping a check, risk, or undo fact.
+- Write the body complete when creating it, and tell the user something learned later in a comment rather than only by editing the body.
+- Gmail shows `<details>` unfolded (caniemail, tested 2019-07) while GitHub folds it, so the order, not the fold, puts what matters first.
+- Each part adds what the earlier ones do not; use paragraphs for connected explanations and bullets for independent points, as `report-writing` "Prose" describes.
 
 ## 4. Show Body Before Creating
 
@@ -111,21 +83,31 @@ Use HEREDOC to preserve markdown formatting:
 
 ```bash
 gh pr create --title "<title>" --body "$(cat <<'EOF'
-## Purpose
+<opening sentences>
+
+**할 일:** ...
+
+### 달라지는 점
+...
+
+### 바꾼 까닭
+...
+
+### 확인한 것
+...
+
+### 남은 위험
+...
+
+### 되돌리기
+...
+
+<details>
+<summary>개발 기록 (원인, 바뀐 코드, 시험)</summary>
 
 ...
 
-## Background
-
-...
-
-## Changes
-
-...
-
-## Verification
-
-...
+</details>
 EOF
 )"
 ```
@@ -144,7 +126,7 @@ Flags:
 
 ## Rules
 
-- **Never create PR without Purpose and Background sections** — content must explain WHY, not just WHAT.
+- **Never create a PR without the opening, 할 일, 확인한 것, 남은 위험, and 되돌리기** — the user must see what changed, whether to act, and how safe it is without reading the record.
 - **Never compose body purely from commit messages** — commits describe WHAT not WHY.
 - **Never use `--fill`** — bypasses the required sections.
 - **Do not include `Generated with Claude Code` or similar trailers** per global policy.
