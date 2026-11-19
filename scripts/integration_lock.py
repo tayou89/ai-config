@@ -38,15 +38,33 @@ def hold_integration_lock(
     announce_wait: Callable[[], None],
 ) -> Iterator[None]:
     """Hold the lock in this Git folder, calling `announce_wait` once if another integration or commit holds it."""
-    with open(common_git_directory / LOCK_FILE_NAME, "a", encoding=_ENCODING) as handle:
-        _acquire(handle.fileno(), time.monotonic() + wait_seconds, announce_wait)
+    with hold_file_lock(common_git_directory / LOCK_FILE_NAME, wait_seconds, _POLL_SECONDS, announce_wait):
+        yield
+
+
+@contextmanager
+def hold_file_lock(
+    path: Path,
+    wait_seconds: float,
+    poll_seconds: float,
+    announce_wait: Callable[[], None] | None = None,
+) -> Iterator[None]:
+    """Hold an exclusive lock on a file, which the operating system releases when the holder exits.
+
+    `announce_wait` runs once if another process holds it; a wait of a few seconds needs none. Raises
+    LockTimeoutError when another process holds it for longer than `wait_seconds`.
+    """
+    with open(path, "a", encoding=_ENCODING) as handle:
+        _acquire(handle.fileno(), time.monotonic() + wait_seconds, poll_seconds, announce_wait)
         try:
             yield
         finally:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def _acquire(descriptor: int, deadline: float, announce_wait: Callable[[], None]) -> None:
+def _acquire(
+    descriptor: int, deadline: float, poll_seconds: float, announce_wait: Callable[[], None] | None
+) -> None:
     announced = False
 
     while not _try_lock(descriptor):
@@ -54,10 +72,10 @@ def _acquire(descriptor: int, deadline: float, announce_wait: Callable[[], None]
             raise LockTimeoutError(
                 "another commit or integration in this checkout is still running; try again when it ends"
             )
-        elif not announced:
+        elif not announced and announce_wait is not None:
             announce_wait()
             announced = True
-        time.sleep(_POLL_SECONDS)
+        time.sleep(poll_seconds)
 
 
 def _try_lock(descriptor: int) -> bool:

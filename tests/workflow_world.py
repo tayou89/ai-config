@@ -3,7 +3,9 @@
 A world holds a bare repository standing in for the remote, the original
 checkout cloned from it, worktrees for tasks, and a `gh` shim on PATH that
 runs github_double.py against the bare repository. Git runs with a config
-of its own, so the user's global settings and hooks never apply.
+of its own, so the user's global settings and hooks never apply, and the
+session running the tests passes none of its session ids on, so a tool under
+test sees a Claude session only where a test names one.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ POLICY_FILE = ".agent-workflow.json"
 BASE = "main"
 PASSED_CHECK = {"__typename": "CheckRun", "name": "checks", "status": "COMPLETED", "conclusion": "SUCCESS"}
 ENCODING = "utf-8"
+SESSION_VARIABLES = ("CLAUDE_CODE_HOST_SESSION_ID", "CLAUDE_CODE_SESSION_ID")
 
 
 def record_direct_workflow(checkout: Path) -> None:
@@ -194,7 +197,11 @@ class WorkflowWorld:
 
     def _make_environment(self) -> dict[str, str]:
         git_config = self.root / "gitconfig"
-        environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        environment = {
+            name: value
+            for name, value in os.environ.items()
+            if not name.startswith("GIT_") and name not in SESSION_VARIABLES
+        }
 
         git_config.write_text("[user]\n\tname = Test\n\temail = test@example.com\n", encoding=ENCODING)
         environment.update(
