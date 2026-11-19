@@ -4,7 +4,7 @@ Steps for work that `agent-usage` section 14 hands to Codex: implementation in a
 
 ## 1. Prepare
 
-- The run is approved as section 1 says. Reserve its share before starting: `python3 ~/.claude/skills/agent-usage/codex-budget.py reserve --kind implementation --percent <estimate> --topic <topic> --worktree <path> --session ${CLAUDE_SESSION_ID}`, or `--kind research --folder <empty folder>` for research and record collection. Estimate from earlier closed entries of the same kind in `~/.claude/codex-budget/ledger.jsonl` (their `actual_percent`); with none, use 1 for a small exact edit, 2 for a record count, 3 for web research, and 5 for a feature-sized bundle. A non-review reservation needs its folder, so its use is not counted as review use. If `python3 ~/.claude/skills/outside-review/codex-limits.py` shows a five-hour window 90% used or more, wait for its reset rather than start.
+- The run is approved as section 1 says. Reserve its share before starting: `python3 ~/.claude/skills/agent-usage/codex-budget.py reserve --kind implementation --percent <estimate> --topic <topic> --worktree <path> --session ${CLAUDE_SESSION_ID}`, or `--kind research --folder <empty folder>` for research and record collection. Estimate from earlier closed entries of the same kind in `~/.claude/codex-budget/ledger.jsonl` (their `actual_percent`); with none, use 1 for a small exact edit, 2 for a record count, 3 for web research, and 5 for a feature-sized bundle. Put the id it prints on the brief's first line as `Budget reservation: <id>`, so the budget tool counts the run's use to it; a non-review reservation also names its folder, for runs whose brief lacks the line. If `python3 ~/.claude/skills/outside-review/codex-limits.py` shows a five-hour window 90% used or more, wait for its reset rather than start.
 - A project's own Codex runs, such as a builder that drafts design options, are reserved the same way, with the folder they run in.
 - Close every entry you open: an entry left `running` expires after 12 hours and one never started after 24, but until then it holds its share.
 - For implementation, create the worktree and branch the way the repository's recorded Git workflow names them; in a repository without that workflow, use `git worktree add -b codex/<topic> ../<repository>-codex-<topic>`. Record the base commit in the brief. For research, create a new empty folder for the run, such as `<notes folder>/codex-<topic>/`.
@@ -15,16 +15,16 @@ Steps for work that `agent-usage` section 14 hands to Codex: implementation in a
 Implementation:
 
 ```bash
-codex exec -m <model> -c model_reasoning_effort="<effort>" -s workspace-write -C "<worktree>" -o "<brief folder>/codex-result-<topic>.md" "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
+codex exec -m <model> -c model_reasoning_effort="<effort>" -s workspace-write -C "<worktree>" -o "<brief folder>/codex-result-<topic>.md" -- "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
 ```
 
 Research or record collection, outside any repository:
 
 ```bash
-codex --search exec -m <model> -c model_reasoning_effort="<effort>" --skip-git-repo-check -s workspace-write -C "<run folder>" -o "<run folder>/codex-result-<topic>.md" "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
+codex --search exec -m <model> -c model_reasoning_effort="<effort>" --skip-git-repo-check -s workspace-write -C "<run folder>" -o "<run folder>/codex-result-<topic>.md" -- "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
 ```
 
-`--search` turns on web search and goes before `exec`, which rejects it; leave it out for record collection that needs no web. `--skip-git-repo-check` lets Codex run in a folder that is not a Git repository (a run without it fails there; seen 2026-11-18). Do not use `-s read-only` for research: `codex-limits.py` counts read-only runs as running reviews, so independent reviews would wait behind it. Codex can still read files outside the run folder, such as transcripts and logs.
+`--search` turns on web search and goes before `exec`, which rejects it; leave it out for record collection that needs no web. `--skip-git-repo-check` lets Codex run in a folder that is not a Git repository (a run without it fails there; seen 2026-11-18). `--` ends the options, so a brief is never read as one. Codex can still read files outside the run folder, such as transcripts and logs.
 
 Take `<model>` and `<effort>` from `agent-usage` section 13; change the names when `outside-review/run-review.py` changes its own. Run it in the background, set the entry to `running` with `codex-budget.py update <id> --state running`, and keep working on other things. `-s workspace-write` limits file writes mostly to the worktree or run folder, but extra writable paths, temporary folders, command rules, and connected tools can reach further, so the review below checks what changed. Leave out `--ephemeral` so the run shows in the Codex session log, which the budget check reads.
 
@@ -40,6 +40,7 @@ Take `<model>` and `<effort>` from `agent-usage` section 13; change the names wh
 ## Implementation Brief Template
 
 ```markdown
+Budget reservation: <id>
 # Codex implementation brief — <topic> (<date>)
 
 You implement one bundle that Claude planned and will review. Work only in `<worktree>` (base commit `<sha>`). Do not commit, push, or create branches, even where AGENTS.md says to finish through Git: Claude reviews and commits this work.
@@ -72,6 +73,7 @@ Start with one word: `done`, `partial`, or `blocked`. Then list the files change
 ## Research Brief Template
 
 ```markdown
+Budget reservation: <id>
 # Codex research brief — <topic> (<date>)
 
 You collect facts that Claude will check and use. Write only in `<run folder>`. Do not change files anywhere else, and do not recommend or decide: report what the sources say.

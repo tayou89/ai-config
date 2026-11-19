@@ -12,6 +12,12 @@ through `outside-review/codex-limits.py`, and the review use per day comes from 
 logs. Reservations live in one ledger under a file lock, so two sessions cannot hand out the same
 share (user decision, 2026-11-17). Exit codes: 0 done, 2 the quota could not be read, 3 the
 reservation does not fit, 4 unknown reservation.
+
+Each run's brief starts with `Budget reservation: <id>`, and its use counts to that reservation's
+kind (user decision, 2026-11-19). A helper run such as Codex's command-approval check follows its
+parent run. A run without the line takes its purpose from `labels.jsonl` beside the ledger, written
+once for runs before the line existed; with neither, it is review use unless it ran inside a
+reserved folder.
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ CLAUDE_LIMITS = Path.home() / "Library" / "Caches" / "usage-panel" / "claude-lim
 LEDGER_DIRECTORY = Path.home() / ".claude" / "codex-budget"
 LEDGER_FILE = LEDGER_DIRECTORY / "ledger.jsonl"
 LOCK_FILE = LEDGER_DIRECTORY / "ledger.lock"
+LABELS_FILE = LEDGER_DIRECTORY / "labels.jsonl"
 RESERVED_EXPIRY_HOURS = 24
 RUNNING_EXPIRY_HOURS = 12
 REVIEW_EXPIRY_HOURS = 2
@@ -47,6 +54,7 @@ EXIT_UNKNOWN_RESERVATION = 4
 KIND_IMPLEMENTATION = "implementation"
 KIND_RESEARCH = "research"
 KIND_REVIEW = "review"
+KIND_BUILDER = "builder"
 STATE_RESERVED = "reserved"
 STATE_RUNNING = "running"
 STATE_REVIEW_WAITING = "review-waiting"
@@ -67,6 +75,9 @@ _EVENT_STATE = "state"
 _EVENT_KEY = "event"
 _OPEN_STATES = (STATE_RESERVED, STATE_RUNNING, STATE_REVIEW_WAITING)
 _FRACTION = re.compile(r"(\.\d+)")
+_RESERVATION_LINE = re.compile(r"Budget reservation:\s*(\d{8}-[0-9a-f]{8})")
+_SETUP_MESSAGE_STARTS = ("<", "# AGENTS.md instructions")
+_LABEL_KINDS = (KIND_IMPLEMENTATION, KIND_RESEARCH, KIND_REVIEW, KIND_BUILDER)
 _SATURDAY = 5
 
 
@@ -77,6 +88,26 @@ class UsageEvent:
     cwd: str
     used_percent: float | None
     window_reset: float | None
+    thread_id: str = ""
+
+
+@dataclass
+class SessionInfo:
+    thread_id: str
+    parent_thread_id: str
+    reservation_id: str
+
+
+@dataclass
+class CodexHistory:
+    events: list[UsageEvent]
+    sessions: dict[str, SessionInfo]
+
+
+@dataclass(frozen=True)
+class Purpose:
+    kind: str
+    reservation_id: str = ""
 
 
 @dataclass
@@ -184,14 +215,35 @@ def measure_percent_per_weight(events: list[UsageEvent]) -> float | None:
         return None
 
 
+def resolve_purposes(
+    sessions: dict[str, SessionInfo],
+    reservations: dict[str, Reservation],
+    labels: dict[str, str],
+) -> dict[str, Purpose]:
+    """Take each run's purpose from its own reservation line or label, else from the nearest parent run's.
+
+    A run with neither is left out, so callers fall back to the folder rule for it.
+    """
+    purposes: dict[str, Purpose] = {}
+
+    for thread_id in sessions:
+        purpose = _find_purpose(thread_id, sessions, reservations, labels)
+
+        if purpose is not None:
+            purposes[thread_id] = purpose
+    return purposes
+
+
 def measure_daily_reviews(
     events: list[UsageEvent],
     implementation_folders: list[str],
     percent_per_weight: float,
     now: datetime,
+    purposes: dict[str, Purpose] | None = None,
 ) -> ReviewHistory:
     """Average review use per weekday and weekend day, leaving out days with no Codex record at all."""
     first_day = (now - timedelta(days=_HISTORY_DAYS)).date()
+    known = purposes or {}
     days: dict[date, float] = defaultdict(float)
     weekdays: list[float] = []
     weekends: list[float] = []
@@ -200,7 +252,7 @@ def measure_daily_reviews(
         day = event.moment.date()
 
         if first_day <= day < now.date():
-            is_review = not _is_inside(event.cwd, implementation_folders)
+            is_review = _is_review_use(event, known.get(event.thread_id), implementation_folders)
             days[day] += event.weight * percent_per_weight if is_review else 0.0
     for day, spent in days.items():
         (weekends if day.weekday() >= _SATURDAY else weekdays).append(spent)
@@ -243,20 +295,38 @@ def compute_review_reserve(
     return expected, swing, workdays
 
 
-def unfilled_share(
-    reservation: Reservation,
+def attribute_spending(
     events: list[UsageEvent],
-    percent_per_weight: float,
-    now: datetime,
-) -> float:
+    reservations: dict[str, Reservation],
+    purposes: dict[str, Purpose],
+) -> dict[str, float]:
+    """Return the usage weight each reservation spent, counting every event to one reservation at most.
+
+    A run linked by its reservation line counts to that reservation. A run without a link counts to
+    the reserved folder it ran in, the innermost one, but only for a non-review reservation that no
+    run links to, since those are the reservations made before briefs carried the line.
+    """
+    linked = {purpose.reservation_id for purpose in purposes.values() if purpose.reservation_id}
+    by_folder = [
+        item
+        for item in reservations.values()
+        if item.kind != KIND_REVIEW and item.worktree and item.identifier not in linked
+    ]
+    weights: dict[str, float] = defaultdict(float)
+
+    for event in events:
+        owner = _find_spending_owner(event, purposes.get(event.thread_id), by_folder)
+
+        if owner:
+            weights[owner] += event.weight
+    return dict(weights)
+
+
+def unfilled_share(reservation: Reservation, spent: float, now: datetime) -> float:
     if reservation.state == STATE_REVIEW_WAITING or is_expired(reservation, now):
         return 0.0
-    elif reservation.kind != KIND_REVIEW and reservation.worktree:
-        spent = _spent_in_folder(events, reservation.worktree, reservation.created, percent_per_weight)
-
-        return max(0.0, reservation.percent - spent)
     else:
-        return reservation.percent
+        return max(0.0, reservation.percent - spent)
 
 
 def is_expired(reservation: Reservation, now: datetime) -> bool:
@@ -343,12 +413,8 @@ def run_update(arguments: argparse.Namespace) -> int:
         else:
             reservation.state = arguments.state
             reservation.changed = now
-            if arguments.state in CLOSED_STATES and reservation.worktree:
-                events = _load_usage_events(now - timedelta(days=_READ_DAYS))
-                rate = measure_percent_per_weight(events) or _DEFAULT_PERCENT_PER_WEIGHT
-                spent = _spent_in_folder(events, reservation.worktree, reservation.created, rate)
-
-                reservation.actual_percent = round(spent, 2)
+            if arguments.state in CLOSED_STATES:
+                _record_actual_share(reservation, now)
             record = {_EVENT_KEY: _EVENT_STATE, **_to_record(reservation)}
 
             _append_record(record)
@@ -406,21 +472,28 @@ def _read_claude_cache(now: datetime) -> ClaudeLimits:
         return ClaudeLimits(percent, resets)
 
 
-def _load_usage_events(since: datetime) -> list[UsageEvent]:
+def _load_codex_history(since: datetime) -> CodexHistory:
     events: list[UsageEvent] = []
+    sessions: dict[str, SessionInfo] = {}
 
     for path in sorted(CODEX_SESSIONS.rglob("*.jsonl")):
         try:
             if path.stat().st_mtime >= since.timestamp():
-                events.extend(_read_session_file(path))
+                session, session_events = _read_session_file(path)
+
+                events.extend(session_events)
+                if session.thread_id and session.thread_id not in sessions:
+                    sessions[session.thread_id] = session
         except OSError:
             continue
-    return sorted(events, key=lambda event: event.moment)
+    return CodexHistory(sorted(events, key=lambda event: event.moment), sessions)
 
 
-def _read_session_file(path: Path) -> list[UsageEvent]:
+def _read_session_file(path: Path) -> tuple[SessionInfo, list[UsageEvent]]:
+    session = SessionInfo("", "", "")
     events: list[UsageEvent] = []
     cwd = ""
+    brief_seen = False
     previous: dict[str, int] = {}
 
     with path.open(encoding="utf-8", errors="replace") as handle:
@@ -432,19 +505,148 @@ def _read_session_file(path: Path) -> list[UsageEvent]:
                 continue
             if record.get("type") == "session_meta":
                 cwd = str(payload.get("cwd", ""))
+                session.thread_id = str(payload.get("id") or "")
+                session.parent_thread_id = str(payload.get("parent_thread_id") or "")
             elif payload.get("type") == "token_count":
-                event = _build_usage_event(record, payload, cwd, previous)
+                event = _build_usage_event(record, payload, cwd, session.thread_id, previous)
 
                 if event is not None:
                     events.append(event[0])
                     previous = event[1]
-    return events
+            elif not brief_seen and (brief := _read_brief_text(payload)) is not None:
+                session.reservation_id = _read_reservation_line(brief)
+                brief_seen = True
+    return session, events
+
+
+def _read_brief_text(payload: dict[str, object]) -> str | None:
+    """Return the first user text that is the run's brief, not the setup text Codex sends before it."""
+    content = payload.get("content")
+
+    if payload.get("type") == "message" and payload.get("role") == "user" and isinstance(content, list):
+        texts = [part.get("text") for part in content if isinstance(part, dict)]
+        briefs = [
+            text
+            for text in texts
+            if isinstance(text, str) and not text.lstrip().startswith(_SETUP_MESSAGE_STARTS)
+        ]
+
+        return briefs[0] if briefs else None
+    else:
+        return None
+
+
+def _read_reservation_line(brief: str) -> str:
+    lines = [line.strip() for line in brief.splitlines() if line.strip()]
+    found = _RESERVATION_LINE.fullmatch(lines[0]) if lines else None
+
+    return found.group(1) if found else ""
+
+
+def _read_labels() -> dict[str, str]:
+    labels: dict[str, str] = {}
+
+    try:
+        lines = LABELS_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for line in lines:
+        record = _parse_line(line)
+        thread_id = record.get("thread_id")
+        kind = record.get("kind")
+
+        if isinstance(thread_id, str) and thread_id and kind in _LABEL_KINDS:
+            labels[thread_id] = str(kind)
+    return labels
+
+
+def _find_purpose(
+    thread_id: str,
+    sessions: dict[str, SessionInfo],
+    reservations: dict[str, Reservation],
+    labels: dict[str, str],
+) -> Purpose | None:
+    lineage = _list_lineage(thread_id, sessions)
+    found = (_read_own_purpose(ancestor, sessions, reservations, labels) for ancestor in lineage)
+
+    return next((purpose for purpose in found if purpose is not None), None)
+
+
+def _list_lineage(thread_id: str, sessions: dict[str, SessionInfo]) -> list[str]:
+    """Return the run and its parent runs, nearest first, ending at a parent without a log or a loop."""
+    lineage: list[str] = []
+    current = thread_id
+
+    while current and current not in lineage:
+        lineage.append(current)
+        session = sessions.get(current)
+        current = session.parent_thread_id if session else ""
+    return lineage
+
+
+def _read_own_purpose(
+    thread_id: str,
+    sessions: dict[str, SessionInfo],
+    reservations: dict[str, Reservation],
+    labels: dict[str, str],
+) -> Purpose | None:
+    session = sessions.get(thread_id)
+    reservation = reservations.get(session.reservation_id) if session else None
+    label = labels.get(thread_id)
+
+    if reservation is not None:
+        return Purpose(reservation.kind, reservation.identifier)
+    elif label:
+        return Purpose(label)
+    else:
+        return None
+
+
+def _is_review_use(event: UsageEvent, purpose: Purpose | None, folders: list[str]) -> bool:
+    if purpose is None:
+        return not _is_inside(event.cwd, folders)
+    else:
+        return purpose.kind == KIND_REVIEW
+
+
+def _find_spending_owner(event: UsageEvent, purpose: Purpose | None, by_folder: list[Reservation]) -> str:
+    if purpose is not None and purpose.reservation_id:
+        return purpose.reservation_id
+    elif purpose is not None and purpose.kind == KIND_REVIEW:
+        return ""
+    else:
+        holders = [
+            item
+            for item in by_folder
+            if _was_open_at(item, event.moment) and _is_inside(event.cwd, [item.worktree])
+        ]
+        owner = max(holders, key=lambda item: (len(item.worktree), item.created), default=None)
+
+        return owner.identifier if owner else ""
+
+
+def _was_open_at(reservation: Reservation, moment: datetime) -> bool:
+    closed_at = reservation.changed if reservation.state in CLOSED_STATES else None
+
+    return reservation.created <= moment and (closed_at is None or moment <= closed_at)
+
+
+def _record_actual_share(reservation: Reservation, now: datetime) -> None:
+    codex_history = _load_codex_history(now - timedelta(days=_READ_DAYS))
+    rate = measure_percent_per_weight(codex_history.events) or _DEFAULT_PERCENT_PER_WEIGHT
+    reservations = {**_read_all_reservations(), reservation.identifier: reservation}
+    purposes = resolve_purposes(codex_history.sessions, reservations, _read_labels())
+    spending = attribute_spending(codex_history.events, reservations, purposes)
+
+    if reservation.worktree or reservation.identifier in spending:
+        reservation.actual_percent = round(spending.get(reservation.identifier, 0.0) * rate, 2)
 
 
 def _build_usage_event(
     record: dict[str, object],
     payload: dict[str, object],
     cwd: str,
+    thread_id: str,
     previous: dict[str, int],
 ) -> tuple[UsageEvent, dict[str, int]] | None:
     info = payload.get("info")
@@ -454,8 +656,9 @@ def _build_usage_event(
         if isinstance(total, dict):
             moment = _parse_moment(str(record.get("timestamp")))
             used_percent, window_reset = _weekly_window(payload.get("rate_limits"))
+            weight = event_weight(previous, total)
 
-            return UsageEvent(moment, event_weight(previous, total), cwd, used_percent, window_reset), total
+            return UsageEvent(moment, weight, cwd, used_percent, window_reset, thread_id), total
         else:
             return None
     except (TypeError, ValueError):
@@ -495,12 +698,6 @@ def _work_fraction(start: datetime, end: datetime, day: date) -> float:
     overlap = (min(end, closing) - max(start, opening)).total_seconds()
 
     return max(0.0, overlap) / (closing - opening).total_seconds()
-
-
-def _spent_in_folder(events: list[UsageEvent], folder: str, since: datetime, percent_per_weight: float) -> float:
-    weight = sum(event.weight for event in events if event.moment >= since and _is_inside(event.cwd, [folder]))
-
-    return weight * percent_per_weight
 
 
 def _project_claude(claude: ClaudeLimits, now: datetime) -> float | None:
@@ -575,14 +772,20 @@ def _append_record(record: dict[str, object]) -> None:
         handle.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-def _read_reservations(now: datetime) -> dict[str, Reservation]:
+def _read_all_reservations() -> dict[str, Reservation]:
+    """Every reservation in the ledger, for telling a run's purpose however long ago it ran."""
     reservations: dict[str, Reservation] = {}
-    cutoff = now - timedelta(days=_HISTORY_DAYS)
 
     if LEDGER_FILE.exists():
         for line in LEDGER_FILE.read_text(encoding="utf-8").splitlines():
             _apply_record(reservations, _parse_line(line))
-    return {key: value for key, value in reservations.items() if (value.changed or value.created) >= cutoff}
+    return reservations
+
+
+def _read_reservations(now: datetime) -> dict[str, Reservation]:
+    cutoff = now - timedelta(days=_HISTORY_DAYS)
+
+    return {key: value for key, value in _read_all_reservations().items() if (value.changed or value.created) >= cutoff}
 
 
 def _compute_status(
@@ -592,20 +795,32 @@ def _compute_status(
     events: list[UsageEvent],
     reservations: dict[str, Reservation],
     now: datetime,
+    purposes: dict[str, Purpose],
 ) -> BudgetStatus:
     percent_per_weight = measure_percent_per_weight(events) or _DEFAULT_PERCENT_PER_WEIGHT
     folders = [os.path.realpath(item.worktree) for item in reservations.values() if item.worktree]
-    history = measure_daily_reviews(events, folders, percent_per_weight, now)
+    history = measure_daily_reviews(events, folders, percent_per_weight, now, purposes)
+    spending = attribute_spending(events, reservations, purposes)
     claude_blocked = claude.percent is not None and claude.percent >= 100
     blocked_until = claude.resets if claude_blocked else None
     expected, swing, workdays = compute_review_reserve(now, codex_resets, blocked_until, history)
-    open_items = [item for item in reservations.values() if item.state in _OPEN_STATES]
-    unfilled = {item.identifier: unfilled_share(item, events, percent_per_weight, now) for item in open_items}
+    cutoff = now - timedelta(days=_HISTORY_DAYS)
+    open_items = [
+        item
+        for item in reservations.values()
+        if item.state in _OPEN_STATES and (item.changed or item.created) >= cutoff
+    ]
+    unfilled = {
+        item.identifier: unfilled_share(item, spending.get(item.identifier, 0.0) * percent_per_weight, now)
+        for item in open_items
+    }
     open_total = sum(unfilled.values())
     available = 100 - codex_percent - open_total - expected - swing
     claude_projected = _project_claude(claude, now)
     verdict, priority = decide_verdict(available, claude_blocked, claude_projected)
-    current_window_weight = sum(event.weight for event in (group_windows(events) or [[]])[-1])
+    current_window = (group_windows(events) or [[]])[-1]
+    current_window_weight = sum(event.weight for event in current_window)
+    unknown_weight = sum(event.weight for event in current_window if event.thread_id not in purposes)
     report: dict[str, object] = {
         "verdict": verdict,
         "priority": priority,
@@ -621,6 +836,7 @@ def _compute_status(
         "review_per_weekend_day": round(history.weekend_mean, 1),
         "percent_per_million": round(percent_per_weight * 1e6, 3),
         "unattributed_percent": round(max(0.0, codex_percent - current_window_weight * percent_per_weight), 1),
+        "purpose_unknown_percent": round(unknown_weight * percent_per_weight, 1),
         "claude_percent": claude.percent,
         "claude_projected": None if claude_projected is None else round(claude_projected),
         "claude_blocked": claude_blocked,
@@ -643,9 +859,19 @@ def _compute_status(
 
 def _load_status(arguments: argparse.Namespace, now: datetime, codex: CodexLimits) -> BudgetStatus:
     claude = read_claude_limits(arguments.claude_percent, arguments.claude_resets, now)
-    events = _load_usage_events(now - timedelta(days=_READ_DAYS))
+    codex_history = _load_codex_history(now - timedelta(days=_READ_DAYS))
+    reservations = _read_all_reservations()
+    purposes = resolve_purposes(codex_history.sessions, reservations, _read_labels())
 
-    return _compute_status(codex.percent, codex.resets or now, claude, events, _read_reservations(now), now)
+    return _compute_status(
+        codex.percent,
+        codex.resets or now,
+        claude,
+        codex_history.events,
+        reservations,
+        now,
+        purposes,
+    )
 
 
 def _positive_percent(text: str) -> float:
@@ -679,7 +905,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _check_reserve_arguments(parser: argparse.ArgumentParser, arguments: argparse.Namespace) -> None:
     if arguments.command == "reserve" and arguments.kind != KIND_REVIEW and not arguments.worktree:
-        parser.error(f"a {arguments.kind} reservation needs --worktree or --folder, so its use is not counted as review use")
+        parser.error(f"a {arguments.kind} reservation needs --worktree or --folder, the folder its Codex run works in")
 
 
 if __name__ == "__main__":

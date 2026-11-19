@@ -35,6 +35,7 @@ The script's `MODEL` and `EFFORT` follow the reviews row of the work-type table 
 
 The brief states:
 
+- on its first line, `Budget reservation: <id>` with the id the review's reservation printed, so the budget tool counts the run as review use wherever it runs;
 - the goal and the outcome the work must achieve, and the paths from section 1 to read directly rather than copies;
 - a reading map for each long file (over about 30 KB), skill and reference files and the transcript text included: the sections or line ranges the work touches, and for the transcript the line where this work starts, to read first, with the whole file still open to the reviewer when it doubts the map, since material read early is re-sent at every later step and a long file read in pieces fills the context until Codex compacts it;
 - when the reviewer will drive `ego-browser` and `~/.codex/rules/` allows it, to pass each script as `ego-browser nodejs -e '<script>'` (multi-line inside the quotes is fine), or a longer script written to a file as `ego-browser nodejs -e 'await import("<absolute path>")'` (using `globalThis.taskSpace` inside it): that form matches the allow rule and runs directly, while a heredoc or `< file` is sandboxed, fails, and starts an automatic approval review run each time it is escalated, and to capture pages with it rather than starting Chrome, which aborts inside the sandbox and shows the user a crash dialog;
