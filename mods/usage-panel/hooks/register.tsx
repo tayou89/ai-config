@@ -13,7 +13,7 @@ import {
   overLevel,
   workPace,
 } from './work'
-import type { EngineInterface, FsEntry, Register, RenderChildren, ToolCallResult } from 'claude-code'
+import type { EngineInterface, FsEntry, Register, RenderChildren, Timer, ToolCallResult } from 'claude-code'
 import type {
   Cache,
   CacheOutput,
@@ -82,11 +82,29 @@ type SharedName = keyof SharedOutputs
 type SharedRequest<N extends SharedName> = { name: N; key: string; since: number; arguments: readonly string[] }
 // One piece of work a session repeats: a timer's tick, or a refresh an event asks for.
 type OneAtATime = { tick: () => Promise<void>; refresh: () => Promise<void> }
+// A timer of the band: `busyMs` is its pace while the session works, `idleMs`
+// its pace while idle; left out, the timer waits while the session is idle.
+// `tick` runs at its pace and skips while its last run still goes; `refresh`,
+// asked on waking, runs once more after it.
+interface BandTimer {
+  busyMs: number
+  idleMs?: number
+  tick: () => void
+  refresh: () => void
+}
+interface TimerOwner {
+  markActive: () => Promise<void>
+}
 
 const PANE = 'usage'
 const TITLE = '사용량'
 const KEEP_TURNS = 30
 const RECOUNT_EVERY_MS = 10 * 60 * 1000
+// The running reply's time redraws each second.
+const TURN_TICK_MS = 1000
+// A session is idle once no reply, busy helper or open work was seen for this
+// long, so the short gaps between replies leave the timers as they are.
+const IDLE_AFTER_MS = 60 * 1000
 
 // Change a tag when that value's fields change: it declines what an earlier
 // version stored, which outlives a reload.
@@ -130,6 +148,8 @@ const CODEX_SESSIONS = '.codex/sessions'
 const CODEX_CONFIG = '.codex/config.toml'
 const DAY_MS = 24 * 60 * 60 * 1000
 const CODEX_TICK_MS = 10 * 1000
+// An idle session looks at the Codex records each minute instead.
+const CODEX_IDLE_TICK_MS = 60 * 1000
 const CODEX_SERVER_EVERY_MS = 5 * 60 * 1000
 // A reading older than this is drawn grey with the time it was read.
 const STALE_MS = 15 * 60 * 1000
@@ -151,6 +171,8 @@ const CODEX_NAME = 'Codex'
 const SHARED_FOLDER = 'Library/Caches/usage-panel'
 const CLAUDE_SHARED = `${SHARED_FOLDER}/claude-limits.json`
 const CLAUDE_SHARE_EVERY_MS = 15 * 1000
+// An idle session takes another session's Claude reading each minute instead.
+const CLAUDE_SHARE_IDLE_EVERY_MS = 60 * 1000
 // The Codex readings and the 7-day count pass through the same folder: one
 // session reads, under a lock on the file, and the others take its reading.
 const SHARED_NAME = {
@@ -177,6 +199,9 @@ const PYTHON = '/usr/bin/python3'
 const sessions = atom({ plugin: 'usage-panel', key: 'sessions' } as const, null as SessionCounts | null, {
   shape: 'sessions-1',
 })
+// An idle session counts at the same pace: the person reads the waiting count
+// on an idle band, the dashboard calls the shared file stale past 15 seconds,
+// and a reading taken from it may already be 5 seconds old.
 const SESSIONS_EVERY_MS = 5 * 1000
 const SESSIONS_READ_MS = 20 * 1000
 // The one switch for the yellow count, which stands in for a dot the app keeps
@@ -1283,6 +1308,96 @@ function runOneAtATime(run: () => Promise<void>): OneAtATime {
   }
 }
 
+// A repeated piece of work as a band timer runs it, its promise left to the
+// work's own error handling.
+function pacedRuns(work: OneAtATime): Pick<BandTimer, 'tick' | 'refresh'> {
+  return {
+    tick: () => void work.tick(),
+    refresh: () => void work.refresh(),
+  }
+}
+
+// A piece of work that never overlaps itself ticks and refreshes alike.
+function plainRuns(run: () => void): Pick<BandTimer, 'tick' | 'refresh'> {
+  return { tick: run, refresh: run }
+}
+
+// Keeps every band timer at the pace the session asks for: the working pace
+// from the start, the idle pace once the session stayed quiet for
+// IDLE_AFTER_MS. Quiet starts at the last activity, or at the first look that
+// found nothing busy, never at a look that found it busy. Activity while idle
+// asks each paused or slowed timer for a refresh, which also runs once more
+// after a read still going, so what the idle pace left behind is read again; a
+// timer whose pace stays keeps its beat. An activity count, raised before any
+// wait, tells the idle entry that activity came while it read the state.
+async function startPacedTimers(
+  $: EngineInterface,
+  timers: readonly BandTimer[],
+  isBusy: () => Promise<boolean>,
+): Promise<TimerOwner> {
+  const running = new Map<BandTimer, Timer>()
+  const paceChanging = timers.filter(timer => timer.idleMs !== timer.busyMs)
+  let isIdle = false
+  let activity = 0
+  // None while the last look found the session busy.
+  let quietSince: number | undefined = await $.clock.now()
+
+  const startTimer = (timer: BandTimer): void => {
+    const ms = isIdle ? timer.idleMs : timer.busyMs
+
+    running.get(timer)?.cancel()
+    running.delete(timer)
+    if (ms !== undefined) {
+      running.set(timer, $.clock.every(ms, timer.tick))
+    }
+  }
+  const wakeTimer = (timer: BandTimer): void => {
+    timer.refresh()
+    startTimer(timer)
+  }
+  const scheduleIdleEntry = (ms: number): void => {
+    $.clock.after(ms, () => void enterIdleWhenQuiet())
+  }
+  const enterIdleWhenQuiet = async (): Promise<void> => {
+    try {
+      const seenActivity = activity
+      const isWorking = await isBusy()
+      const now = await $.clock.now()
+      const quietMs = activity === seenActivity && quietSince !== undefined ? now - quietSince : 0
+
+      if (isWorking) {
+        quietSince = undefined
+        scheduleIdleEntry(IDLE_AFTER_MS)
+      } else if (quietMs >= IDLE_AFTER_MS) {
+        isIdle = true
+        paceChanging.forEach(startTimer)
+      } else {
+        quietSince = quietSince ?? now
+        scheduleIdleEntry(IDLE_AFTER_MS - quietMs)
+      }
+    } catch {
+      scheduleIdleEntry(IDLE_AFTER_MS)
+    }
+  }
+  const markActive = async (): Promise<void> => {
+    try {
+      activity += 1
+      quietSince = await $.clock.now()
+      if (isIdle) {
+        isIdle = false
+        paceChanging.forEach(wakeTimer)
+        scheduleIdleEntry(IDLE_AFTER_MS)
+      }
+    } catch {
+      // The next activity wakes the timers.
+    }
+  }
+
+  timers.forEach(startTimer)
+  scheduleIdleEntry(IDLE_AFTER_MS)
+  return { markActive }
+}
+
 // A failed read of the run records shows on the Codex line until a read
 // succeeds. Noting it is a help: one that fails leaves the line as it was.
 async function recordCodexReadFailure($: EngineInterface): Promise<void> {
@@ -1736,8 +1851,10 @@ async function alertLimits($: EngineInterface, limits: readonly Limit[], maker?:
   }
 }
 
-async function openDetails($: EngineInterface) {
+// Opening the details is activity: what an idle band left behind is read again.
+async function openDetails($: EngineInterface, timerOwner: TimerOwner | undefined): Promise<void> {
   await $.ui.open({ id: PANE, title: TITLE, closeOnEscape: true })
+  await timerOwner?.markActive()
 }
 
 function isWorkMaker(value: unknown): value is WorkMaker {
@@ -2025,6 +2142,11 @@ function isCodexWorkOpen(work: Work, now: number): boolean {
   const isWaiting = work.finishedAt === undefined || now - work.finishedAt < CODEX_SETTLE_MS
 
   return work.maker === 'codex' && work.rise === undefined && isWaiting
+}
+
+// A reply still running, or a Codex run still waiting for its record.
+function hasOpenWork(list: readonly Work[], now: number): boolean {
+  return list.some(w => w.finishedAt === undefined || isCodexWorkOpen(w, now))
 }
 
 // The work bookkeeping never stands in the way of the turn or the command it
@@ -2397,6 +2519,7 @@ export const register: Register = on => {
   // Writes this session's work file, one write at a time, the last with all.
   let ownWorksSaver: (() => Promise<void>) | undefined
   let cacheReader: (() => Promise<void>) | undefined
+  let timerOwner: TimerOwner | undefined
 
   on('session.start', async ($, e, next) => {
     const isReload = await read($, loaded)
@@ -2459,7 +2582,6 @@ export const register: Register = on => {
     }
     recounter = recountNow
     void recountIfDue()
-    $.clock.every(RECOUNT_CHECK_MS, () => void recountIfDue())
 
     const relocation = runOneAtATime(async (): Promise<void> => {
       const found = await locate($).catch(() => null)
@@ -2468,12 +2590,13 @@ export const register: Register = on => {
     })
     relocater = relocation.refresh
     await relocation.tick()
-    $.clock.every(WHERE_EVERY_MS, () => void relocation.tick())
 
-    // Each agent keeps the time it was first seen at work, for its age.
+    // Each agent keeps the time it was first seen at work, for its age. A list
+    // that fails keeps the agents last seen, so a session whose helpers still
+    // work is never taken for idle.
     const listHelpers = async (): Promise<void> => {
       try {
-        const all = await $.agent.list().catch(() => [])
+        const all = await $.agent.list()
         const now = await $.clock.now()
 
         await update($, helpers, known =>
@@ -2494,7 +2617,6 @@ export const register: Register = on => {
     const helperList = runOneAtATime(listHelpers)
     rehelp = helperList.refresh
     await helperList.tick()
-    $.clock.every(HELPERS_EVERY_MS, () => void helperList.tick())
 
     // Every session takes the newest shared reading of the run records, and
     // the newest server reading made for its own folder. Each returns when the
@@ -2599,7 +2721,6 @@ export const register: Register = on => {
     if (isCodexServerDue(await read($, codex), await $.clock.now())) {
       void readCodexOnStart()
     }
-    $.clock.every(CODEX_TICK_MS, () => void codexTicks.tick())
 
     // The estimate tool, and the work every session here finished with the
     // weekly limits' steps, read again each minute after this session adds
@@ -2608,6 +2729,7 @@ export const register: Register = on => {
     await registerEstimateTool($)
     if (!isReload) {
       await update($, works, list => list.filter(w => w.maker !== 'claude' || w.finishedAt !== undefined))
+      await update($, turns, list => list.map(t => (t.isRunning ? { ...t, isRunning: false } : t)))
     }
     const ownWorksSave = runOneAtATime(() => saveOwnWorks($))
     ownWorksSaver = ownWorksSave.refresh
@@ -2626,7 +2748,6 @@ export const register: Register = on => {
     }
     const workHistoryRead = runOneAtATime(refreshWorkHistory)
     await workHistoryRead.tick()
-    $.clock.every(WORK_EVERY_MS, () => void workHistoryRead.tick())
 
     // A Codex run started here takes its record as the reader finds it, at
     // each reading of the records.
@@ -2646,18 +2767,15 @@ export const register: Register = on => {
       }
     }
     const codexWorkSettle = runOneAtATime(settleOpenCodexWorks)
-    $.clock.every(CODEX_TICK_MS, () => void codexWorkSettle.tick())
-    $.clock.every(WORK_TICK_MS, async () => {
+    const tickWork = async (): Promise<void> => {
       try {
-        const now = await $.clock.now()
-
-        if ((await read($, works)).some(w => w.finishedAt === undefined || isCodexWorkOpen(w, now))) {
+        if (hasOpenWork(await read($, works), await $.clock.now())) {
           await update($, workTick, n => n + 1)
         }
       } catch {
         // The next tick redraws.
       }
-    })
+    }
 
     // Another session's reading wins once it heard a reply since this one last
     // did. It is weighed inside the write, so a reply here meanwhile stands.
@@ -2676,11 +2794,9 @@ export const register: Register = on => {
     }
     const claudeShare = runOneAtATime(shareClaude)
     await claudeShare.tick()
-    $.clock.every(CLAUDE_SHARE_EVERY_MS, () => void claudeShare.tick())
 
     const sessionCount = runOneAtATime(sharedSessionCounter($, home))
     void sessionCount.tick()
-    $.clock.every(SESSIONS_EVERY_MS, () => void sessionCount.tick())
 
     // The transcript says how long the cache lives, and for a session that
     // starts again, when its last request was: what it held is gone.
@@ -2711,11 +2827,41 @@ export const register: Register = on => {
     const cacheRead = runOneAtATime(readCacheNow)
     cacheReader = cacheRead.refresh
     void cacheRead.refresh()
-    $.clock.every(CACHE_TICK_MS, () => void tickCache())
 
-    $.clock.every(1_000, async () => {
-      if ((await read($, turns)).some(t => t.isRunning)) await update($, tick, n => n + 1)
-    })
+    const tickTurn = async (): Promise<void> => {
+      try {
+        if ((await read($, turns)).some(t => t.isRunning)) {
+          await update($, tick, n => n + 1)
+        }
+      } catch {
+        // The next second redraws.
+      }
+    }
+    // A reply, a busy helper or open work keeps the session at work.
+    const isSessionBusy = async (): Promise<boolean> => {
+      const now = await $.clock.now()
+      const isTurnRunning = (await read($, turns)).some(t => t.isRunning)
+      const isHelperBusy = (await read($, helpers)).length > 0
+
+      return isTurnRunning || isHelperBusy || hasOpenWork(await read($, works), now)
+    }
+    // The timers left out while idle redraw or read what only changes while
+    // the session works: its reply, helpers, folder and own runs.
+    const bandTimers: BandTimer[] = [
+      { busyMs: RECOUNT_CHECK_MS, idleMs: RECOUNT_CHECK_MS, ...plainRuns(() => void recountIfDue()) },
+      { busyMs: WHERE_EVERY_MS, ...pacedRuns(relocation) },
+      { busyMs: HELPERS_EVERY_MS, ...pacedRuns(helperList) },
+      { busyMs: CODEX_TICK_MS, idleMs: CODEX_IDLE_TICK_MS, ...pacedRuns(codexTicks) },
+      // The details may stay open on an idle session and show other sessions' work.
+      { busyMs: WORK_EVERY_MS, idleMs: WORK_EVERY_MS, ...pacedRuns(workHistoryRead) },
+      { busyMs: CODEX_TICK_MS, ...pacedRuns(codexWorkSettle) },
+      { busyMs: WORK_TICK_MS, ...plainRuns(() => void tickWork()) },
+      { busyMs: CLAUDE_SHARE_EVERY_MS, idleMs: CLAUDE_SHARE_IDLE_EVERY_MS, ...pacedRuns(claudeShare) },
+      { busyMs: SESSIONS_EVERY_MS, idleMs: SESSIONS_EVERY_MS, ...pacedRuns(sessionCount) },
+      { busyMs: CACHE_TICK_MS, idleMs: CACHE_TICK_MS, ...plainRuns(() => void tickCache()) },
+      { busyMs: TURN_TICK_MS, ...plainRuns(() => void tickTurn()) },
+    ]
+    timerOwner = await startPacedTimers($, bandTimers, isSessionBusy)
 
     // The details stay closed until asked for: the line above the prompt
     // carries the summary, so the pane takes no room by default. A reload
@@ -2729,7 +2875,7 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'usage-panel' }, async $ => {
-    await openDetails($)
+    await openDetails($, timerOwner)
     return { text: '사용량 패널을 열었어요.' }
   })
 
@@ -2863,8 +3009,9 @@ export const register: Register = on => {
     // The details open from a chevron at the end of each usage line. The
     // mark is the label itself: a Button holds no image, and the desktop app
     // draws a Button's label rather than its children.
+    const pressDetails = (): void => void openDetails($, timerOwner)
     const detailsButton = (key: string) =>
-      slot(key, <Button key={key} label={DETAILS_GLYPH} plain dimColor onPress={() => void openDetails($)} />)
+      slot(key, <Button key={key} label={DETAILS_GLYPH} plain dimColor onPress={pressDetails} />)
 
     // The chevron keeps close to the piece before it: the line's gap between
     // pieces, on top of the desktop button's own padding, set it far apart.
@@ -3101,6 +3248,7 @@ export const register: Register = on => {
   })
 
   on('turn.start', async ($, e, next) => {
+    await timerOwner?.markActive()
     if (e.agentId !== undefined) void rehelp?.()
     if (e.agentId === undefined) {
       const now = await $.clock.now()
@@ -3177,6 +3325,11 @@ export const register: Register = on => {
     const isCodexRun = e.tool === 'Bash' && CODEX_RUN.test(e.command)
     const isCodexWork = e.tool === 'Bash' && CODEX_INVOCATION.test(e.command)
     const isForeground = e.tool === 'Bash' && e.run_in_background !== true
+
+    // A run this session starts is work: the band wakes for it.
+    if (isCodexWork) {
+      await timerOwner?.markActive()
+    }
     const hasEstimate = isCodexWork ? await startCodexWork($, e.tool_use_id, await $.clock.now()) : true
     const ran = await next(e)
 
@@ -3226,6 +3379,7 @@ export const register: Register = on => {
   })
 
   on('agent.spawn', async ($, e, next) => {
+    await timerOwner?.markActive()
     const spawned = await next(e)
     await update($, turns, list => list.map(t => (t.isRunning ? { ...t, helpersSpawned: (t.helpersSpawned ?? 0) + 1 } : t)))
     void rehelp?.()
@@ -3233,7 +3387,9 @@ export const register: Register = on => {
     return spawned
   })
 
+  // A reply's end starts the idle minute over.
   on('turn.complete', async ($, e, next) => {
+    await timerOwner?.markActive()
     if (e.agentId !== undefined) void rehelp?.()
     if (e.agentId === undefined) {
       void relocater?.()
