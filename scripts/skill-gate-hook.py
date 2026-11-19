@@ -9,6 +9,13 @@ option labels, and next-step action names count, not recaps, headers, or descrip
 A write, a brief to another session or agent, or a `codex` prompt that sets a
 motion's length or easing needs the motion skills; motion a write leaves as it was does not count.
 
+In a session that has loaded `ux-design` at any point, compactions included,
+each choice question also needs a record, made beforehand with
+`choice-shown.py`, of what shows every option or of why it is not a choice
+about a screen. A next-step box with an app action asks to go ahead with a
+step rather than to choose a design, so it is not checked. A choice record
+that cannot be read lets the question through with a note on stderr.
+
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
 subagent starts without its parent's context, so its own loads count, while a
@@ -38,17 +45,21 @@ from typing import Any
 from motion_values import TextKind, has_in_place_motion, has_motion_text, is_motion_change
 from report_check import is_notes_report
 from shell_command import IN_PLACE_EDITORS, CommandCall, ExpansionLimitError, expand_shell_command
+from skill_gate_records import (
+    get_choice_record_path,
+    get_config_directory,
+    get_record_directory,
+    list_unshown_labels,
+    normalize_text,
+    read_choice_records,
+    to_safe_name,
+)
 
 _GATE_VARIABLE = "SKILL_GATE"
 _GATE_OFF = "off"
-_CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
-_DEFAULT_CONFIG_DIRECTORY = "~/.claude"
-_RECORD_DIRECTORY_NAME = "skill-gate"
 _RECORD_SUFFIX = ".jsonl"
 _MAIN_RECORD_NAME = "main"
 _RECORD_LIFETIME_SECONDS = 14 * 24 * 60 * 60
-_UNSAFE_NAME_CHARACTERS = re.compile(r"[^\w-]")
-_EMPTY_NAME = "_"
 _ENCODING = "utf-8"
 _LINE_END = "\n"
 _EVENT_KEY = "hook_event_name"
@@ -124,6 +135,19 @@ _COMMIT_WORDS = re.compile(
     r"커밋|푸시|푸쉬|병합|머지|합[치친쳐쳤칠칩]"
     r"|(?<![A-Za-z])(?:commit(?:s|ted|ting)?|push(?:es|ed|ing)?|merg(?:e|es|ed|ing)|pull\s+requests?|PRs?)(?![A-Za-z])",
     re.IGNORECASE,
+)
+_APP_ACTIONS = frozenset(
+    {
+        "commit",
+        "create_pr",
+        "merge",
+        "fix_ci",
+        "address_comments",
+        "resolve_conflicts",
+        "verify",
+        "archive",
+        "new_session",
+    },
 )
 _SESSION_ACTION = "new_session"
 _COMMIT_ACTIONS = frozenset({"commit", "create_pr", "merge"})
@@ -205,6 +229,8 @@ _SESSION_OWNER = "this session"
 _SESSION_SINCE = "its start or last compaction"
 _AGENT_OWNER = "this agent"
 _AGENT_SINCE = "it started (its parent session's loads do not count here)"
+_CHOICE_DENY_REASON = 'A choice question in a session that has loaded `ux-design` needs, before it is asked, a record of what shows each option or of why it is not a choice about a screen (decisions-and-collaboration "Presenting decisions"). Not recorded: {gaps}. Show every option first, then record it with `python3 ~/.claude/scripts/choice-shown.py --question "<the question as asked>" --option "<label>" "<sent file path or URL>"`, one `--option` per option (one board may show several), or with `--not-visual "<why it is not a choice about a screen>"` in place of the options. Asking again without the record is refused again.'
+_UNASKED_GAP = "a box with buttons but no question, which needs its question in `ask` before it can be recorded"
 
 
 @dataclass(frozen=True)
@@ -421,7 +447,7 @@ def _find_question_requirement(tool_name: str, tool_input: dict[str, Any]) -> Re
 def _list_question_texts(tool_name: str, tool_input: dict[str, Any]) -> list[str]:
     """The question and its choice labels; app action names are read apart, as names rather than words."""
     if tool_name == _QUESTION_TOOL:
-        questions = [question for question in _read_list(tool_input.get(_QUESTIONS_KEY)) if isinstance(question, dict)]
+        questions = _list_dialog_questions(tool_input)
         texts: list[str] = []
 
         for question in questions:
@@ -433,6 +459,10 @@ def _list_question_texts(tool_name: str, tool_input: dict[str, Any]) -> list[str
         return [str(tool_input.get(_ASK_KEY) or ""), *_list_item_values(tool_input.get(_ACTIONS_KEY), _LABEL_KEY)]
 
 
+def _list_dialog_questions(tool_input: dict[str, Any]) -> list[dict[str, Any]]:
+    return [question for question in _read_list(tool_input.get(_QUESTIONS_KEY)) if isinstance(question, dict)]
+
+
 def _list_item_values(items: Any, key: str) -> list[str]:
     """One field of each object in a list that may arrive as JSON text."""
     return [str(item.get(key) or "") for item in _read_list(items) if isinstance(item, dict)]
@@ -441,7 +471,7 @@ def _list_item_values(items: Any, key: str) -> list[str]:
 def _is_choice_question(tool_name: str, tool_input: dict[str, Any]) -> bool:
     """A question dialog with two or more options, or a next-step box with two or more buttons."""
     if tool_name == _QUESTION_TOOL:
-        questions = [question for question in _read_list(tool_input.get(_QUESTIONS_KEY)) if isinstance(question, dict)]
+        questions = _list_dialog_questions(tool_input)
 
         return any(len(_read_list(question.get(_OPTIONS_KEY))) >= _CHOICE_COUNT for question in questions)
     elif tool_name == _WRAP_UP_TOOL:
@@ -494,7 +524,7 @@ def _list_language_skills(extension: str) -> list[str]:
 def _find_command_requirement(command: str, cwd: str | None) -> Requirement | None:
     """The skills a command line needs; what a script file on disk does when the line runs it is not written here."""
     try:
-        expanded = expand_shell_command(command, cwd, _get_config_directory())
+        expanded = expand_shell_command(command, cwd, get_config_directory())
     except ExpansionLimitError:
         return None
     else:
@@ -668,22 +698,85 @@ def _make_requirement(target: str, skills: Iterable[str]) -> Requirement | None:
 
 
 def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
-    tool_name = str(hook_input.get(_TOOL_NAME_KEY) or "")
-    tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
-    cwd = hook_input.get(_CWD_KEY)
-    requirement = find_requirement(tool_name, tool_input, cwd) if _is_gated(hook_input) else None
-    missing = _list_missing_skills(hook_input, requirement.skills) if requirement else []
+    reason = _find_deny_reason(hook_input) if _is_gated(hook_input) else None
 
-    if requirement and missing:
+    if reason:
         return {
             _HOOK_OUTPUT_KEY: {
                 _HOOK_EVENT_NAME_KEY: _PRE_TOOL_USE,
                 _PERMISSION_DECISION_KEY: _DENY,
-                _PERMISSION_REASON_KEY: _make_deny_reason(hook_input, requirement.target, missing),
+                _PERMISSION_REASON_KEY: reason,
             },
         }
     else:
         return None
+
+
+def _find_deny_reason(hook_input: dict[str, Any]) -> str | None:
+    """A missing skill is named first; a choice question with every skill loaded then needs its choice record."""
+    tool_name = str(hook_input.get(_TOOL_NAME_KEY) or "")
+    tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
+    requirement = find_requirement(tool_name, tool_input, hook_input.get(_CWD_KEY))
+    missing = _list_missing_skills(hook_input, requirement.skills) if requirement else []
+
+    if requirement and missing:
+        return _make_deny_reason(hook_input, requirement.target, missing)
+    elif tool_name in (_QUESTION_TOOL, _WRAP_UP_TOOL):
+        return _find_choice_deny_reason(hook_input, tool_name, tool_input)
+    else:
+        return None
+
+
+def _find_choice_deny_reason(hook_input: dict[str, Any], tool_name: str, tool_input: dict[str, Any]) -> str | None:
+    """The refusal for design-session choices whose options are not all recorded; an unreadable record is not one."""
+    try:
+        questions = _list_choice_questions(tool_name, tool_input)
+        is_checked = bool(questions) and _has_ever_loaded(hook_input, _UX_DESIGN)
+        unshown = _list_unshown_options(hook_input, questions) if is_checked else []
+
+        return _CHOICE_DENY_REASON.format(gaps="; ".join(unshown)) if unshown else None
+    except OSError as error:
+        print(f"skill-gate-hook: choice record unchecked: {error}", file=sys.stderr)
+        return None
+
+
+def _list_unshown_options(hook_input: dict[str, Any], questions: Sequence[tuple[str, list[str]]]) -> list[str]:
+    records = read_choice_records(get_choice_record_path(str(hook_input.get(_SESSION_ID_KEY) or "")))
+    gaps = [(question, list_unshown_labels(records, question, labels)) for question, labels in questions]
+
+    return [_describe_gap(question, labels) for question, labels in gaps if labels]
+
+
+def _describe_gap(question: str, labels: Sequence[str]) -> str:
+    """A question as the refusal names it; one without text cannot be recorded, so the refusal says what to add."""
+    if normalize_text(question):
+        return f'"{normalize_text(question)}": {", ".join(labels)}'
+    else:
+        return _UNASKED_GAP
+
+
+def _list_choice_questions(tool_name: str, tool_input: dict[str, Any]) -> list[tuple[str, list[str]]]:
+    """Each question with two or more option labels, with or without its text; an app action asks to take a step."""
+    if tool_name == _QUESTION_TOOL:
+        asked = [
+            (str(question.get(_QUESTION_KEY) or ""), _list_item_values(question.get(_OPTIONS_KEY), _LABEL_KEY))
+            for question in _list_dialog_questions(tool_input)
+        ]
+    elif _APP_ACTIONS.intersection(_list_item_values(tool_input.get(_ACTIONS_KEY), _ACTION_KEY)):
+        asked = []
+    else:
+        asked = [(str(tool_input.get(_ASK_KEY) or ""), _list_item_values(tool_input.get(_ACTIONS_KEY), _LABEL_KEY))]
+    return [(question, labels) for question, labels in asked if len(labels) >= _CHOICE_COUNT]
+
+
+def _has_ever_loaded(hook_input: dict[str, Any], skill: str) -> bool:
+    """Whether the caller's records show the skill loaded or restored at any time, before a compaction included."""
+    events = [event for record in _list_record_paths(hook_input) for event in _read_events(record)]
+    loaded = {str(event.get(_SKILL_KEY)) for event in events if event.get(_KIND_KEY) == _LOAD_KIND}
+    restores = [event.get(_SKILLS_KEY) or [] for event in events if event.get(_KIND_KEY) == _RESTORED_KIND]
+    restored = {str(name) for names in restores for name in names}
+
+    return _is_loaded(skill, loaded | restored)
 
 
 def _make_deny_reason(hook_input: dict[str, Any], target: str, missing: Sequence[str]) -> str:
@@ -744,10 +837,10 @@ def _find_transcript(hook_input: dict[str, Any]) -> Path | None:
 
 def _list_record_paths(hook_input: dict[str, Any]) -> list[Path]:
     """The records whose loads count for the caller, its own first, where its loads are written."""
-    session_directory = _get_record_directory() / _to_safe_name(str(hook_input.get(_SESSION_ID_KEY) or ""))
+    session_directory = get_record_directory() / to_safe_name(str(hook_input.get(_SESSION_ID_KEY) or ""))
     main_record = session_directory / f"{_MAIN_RECORD_NAME}{_RECORD_SUFFIX}"
     agent_id = str(hook_input.get(_AGENT_ID_KEY) or "")
-    agent_record = session_directory / f"{_to_safe_name(agent_id)}{_RECORD_SUFFIX}"
+    agent_record = session_directory / f"{to_safe_name(agent_id)}{_RECORD_SUFFIX}"
 
     if agent_id and hook_input.get(_AGENT_TYPE_KEY) == _FORK_AGENT_TYPE:
         return [agent_record, main_record]
@@ -873,18 +966,6 @@ def _parse_entry(line: str) -> dict[str, Any] | None:
         return None
     else:
         return entry if isinstance(entry, dict) else None
-
-
-def _get_config_directory() -> Path:
-    return Path(os.environ.get(_CONFIG_DIRECTORY_VARIABLE) or _DEFAULT_CONFIG_DIRECTORY).expanduser()
-
-
-def _get_record_directory() -> Path:
-    return _get_config_directory() / _RECORD_DIRECTORY_NAME
-
-
-def _to_safe_name(text: str) -> str:
-    return _UNSAFE_NAME_CHARACTERS.sub(_EMPTY_NAME, text) or _EMPTY_NAME
 
 
 def _is_gated(hook_input: dict[str, Any]) -> bool:

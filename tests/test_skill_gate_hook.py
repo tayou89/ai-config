@@ -345,6 +345,11 @@ MESSAGE_MOTION_REASON = (
 )
 COMPACT_BOUNDARY = {"type": "system", "subtype": "compact_boundary"}
 COMPACT_SUMMARY = {"type": "user", "isCompactSummary": True}
+CHOICE_SHOWN_SCRIPT = SCRIPTS_DIRECTORY / "choice-shown.py"
+CHOICE_ASK = "어느 방식으로 다시 만들까요?"
+CHOICE_BUTTONS = [{"label": "원근 비행으로"}, {"label": "은하 구름까지"}]
+CHOICE_BOX = {"recap": "r", "ask": CHOICE_ASK, "actions": CHOICE_BUTTONS}
+CHOICE_REASON = 'A choice question in a session that has loaded `ux-design` needs, before it is asked, a record of what shows each option or of why it is not a choice about a screen (decisions-and-collaboration "Presenting decisions"). Not recorded: "어느 방식으로 다시 만들까요?": 원근 비행으로, 은하 구름까지. Show every option first, then record it with `python3 ~/.claude/scripts/choice-shown.py --question "<the question as asked>" --option "<label>" "<sent file path or URL>"`, one `--option` per option (one board may show several), or with `--not-visual "<why it is not a choice about a screen>"` in place of the options. Asking again without the record is refused again.'
 
 
 def make_restored_entry(*skills: str) -> dict[str, Any]:
@@ -511,6 +516,141 @@ class SkillGateHookTest(unittest.TestCase):
         self.assertNotIn("The session and commit skills", reason)
         self._load(DECISIONS)
         self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=tool_input))
+
+    def test_design_choice_is_refused_until_every_option_is_recorded(self) -> None:
+        self._load_design_skills()
+        self.assertEqual(self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)), CHOICE_REASON)
+        self.assertIsNotNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        self._record_choice(CHOICE_ASK, {"원근 비행으로": "/tmp/a.png"})
+        self.assertIn(
+            'Not recorded: "어느 방식으로 다시 만들까요?": 은하 구름까지.',
+            self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)),
+        )
+        self._record_choice(CHOICE_ASK, {"은하 구름까지": "/tmp/b.png"})
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+
+    def test_renamed_option_needs_its_own_record(self) -> None:
+        renamed = {**CHOICE_BOX, "actions": [CHOICE_BUTTONS[0], {"label": "은하 구름으로"}]}
+
+        self._load_design_skills()
+        self._record_choice(CHOICE_ASK, {"원근 비행으로": "/tmp/a.png", "은하 구름까지": "/tmp/a.png"})
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        self.assertIn(": 은하 구름으로.", self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=renamed)))
+
+    def test_choice_recorded_as_not_about_a_screen_passes(self) -> None:
+        self._load_design_skills()
+        self._record_choice(CHOICE_ASK, {}, "검토 순서를 묻는 질문")
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+
+    def test_design_session_counts_after_a_compaction_left_out_ux_design(self) -> None:
+        self._load_design_skills()
+        self._compact()
+        self._append_transcript(COMPACT_BOUNDARY, make_restored_entry(DECISIONS), {"type": "assistant"})
+        self.assertEqual(self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)), CHOICE_REASON)
+
+    def test_design_session_counts_when_only_a_restore_shows_ux_design(self) -> None:
+        record = self.config_directory / "skill-gate" / SESSION / "main.jsonl"
+
+        record.parent.mkdir(parents=True)
+        record.write_text(json.dumps({"kind": "restored", "skills": [UX_DESIGN, DECISIONS]}) + "\n")
+        self.assertEqual(self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)), CHOICE_REASON)
+
+    def test_choices_outside_design_sessions_or_with_one_option_are_not_checked(self) -> None:
+        one_button = {**CHOICE_BOX, "actions": CHOICE_BUTTONS[:1]}
+
+        self._load(DECISIONS)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        self._load(UX_DESIGN)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=one_button))
+
+    def test_box_with_buttons_but_no_question_is_refused(self) -> None:
+        self._load_design_skills()
+        for ask in ({}, {"ask": "  "}):
+            box = {"recap": "Choose a layout.", "actions": CHOICE_BUTTONS, **ask}
+
+            self.assertIn(
+                "Not recorded: a box with buttons but no question, which needs its question in `ask`",
+                self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=box)),
+                box,
+            )
+
+    def test_box_with_an_app_action_is_not_checked(self) -> None:
+        actions = [{"action": "verify", "label": "확인"}, {"label": "그대로"}]
+        unknown = [{"action": "reply", "label": "A"}, {"label": "B"}]
+
+        self._load_design_skills()
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input={**CHOICE_BOX, "actions": actions}))
+        self.assertIsNotNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input={**CHOICE_BOX, "actions": unknown}))
+
+    def test_choice_wording_does_not_skip_the_check(self) -> None:
+        box = {"recap": "r", "ask": "메뉴 두 개를 합칠까요?", "actions": [{"label": "합치기"}, {"label": "그대로"}]}
+
+        self._load_design_skills()
+        self._load(GIT_COMMIT)
+        self.assertIn("Not recorded:", self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=box)))
+
+    def test_each_dialog_question_is_checked_on_its_own(self) -> None:
+        two = [{"label": "A", "description": "a"}, {"label": "B", "description": "b"}]
+        questions = [{"question": "색은?", "options": two}, {"question": "배치는?", "options": two}]
+        dialog = {"questions": questions}
+
+        self._load_design_skills()
+        self._record_choice("색은?", {"A": "/tmp/a.png", "B": "/tmp/b.png"})
+        reason = self._read_reason(self._decide(tool_name=QUESTION_TOOL, tool_input=dialog))
+
+        self.assertIn('Not recorded: "배치는?": A, B.', reason)
+        self.assertNotIn("색은?", reason)
+
+    def test_choice_list_as_text_and_extra_spaces_match_the_record(self) -> None:
+        box = {"recap": "r", "ask": "  어느 방식으로\n다시  만들까요? ", "actions": json.dumps(CHOICE_BUTTONS)}
+
+        self._load_design_skills()
+        self.assertIn("Not recorded:", self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=box)))
+        self._record_choice(CHOICE_ASK, {"원근 비행으로": "/tmp/a.png", "은하 구름까지": "/tmp/a.png"})
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=box))
+
+    def test_missing_decision_skill_is_refused_first(self) -> None:
+        self._load(UX_DESIGN)
+        self.assertIn(
+            "needs `decisions-and-collaboration` loaded",
+            self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)),
+        )
+
+    def test_unreadable_choice_record_lets_the_question_through(self) -> None:
+        self._load_design_skills()
+        with (
+            mock.patch.object(skill_gate_hook, "read_choice_records", side_effect=OSError("broken")),
+            mock.patch("sys.stderr") as stderr,
+        ):
+            self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        self.assertIn("choice record unchecked", "".join(call.args[0] for call in stderr.write.call_args_list))
+
+    def test_gate_off_lets_an_unrecorded_choice_through(self) -> None:
+        self._load_design_skills()
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX, gate_setting=GATE_OFF))
+
+    def test_record_command_lets_the_same_question_through_afterwards(self) -> None:
+        board = Path(self.directory.name) / "board.png"
+        environment = {**os.environ, "CLAUDE_CODE_SESSION_ID": SESSION}
+        command = [
+            sys.executable,
+            str(CHOICE_SHOWN_SCRIPT),
+            "--question",
+            CHOICE_ASK,
+            "--option",
+            "원근 비행으로",
+            str(board),
+            "--option",
+            "은하 구름까지",
+            str(board),
+        ]
+
+        board.write_bytes(b"png")
+        self._load_design_skills()
+        self.assertIsNotNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        self.assertIsNotNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
+        subprocess.run(command, env=environment, check=True, capture_output=True)
+        self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
 
     def test_motion_values_need_the_motion_skills(self) -> None:
         for tool_name, tool_input, skills in MOTION_FILE_CASES:
@@ -869,6 +1009,16 @@ class SkillGateHookTest(unittest.TestCase):
         }
 
         skill_gate_hook.handle_event(post, gate_setting)
+
+    def _load_design_skills(self) -> None:
+        self._load(UX_DESIGN)
+        self._load(DECISIONS)
+
+    def _record_choice(self, question: str, options: dict[str, str], not_visual: str = "") -> None:
+        skill_gate_records = sys.modules["skill_gate_records"]
+        record = skill_gate_records.ChoiceRecord(question, options, not_visual)
+
+        skill_gate_records.append_choice_record(skill_gate_records.get_choice_record_path(SESSION), record)
 
     def _compact(self) -> None:
         compaction = {
