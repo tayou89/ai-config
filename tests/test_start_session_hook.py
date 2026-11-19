@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import subprocess
 import sys
 import unittest
-from pathlib import Path
 from typing import Any
 
-REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
-HOOK_SCRIPT = REPOSITORY_ROOT / "scripts" / "start-session-hook.py"
-HOOK_SPECIFICATION = importlib.util.spec_from_file_location("start_session_hook", HOOK_SCRIPT)
-start_session_hook = importlib.util.module_from_spec(HOOK_SPECIFICATION)
-HOOK_SPECIFICATION.loader.exec_module(start_session_hook)
+from workflow_world import SCRIPTS_DIRECTORY, load_script
+
+HOOK_SCRIPT = SCRIPTS_DIRECTORY / "start-session-hook.py"
+start_session_hook = load_script("start-session-hook")
 START_TOOL = "mcp__ccd_session__start_session"
 PRE_TOOL_USE = "PreToolUse"
 DENY = "deny"

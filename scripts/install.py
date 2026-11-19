@@ -135,6 +135,7 @@ RUNTIME_SCRIPTS = (
     "local-integrate.py",
     "worktree-cleanup.py",
     "worktree-guard-hook.py",
+    "folder_owner.py",
 )
 MAINTENANCE_SCRIPTS = (
     "install.py",

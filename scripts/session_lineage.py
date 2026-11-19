@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 HOST_SESSION_VARIABLE = "CLAUDE_CODE_HOST_SESSION_ID"
+CLI_SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+APP_SESSION_PREFIX = "local_"
 _SESSION_RECORDS_PATH = Path("Library") / "Application Support" / "Claude" / "claude-code-sessions"
 _SESSION_RECORD_PATTERN = "*/*/local_*.json"
 _SESSION_RECORD_SUFFIX = ".json"
@@ -27,7 +29,7 @@ _DETACHED_KEY = "lineageDetached"
 _TITLE_KEY = "title"
 _CLI_SESSION_ID_KEY = "cliSessionId"
 _ARCHIVED_KEY = "isArchived"
-_APP_SESSION_PREFIX = "local_"
+_WORKTREE_PATH_KEY = "worktreePath"
 _ENCODING = "utf-8"
 
 
@@ -55,7 +57,7 @@ def find_session_record(session_id: str) -> dict[str, Any] | None:
     """
     records = _get_records_directory()
 
-    if session_id.startswith(_APP_SESSION_PREFIX):
+    if session_id.startswith(APP_SESSION_PREFIX):
         return _read_session_record(session_id, records)
     elif session_id and records.is_dir():
         matching = (path for path in records.glob(_SESSION_RECORD_PATTERN) if _is_cli_session_record(path, session_id))
@@ -72,6 +74,20 @@ def read_cli_session_id(record: dict[str, Any]) -> str | None:
     cli_session_id = record.get(_CLI_SESSION_ID_KEY)
 
     return cli_session_id if isinstance(cli_session_id, str) and cli_session_id else None
+
+
+def read_app_session_id(record: dict[str, Any]) -> str | None:
+    """The desktop-app id (`local_…`) an app record belongs to."""
+    session_id = record.get(_SESSION_ID_KEY)
+
+    return session_id if isinstance(session_id, str) and session_id else None
+
+
+def read_worktree_path(record: dict[str, Any]) -> str | None:
+    """The worktree the app made for the session, which its record names only for a session started in one."""
+    worktree_path = record.get(_WORKTREE_PATH_KEY)
+
+    return worktree_path if isinstance(worktree_path, str) and worktree_path else None
 
 
 def is_archived(record: dict[str, Any] | None) -> bool:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import itertools
 import os
 import re
 import shlex
@@ -36,6 +37,7 @@ GIT_TIMEOUT_SECONDS = 3
 SNAPSHOT_DIRECTORY_NAME = "shell-snapshots"
 SNAPSHOT_FILE_PATTERN = "snapshot-*.sh"
 SNAPSHOT_LIMIT = 5
+_SUBSHELL_NUMBERS = itertools.count(1)
 WORD_BREAK_CHARACTERS = frozenset(" \t\n;&|()")
 OPERATORS = (";;&", ";;", ";&", "&&", "||", "|&", "|", "&", ";")
 PIPE_OPERATORS = frozenset({"|", "|&"})
@@ -217,10 +219,14 @@ class Word:
 
 @dataclass
 class SimpleCommand:
+    """One command of a line; `subshells` names the subshells it runs in, outermost first, so the expander can undo
+    a `cd` made inside one when the line leaves it, as the shell does."""
+
     words: list[Word] = field(default_factory=list)
     stdin_texts: list[str] = field(default_factory=list)
     piped_from: SimpleCommand | None = None
     write_targets: list[str] = field(default_factory=list)
+    subshells: tuple[int, ...] = ()
 
 
 @dataclass
@@ -328,6 +334,7 @@ class _Lexer:
         self._index = 0
         self._commands: list[SimpleCommand] = []
         self._pending_heredocs: list[_PendingHeredoc] = []
+        self._subshells: list[int] = []
 
     def parse(self) -> list[SimpleCommand]:
         self._parse_sequence("")
@@ -374,7 +381,7 @@ class _Lexer:
         elif character == "(":
             self._index += 1
             self._finish(current)
-            self._parse_sequence(")")
+            self._parse_subshell()
             return SimpleCommand()
         elif character == ")":
             self._index += 1
@@ -394,7 +401,25 @@ class _Lexer:
 
     def _finish(self, command: SimpleCommand) -> None:
         if command.words or command.stdin_texts or command.write_targets:
+            command.subshells = tuple(self._subshells)
             self._commands.append(command)
+
+    def _parse_subshell(self) -> None:
+        self._subshells.append(self._take_subshell_number())
+        self._parse_sequence(")")
+        self._subshells.pop()
+
+    def _add_subshell_commands(self, commands: list[SimpleCommand]) -> None:
+        """Commands a substitution runs, each in a subshell of its own inside the current ones."""
+        number = self._take_subshell_number()
+
+        for command in commands:
+            command.subshells = (*self._subshells, number, *command.subshells)
+        self._commands.extend(commands)
+
+    def _take_subshell_number(self) -> int:
+        """A number no other subshell in this process has, so subshells read by nested lexers never share one."""
+        return next(_SUBSHELL_NUMBERS)
 
     def _read_operator(self, current: SimpleCommand) -> SimpleCommand:
         operator = next(item for item in OPERATORS if self._text.startswith(item, self._index))
@@ -429,7 +454,7 @@ class _Lexer:
 
             pending.owner.stdin_texts.append(body)
             if pending.expands:
-                self._commands.extend(_Lexer(body).scan_substitutions())
+                self._add_subshell_commands(_Lexer(body).scan_substitutions())
         self._pending_heredocs = []
 
     def _read_heredoc_body(self, pending: _PendingHeredoc) -> str:
@@ -540,7 +565,7 @@ class _Lexer:
             return UNKNOWN_MARK, False
         elif following == "(":
             self._index += 2
-            self._parse_sequence(")")
+            self._parse_subshell()
             return UNKNOWN_MARK, False
         elif following == "{":
             return self._read_braced_parameter(), False
@@ -607,7 +632,7 @@ class _Lexer:
         if NAME_PATTERN.fullmatch(inner):
             return f"{VARIABLE_MARK}{inner}{VARIABLE_MARK}"
         else:
-            self._commands.extend(_Lexer(inner).scan_substitutions())
+            self._add_subshell_commands(_Lexer(inner).scan_substitutions())
             return UNKNOWN_MARK
 
     def _read_backtick(self) -> str:
@@ -617,12 +642,12 @@ class _Lexer:
             end += 2 if self._text[end] == "\\" else 1
         inner = re.sub(r"\\([`\\$])", r"\1", self._text[self._index + 1:end])
         self._index = end + 1
-        self._commands.extend(_Lexer(inner).parse())
+        self._add_subshell_commands(_Lexer(inner).parse())
         return UNKNOWN_MARK
 
     def _read_process_substitution(self) -> str:
         self._index += 2
-        self._parse_sequence(")")
+        self._parse_subshell()
         return UNKNOWN_MARK
 
     def _skip_balanced_parentheses(self) -> None:
@@ -703,11 +728,29 @@ class CommandExpander:
         return self._expand_text(text, state)
 
     def _expand_text(self, text: str, state: _ExpansionState) -> list[CommandCall]:
+        """Expand each command in order; leaving a subshell restores the folder its commands started in."""
         calls: list[CommandCall] = []
+        entered: dict[int, str | None] = {}
+        current: tuple[int, ...] = ()
 
         for command in _Lexer(text).parse():
+            self._leave_subshells(current, command.subshells, entered, state)
+            entered.update({number: state.cwd for number in command.subshells if number not in entered})
+            current = command.subshells
+
             calls.extend(self._expand_command(command, state))
+        self._leave_subshells(current, (), entered, state)
         return calls
+
+    def _leave_subshells(
+        self,
+        current: tuple[int, ...],
+        following: tuple[int, ...],
+        entered: dict[int, str | None],
+        state: _ExpansionState,
+    ) -> None:
+        for number in reversed([number for number in current if number not in following]):
+            state.cwd = entered.pop(number)
 
     def _expand_command(self, command: SimpleCommand, state: _ExpansionState) -> list[CommandCall]:
         arguments = [self._resolve_word(word, state) for word in command.words]

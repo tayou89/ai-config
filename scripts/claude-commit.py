@@ -3,7 +3,7 @@
 
 Usage:
     claude-commit.py [--amend] [--no-stage | --own-lines] [--expect-head <sha>] [--reviewed]
-                     [--include-unrecorded <file>]... "<message>" [<file1> ...]
+                     [--accept-gaps] [--include-unrecorded <file>]... "<message>" [<file1> ...]
 
 Validates message format (subject prefix/length, body line length/count,
 bullet count, no internal terms), runs amend check, stages exact files,
@@ -70,6 +70,17 @@ content its dialog showed. The wrapper commits exactly that content, so
 a call still running over the file cannot slip a later change in, and
 refuses a file that changed after the dialog, which the user has not seen.
 
+A linked worktree has one owner session (folder_owner.py), which the
+folder guard alone lets write there, so the wrapper reads that record
+instead of the write record: the owner commits the listed files whole,
+whoever wrote their lines (Codex, a formatter, a person at a terminal
+there), and every other session is refused, as is a worktree with no
+owner yet (user decision, 2026-11-18). --own-lines and
+--include-unrecorded only print a note there. When the guard let calls
+through there without judging them, the wrapper commits only with
+--accept-gaps, before which the guard asks the user once, and then sets
+those gaps aside. The original checkout keeps the own-lines check.
+
 Sessions that share a checkout commit as the same person, so --amend can
 rewrite a commit another session landed a moment earlier: --expect-head
 does not stop it, since one command can read that commit as its base. So
@@ -105,6 +116,10 @@ Exit codes:
        than the wrapper waits (nothing committed)
    11  the repository records no Git workflow, or its .agent-workflow.json
        cannot be read (nothing committed)
+   12  a task worktree this session does not own, or one with no owner
+       recorded or an unreadable record (nothing committed)
+   13  the folder guard let calls through in this task worktree without
+       judging them, and --accept-gaps was not given (nothing committed)
 """
 
 from __future__ import annotations
@@ -123,6 +138,7 @@ from pathlib import Path
 from typing import NoReturn
 
 from commit_arguments import (
+    ACCEPT_GAPS_OPTION,
     EXPECT_HEAD_OPTION,
     INCLUDE_UNRECORDED_OPTION,
     OWN_LINES_OPTION,
@@ -131,7 +147,22 @@ from commit_arguments import (
     CommitArgumentsError,
     parse_commit_arguments,
 )
-from integration_commands import CommandError, announce_wait, is_ancestor, list_worktree_users
+from folder_owner import (
+    UNKNOWN_NAME,
+    FolderOwner,
+    GuardGap,
+    LinkedWorktree,
+    OwnerBusyError,
+    OwnerFileError,
+    SessionIdentity,
+    find_linked_worktree,
+    list_unoffered_gaps,
+    read_current_identity,
+    read_gaps,
+    read_owner,
+    settle_gaps,
+)
+from integration_commands import announce_wait, is_ancestor
 from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integration_lock
 from own_lines import ContestedLine, OwnCommitContent, build_own_content, list_foreign_lines
 from secret_files import STAGED_DIFF_ARGUMENTS, find_added_secret_tokens, get_credential_reason
@@ -148,7 +179,6 @@ from session_writes import (
     find_repository_paths,
     finish_call_record,
     has_commit_hooks,
-    has_other_session_writes,
     has_record,
     is_line_tracked,
     is_record_complete,
@@ -166,7 +196,6 @@ from workflow_policy import (
     WorkflowPolicy,
     read_checkout_policy,
     read_original_checkout,
-    read_worktree_creation_time,
 )
 
 PRIVATE_INDEX_VARIABLE = "GIT_INDEX_FILE"
@@ -213,6 +242,15 @@ EXIT_FOREIGN_LINES = 8
 EXIT_AMEND_TARGET = 9
 EXIT_LOCK_TIMEOUT = 10
 EXIT_NO_WORKFLOW = 11
+EXIT_NOT_OWNER = 12
+EXIT_GUARD_GAPS = 13
+FOLDER_OWNER_COMMAND = "python3 ~/.claude/scripts/folder_owner.py"
+NOT_OWNER_MESSAGE = "FAIL: {root} is the task worktree of {owner}, not of this session ({me}), so nothing was committed. Ask that session to commit its work there. If it handed this task to you or has ended, take the folder over with `{command} take --from {owner_id}` in it (the user is asked while that session is open or its state is unknown), then commit again."
+NO_OWNER_MESSAGE = "FAIL: {root} is a task worktree with no owner recorded, as worktrees made before owners were recorded are, so nothing was committed. Claim it with `{command} claim` in it, which asks the user once when it holds uncommitted changes, then commit again."
+SETTLE_GAPS_NOTE = "Note: the commit is made, but the gaps it took in could not be set aside ({error}); the next commit asks about them again."
+UNREADABLE_OWNER_MESSAGE = "FAIL: {error}, so who owns this task worktree is not known and nothing was committed. Tell the user."
+GUARD_GAPS_MESSAGE = "FAIL: the folder guard let {count} calls through in {root} without judging them, and the user has not seen them, so another session may have written there and nothing was committed:\n{gaps}\nResolve: rerun with {option} as a command of its own, without asking in chat first: the folder guard shows the user these calls and asks once. If the user declines, do not commit."
+TASK_WORKTREE_NOTE = "this session's task worktree: its owner commits every change there"
 NO_WORKFLOW_MESSAGE = "{root} records no Git workflow in {file}, so nothing was committed. Ask the user which workflow this repository uses and record it there as the git-commit skill's 'Repository Workflow' describes: {modes}."
 UNREADABLE_WORKFLOW_MESSAGE = "{error}; nothing was committed. Fix {path}, then commit again."
 NOT_REPOSITORY_MESSAGE = "FAIL: this folder is not inside a Git repository, so nothing was committed"
@@ -227,7 +265,6 @@ GIT_STATE_ENCODING = "utf-8"
 REGULAR_FILE_MODE = "100644"
 EXECUTABLE_FILE_MODE = "100755"
 MAX_SHOWN_FOREIGN_LINES = 12
-OWN_WORKTREE_NOTE = "this session's own worktree: no other session or process works in it"
 
 
 @dataclass(frozen=True)
@@ -510,6 +547,15 @@ def check_private_index_arguments(expected_head_argument: str | None, files: Seq
 
     if PRIVATE_INDEX_VARIABLE in os.environ and (expected_head_argument is None or not files):
         fail("\n".join(usage_lines), EXIT_USAGE)
+
+
+def read_approved_files(arguments: CommitArguments) -> dict[str, ApprovedContent]:
+    """In a task worktree the owner commits whole files, so --include-unrecorded has nothing to approve there."""
+    if arguments.included_paths and find_task_worktree() is not None:
+        print(f"=== {TASK_WORKTREE_NOTE}: {INCLUDE_UNRECORDED_OPTION} is not needed ===")
+        return {}
+    else:
+        return approve_included_files(arguments)
 
 
 def approve_included_files(arguments: CommitArguments) -> dict[str, ApprovedContent]:
@@ -1104,8 +1150,8 @@ def stage_changes(arguments: CommitArguments, expected_head: str | None, approve
 
     if arguments.no_stage:
         print("=== Staging skipped (--no-stage) ===")
-    elif arguments.own_lines and session_id is not None and is_own_worktree(session_id, read_repository_root()):
-        print(f"=== {OWN_WORKTREE_NOTE}: {OWN_LINES_OPTION} stages whole files ===")
+    elif arguments.own_lines and find_task_worktree() is not None:
+        print(f"=== {TASK_WORKTREE_NOTE}: {OWN_LINES_OPTION} stages whole files ===")
         stage_files(arguments.files, approved)
     elif arguments.own_lines and session_id is not None and is_record_complete(session_id):
         stage_own_lines(session_id, arguments.files, arguments.included_paths, approved, expected_head)
@@ -1188,43 +1234,100 @@ def find_own_lines_skip_reason() -> str | None:
 
     if session_id is None:
         return "not checked (not a Claude session)"
+    elif find_task_worktree() is not None:
+        return f"not checked ({TASK_WORKTREE_NOTE})"
     elif not has_record(session_id):
         return "not checked (no write record: the session started before the record hook)"
     elif not is_record_complete(session_id):
         return "not checked (write record started mid-session: new sessions are checked)"
     elif any(os.path.exists(os.path.join(git_directory, name)) for name in SEQUENCER_STATE_FILES):
         return "not checked (merge in progress)"
-    elif is_own_worktree(session_id, read_repository_root()):
-        return f"not checked ({OWN_WORKTREE_NOTE})"
     else:
         return None
 
 
 @functools.cache
-def is_own_worktree(session_id: str, root: str) -> bool:
-    """Whether the commit runs in a linked worktree that no other session has written and no other process works in.
+def read_commit_identity() -> SessionIdentity | None:
+    """This session's identity, read once, since a terminal session's takes several `ps` runs to find."""
+    return read_current_identity()
 
-    Every change there is the task's, as worktree-cleanup.py judges a
-    worktree still in use, so a project hook's or the user's edit there is
-    the task's too. A check that cannot run counts as not, so the own-lines
-    check stays; an original checkout is never one.
+
+@functools.cache
+def find_task_worktree() -> LinkedWorktree | None:
+    """The linked worktree a Claude session commits in, whose owner record decides the commit, else None.
+
+    The original checkout, and a commit outside a Claude session, keep the
+    own-lines check as before.
     """
-    worktree = Path(root).resolve()
-    created = read_worktree_creation_time(worktree)
-
-    if created is not None:
-        return is_unused_by_others(session_id, worktree, created)
+    if read_commit_identity() is not None:
+        return find_linked_worktree(Path(read_repository_root()))
     else:
-        return False
+        return None
 
 
-def is_unused_by_others(session_id: str, worktree: Path, created: float) -> bool:
+@functools.cache
+def read_task_gaps() -> tuple[GuardGap, ...]:
+    """The gaps this commit shows and, once committed, settles; a gap added while it runs stays for the next one."""
+    worktree = find_task_worktree()
+
+    return tuple(read_gaps(worktree)) if worktree is not None else ()
+
+
+def check_folder_owner(accept_gaps: bool) -> None:
+    """In a task worktree only its owner commits, and only once the user saw what the folder guard let through."""
+    worktree = find_task_worktree()
+    identity = read_commit_identity()
+
+    if worktree is not None and identity is not None:
+        check_owner(worktree, read_folder_owner(worktree), identity)
+        check_gaps_accepted(worktree, accept_gaps)
+
+
+def read_folder_owner(worktree: LinkedWorktree) -> FolderOwner | None:
     try:
-        users = list_worktree_users(worktree)
-    except CommandError:
-        return False
-    else:
-        return not users and not has_other_session_writes(session_id, str(worktree), created)
+        return read_owner(worktree)
+    except OwnerFileError as error:
+        fail(UNREADABLE_OWNER_MESSAGE.format(error=error), EXIT_NOT_OWNER)
+
+
+def check_owner(worktree: LinkedWorktree, owner: FolderOwner | None, identity: SessionIdentity) -> None:
+    if owner is None:
+        fail(NO_OWNER_MESSAGE.format(root=worktree.root, command=FOLDER_OWNER_COMMAND), EXIT_NOT_OWNER)
+    elif not owner.owner.is_same(identity):
+        message = NOT_OWNER_MESSAGE.format(
+            root=worktree.root,
+            owner=owner.describe(),
+            me=identity.name,
+            owner_id=owner.owner.name,
+            command=FOLDER_OWNER_COMMAND,
+        )
+
+        fail(message, EXIT_NOT_OWNER)
+
+
+def check_gaps_accepted(worktree: LinkedWorktree, accept_gaps: bool) -> None:
+    """With --accept-gaps, every gap must be one the folder guard's dialog showed, so a call that runs the wrapper
+    out of the guard's sight, or a gap added after the dialog, is refused again."""
+    gaps = read_task_gaps()
+    unseen = list_unoffered_gaps(worktree, gaps) if accept_gaps else list(gaps)
+
+    if unseen:
+        listing = "\n".join(f"  - {gap.session or UNKNOWN_NAME}: {gap.what}" for gap in unseen)
+        message = GUARD_GAPS_MESSAGE.format(count=len(unseen), root=worktree.root, gaps=listing, option=ACCEPT_GAPS_OPTION)
+
+        fail(message, EXIT_GUARD_GAPS)
+
+
+def settle_accepted_gaps(accept_gaps: bool) -> None:
+    """The commit is made, so a failure here leaves only the gaps unsettled, which the next commit asks about again."""
+    worktree = find_task_worktree()
+    gaps = read_task_gaps()
+
+    if accept_gaps and worktree is not None and gaps:
+        try:
+            settle_gaps(worktree, gaps)
+        except (OwnerBusyError, OSError) as error:
+            print(SETTLE_GAPS_NOTE.format(error=error), file=sys.stderr)
 
 
 def check_staged_lines(included: Sequence[str], expected_head: str | None) -> None:
@@ -1461,13 +1564,15 @@ def main(argv: list[str]) -> None:
 
     print_header()
     check_workflow_recorded()
-    approved = approve_included_files(arguments)
+    check_folder_owner(arguments.accept_gaps)
+    approved = read_approved_files(arguments)
     metrics = validate_message(arguments.message)
     check_private_index_environment(arguments.private_index)
     check_private_index_arguments(arguments.expected_head, files)
     requested_head = resolve_expected_head(arguments.expected_head)
     starting_branch = read_head_branch()
     with hold_commit_lock():
+        check_folder_owner(arguments.accept_gaps)
         expected_head = requested_head if arguments.expected_head is not None else read_revision(HEAD_REVISION)
         base = find_commit_base(arguments, expected_head, starting_branch)
         check_amend_target(arguments.amend, base)
@@ -1475,6 +1580,7 @@ def main(argv: list[str]) -> None:
         run_git(["log", "--oneline", "-3"])
         with use_commit_index(arguments, base):
             made = stage_and_commit(arguments, base, approved, metrics)
+    settle_accepted_gaps(arguments.accept_gaps)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1", made.commit])
 

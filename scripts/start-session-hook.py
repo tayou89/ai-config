@@ -10,6 +10,14 @@ uses: a 1-minute load average above 1.5 times the CPU count.
 It also denies a brief without a line starting with `Codex:`, since the agent-usage
 rules hand the actual work to Codex while it has spare share and the split is
 decided where the brief is written.
+
+A session started to share a folder (`use_worktree: false`, or a `cwd`
+without its own worktree) works where that folder is. When the folder is a
+task worktree, the folder guard (worktree-guard-hook.py) lets only its owner
+write there, so the starter is told that the new session can only read
+there, and, when the folder is the starter's own, how to hand it over
+(folder_owner.py, user decision, 2026-11-18). A reading session may share
+any folder, so the start itself is never refused for it.
 """
 
 from __future__ import annotations
@@ -18,7 +26,17 @@ import json
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any
+
+from folder_owner import (
+    AccessKind,
+    FolderAccess,
+    OwnerFileError,
+    find_linked_worktree,
+    judge_access,
+    read_current_identity,
+)
 
 _START_TOOL = "mcp__ccd_session__start_session"
 _PRE_TOOL_USE = "PreToolUse"
@@ -46,6 +64,18 @@ _LEVEL_REASON = (
 _CODEX_REASON = (
     "Add a line starting with `Codex:` to the brief: the part of the work Codex does, the exception in "
     "agent-usage section 14 that keeps it with Claude, or that the budget verdict is not `delegate`."
+)
+_USE_WORKTREE_KEY = "use_worktree"
+_CWD_KEY = "cwd"
+_SESSION_KEY = "session_id"
+_OTHERS_FOLDER_NOTICE = (
+    "The new session shares {root}, the task worktree of {owner}, which may still be open, so it can only read there: "
+    "the folder guard refuses its writes. If it should write, start it with `use_worktree: true` instead."
+)
+_OWN_FOLDER_NOTICE = (
+    "The new session shares your task worktree {root}, where only you may write: the folder guard refuses its writes. "
+    "If it should write, start it with `use_worktree: true` instead, or, once it has started, hand the folder over with "
+    "`python3 ~/.claude/scripts/folder_owner.py hand-over --to <its local_ id>` and stop writing there yourself."
 )
 _LOAD_NOTICE = (
     "The 1-minute load average is {load:.0f}, above {limit:.0f} (1.5 times {cpus} CPUs). "
@@ -76,14 +106,26 @@ def make_output(hook_input: dict[str, Any], load: tuple[float, int] | None) -> d
     specific_output = None
 
     if hook_input.get(_EVENT_KEY) == _PRE_TOOL_USE and hook_input.get(_TOOL_NAME_KEY) == _START_TOOL:
-        specific_output = decide(tool_input, load)
+        cwd = hook_input.get(_CWD_KEY)
+        session_id = hook_input.get(_SESSION_KEY)
+        specific_output = decide(
+            tool_input,
+            load,
+            cwd if isinstance(cwd, str) else None,
+            session_id if isinstance(session_id, str) else None,
+        )
     if specific_output:
         return {_HOOK_OUTPUT_KEY: {"hookEventName": _PRE_TOOL_USE, **specific_output}}
     else:
         return None
 
 
-def decide(tool_input: dict[str, Any], load: tuple[float, int] | None) -> dict[str, str] | None:
+def decide(
+    tool_input: dict[str, Any],
+    load: tuple[float, int] | None,
+    cwd: str | None = None,
+    session_id: str | None = None,
+) -> dict[str, str] | None:
     missing = _list_missing_levels(tool_input)
 
     if missing:
@@ -93,10 +135,64 @@ def decide(tool_input: dict[str, Any], load: tuple[float, int] | None) -> dict[s
         }
     elif _is_missing_codex_line(tool_input):
         return {_DECISION_KEY: _DECISION_DENY, _DECISION_REASON_KEY: _CODEX_REASON}
-    elif load is not None and _is_starting_now(tool_input) and _is_overloaded(*load):
+    else:
+        return _decide_folder_and_load(tool_input, load, _judge_shared_folder(tool_input, cwd, session_id))
+
+
+def _decide_folder_and_load(
+    tool_input: dict[str, Any], load: tuple[float, int] | None, access: FolderAccess | None
+) -> dict[str, str] | None:
+    """Tell the starter where the new session can only read, and the load, when either applies."""
+    notices = [*_list_folder_notices(access), *_list_load_notices(tool_input, load)]
+
+    if notices:
+        return {_CONTEXT_KEY: "\n".join(notices)}
+    else:
+        return None
+
+
+def _list_folder_notices(access: FolderAccess | None) -> list[str]:
+    if access is not None and access.kind == AccessKind.OTHERS and access.owner is not None:
+        return [_OTHERS_FOLDER_NOTICE.format(root=access.worktree.root, owner=access.owner.describe())]
+    elif access is not None and access.kind == AccessKind.OWN:
+        return [_OWN_FOLDER_NOTICE.format(root=access.worktree.root)]
+    else:
+        return []
+
+
+def _list_load_notices(tool_input: dict[str, Any], load: tuple[float, int] | None) -> list[str]:
+    if load is not None and _is_starting_now(tool_input) and _is_overloaded(*load):
         current, cpus = load
 
-        return {_CONTEXT_KEY: _LOAD_NOTICE.format(load=current, cpus=cpus, limit=_LOAD_FACTOR * cpus)}
+        return [_LOAD_NOTICE.format(load=current, cpus=cpus, limit=_LOAD_FACTOR * cpus)]
+    else:
+        return []
+
+
+def _judge_shared_folder(tool_input: dict[str, Any], cwd: str | None, session_id: str | None) -> FolderAccess | None:
+    """What this session may do in the task worktree the new session would share, or None when it shares none.
+
+    An unreadable owner record checks nothing here; the folder guard records it when the session writes.
+    """
+    folder = _read_shared_folder(tool_input, cwd)
+    worktree = find_linked_worktree(folder) if folder is not None else None
+    identity = read_current_identity(session_id) if worktree is not None else None
+
+    try:
+        return judge_access(worktree, identity) if worktree is not None and identity is not None else None
+    except OwnerFileError:
+        return None
+
+
+def _read_shared_folder(tool_input: dict[str, Any], cwd: str | None) -> Path | None:
+    """The folder the new session works in when it gets no worktree of its own: its `cwd`, or this session's."""
+    named = tool_input.get(_CWD_KEY)
+    use_worktree = tool_input.get(_USE_WORKTREE_KEY)
+
+    if isinstance(named, str) and named and use_worktree is not True:
+        return Path(os.path.expanduser(named)).resolve()
+    elif use_worktree is False and cwd:
+        return Path(cwd).resolve()
     else:
         return None
 

@@ -164,6 +164,7 @@ REMOTE_HEAD = "refs/remotes/origin/HEAD"
 COMMIT_LIST_SUFFIX = ".commits"
 PARALLEL_ROOT = "/repository"
 SESSION_VARIABLE = "CLAUDE_CODE_SESSION_ID"
+HOST_SESSION_VARIABLE = "CLAUDE_CODE_HOST_SESSION_ID"
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 RECORD_DIRECTORY_NAME = "session-writes"
 RECORD_HOOK = SCRIPTS_DIRECTORY / "session-writes-hook.py"
@@ -473,6 +474,7 @@ class GuardFixture:
         environment = dict(os.environ)
 
         environment.pop(SESSION_VARIABLE, None)
+        environment.pop(HOST_SESSION_VARIABLE, None)
         environment.update({
             "CLAUDE_CONFIG_DIR": str(self.config_directory),
             "GIT_CONFIG_GLOBAL": str(self.git_config),
@@ -644,6 +646,7 @@ class WrapperHeadFixture:
 
         environment.pop(PRIVATE_INDEX_VARIABLE, None)
         environment.pop(SESSION_VARIABLE, None)
+        environment.pop(HOST_SESSION_VARIABLE, None)
         environment.update(settings)
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
@@ -2091,7 +2094,9 @@ class SessionWritesFixture:
 
     def environment(self, session: str | None, index: Path | None = None) -> dict[str, str]:
         environment = {
-            name: value for name, value in os.environ.items() if name not in (SESSION_VARIABLE, PRIVATE_INDEX_VARIABLE)
+            name: value
+            for name, value in os.environ.items()
+            if name not in (SESSION_VARIABLE, HOST_SESSION_VARIABLE, PRIVATE_INDEX_VARIABLE)
         }
 
         environment.update(
@@ -3728,102 +3733,6 @@ class IncludeDialogTest(unittest.TestCase):
         shown = " ".join(f'"{argument}"' if " " in argument or "\n" in argument else argument for argument in arguments)
 
         return f"cd {self.fixture.repository} && ~/.claude/scripts/claude-commit.py {shown}"
-
-
-class OwnWorktreeTest(unittest.TestCase):
-    """In a linked worktree no other session or process works in, every change is the task's, so lines are not proven."""
-
-    fixture: SessionWritesFixture
-
-    def setUp(self) -> None:
-        self.fixture = SessionWritesFixture()
-        self.fixture.create()
-        self.worktree = self.fixture.create_worktree("task")
-        self.fixture.run_record_hook(OWN_SESSION, PRE_TOOL_USE, "read-1", {"command": "git status"})
-        self.fixture.run_record_hook(OWN_SESSION, POST_TOOL_USE, "read-1", {"command": "git status"}, {})
-
-    def tearDown(self) -> None:
-        self.fixture.directory.cleanup()
-
-    def test_lines_outside_the_record_are_committed_in_an_own_worktree(self) -> None:
-        self.append_as_a_project_hook()
-        result = self.commit_in_worktree()
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("this session's own worktree", result.stdout)
-        self.assertEqual(self.read_worktree_commit(), LOG_BASE + MINE_1)
-
-    def test_other_sessions_write_before_the_worktree_was_added_does_not_count(self) -> None:
-        self.add_other_session_event(ended_ago=10_000.0)
-        self.append_as_a_project_hook()
-        result = self.commit_in_worktree()
-
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-
-    def test_other_sessions_write_in_the_worktree_keeps_the_check(self) -> None:
-        self.add_other_session_event(ended_ago=0.0)
-        self.append_as_a_project_hook()
-        result = self.commit_in_worktree()
-
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
-
-    def test_another_process_working_in_the_worktree_keeps_the_check(self) -> None:
-        sleeper = subprocess.Popen(["sleep", "30"], cwd=self.worktree)
-
-        try:
-            self.append_as_a_project_hook()
-            result = self.commit_in_worktree()
-        finally:
-            sleeper.kill()
-            sleeper.wait()
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
-
-    def test_worktree_older_than_the_records_keeps_the_check(self) -> None:
-        common_directory = Path(self.fixture.run_git("-C", str(self.worktree), "rev-parse", "--absolute-git-dir"))
-        long_ago = time.time() - 15 * 24 * 60 * 60
-
-        os.utime(common_directory / "commondir", (long_ago, long_ago))
-        self.append_as_a_project_hook()
-        result = self.commit_in_worktree()
-
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
-
-    def test_original_checkout_keeps_the_check(self) -> None:
-        self.fixture.append(LOG_FILE, MINE_1)
-        result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
-
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
-
-    def append_as_a_project_hook(self) -> None:
-        """Change a file the way a formatting hook does, with no record of the write."""
-        with (self.worktree / LOG_FILE).open("a", newline="") as file:
-            file.write(MINE_1)
-
-    def commit_in_worktree(self) -> subprocess.CompletedProcess[str]:
-        base = self.fixture.run_git("rev-parse", "HEAD")
-        arguments = ("--private-index", "--expect-head", base, "--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
-
-        return self.fixture.run_wrapper(*arguments, cwd=self.worktree)
-
-    def read_worktree_commit(self) -> str:
-        return self.fixture.run_git("-C", str(self.worktree), "show", f"HEAD:{LOG_FILE}") + "\n"
-
-    def add_other_session_event(self, ended_ago: float) -> None:
-        record = self.fixture.config_directory / RECORD_DIRECTORY_NAME / f"{OTHER_SESSION}.jsonl"
-        now = time.time()
-        event = {
-            "root": str(self.worktree),
-            "path": NOTES_FILE,
-            "before": None,
-            "after": None,
-            "start": now - ended_ago - 1.0,
-            "end": now - ended_ago,
-            "tool": BASH_TOOL,
-            "record_format": 2,
-        }
-
-        record.parent.mkdir(parents=True, exist_ok=True)
-        record.write_text(json.dumps(event) + "\n")
 
 
 class CommitWrapperAmendTest(unittest.TestCase):

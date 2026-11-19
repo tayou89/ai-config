@@ -74,6 +74,11 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/project-goal-hook.py\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/worktree-guard-hook.py\"",
+            "timeout": 10
           }
         ]
       },
@@ -233,6 +238,16 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/session-writes-hook.py\"",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal|EnterWorktree",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/worktree-guard-hook.py\"",
             "timeout": 30
           }
         ]
