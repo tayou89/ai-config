@@ -114,6 +114,8 @@ RUNTIME_SCRIPTS = (
     "report-check-hook.py",
     "report_check.py",
     "motion_values.py",
+    "skill_gate_records.py",
+    "choice-shown.py",
     "shell-guard-hook.py",
     "shell_command.py",
     "secret_files.py",
@@ -133,6 +135,7 @@ RUNTIME_SCRIPTS = (
     "local-integrate.py",
     "worktree-cleanup.py",
     "worktree-guard-hook.py",
+    "folder_owner.py",
 )
 MAINTENANCE_SCRIPTS = (
     "install.py",

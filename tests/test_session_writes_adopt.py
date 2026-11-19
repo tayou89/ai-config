@@ -31,6 +31,7 @@ from test_shell_guard import (
 )
 
 SESSION_WRITES = SCRIPTS_DIRECTORY / "session_writes.py"
+FOLDER_OWNER = SCRIPTS_DIRECTORY / "folder_owner.py"
 THIRD_SESSION = "session-third"
 PLUGIN_FILE = "plugin.ts"
 HANDED_TEXT = "".join(f"export const step{number} = {number}\n" for number in range(1, 21))
@@ -76,6 +77,16 @@ class TakeoverFixture(SessionWritesFixture):
         )
         self.run_record_hook(session, POST_TOOL_USE, f"call-{self.tool_uses}", command, {})
         return result
+
+    def run_folder_owner(self, session: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            [sys.executable, str(FOLDER_OWNER), *arguments],
+            env={**self.environment(session), "HOME": str(self.root)},
+            cwd=self.repository,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
 
     def open_record(self, session: str) -> None:
         """Give a session its record folder, as the record hook does at its first call."""
@@ -195,29 +206,20 @@ class TakeoverTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(OTHER_SESSION, result.stdout)
 
-    def test_own_worktree_counts_taken_over_writes_as_its_own(self) -> None:
+    def test_adopt_in_a_task_worktree_takes_the_folder_and_commits_its_lines(self) -> None:
+        """In a task worktree the owner commits whole files, so taking over takes the folder, not lines."""
         worktree = self.fixture.create_worktree("task")
         self.fixture.repository = worktree
+        claim = self.fixture.run_folder_owner(OTHER_SESSION, "claim")
         self.fixture.create_file(OTHER_SESSION, PLUGIN_FILE, HANDED_TEXT)
-        self.fixture.adopt(OWN_SESSION, OTHER_SESSION, PLUGIN_FILE)
-        self.fixture.create_file(OWN_SESSION, PLUGIN_FILE, rewrite(HANDED_TEXT))
+        adopted = self.fixture.adopt(OWN_SESSION, OTHER_SESSION, PLUGIN_FILE)
         self.fixture.append(PLUGIN_FILE, UNRECORDED_LINE)
         result = self.fixture.run_wrapper("--own-lines", HEAD_COMMIT_MESSAGE, PLUGIN_FILE, cwd=worktree)
 
+        self.assertEqual(claim.returncode, 0, claim.stderr)
+        self.assertEqual(adopted.returncode, 0, adopted.stdout + adopted.stderr)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(UNRECORDED_LINE, self.fixture.read_committed(PLUGIN_FILE))
-
-    def test_senders_later_write_keeps_the_worktree_line_check(self) -> None:
-        worktree = self.fixture.create_worktree("task")
-        self.fixture.repository = worktree
-        self.fixture.create_file(OTHER_SESSION, PLUGIN_FILE, HANDED_TEXT)
-        self.fixture.adopt(OWN_SESSION, OTHER_SESSION, PLUGIN_FILE)
-        self.fixture.create_file(OWN_SESSION, PLUGIN_FILE, rewrite(HANDED_TEXT))
-        self.fixture.write(OTHER_SESSION, PLUGIN_FILE, LATER_LINE)
-        self.fixture.append(PLUGIN_FILE, UNRECORDED_LINE)
-        result = self.fixture.run_wrapper("--own-lines", HEAD_COMMIT_MESSAGE, PLUGIN_FILE, cwd=worktree)
-
-        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
 
     def test_adopt_takes_over_nothing_when_one_file_fails(self) -> None:
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)

@@ -25,7 +25,6 @@ from typing import Any
 
 POLICY_FILE = ".agent-workflow.json"
 GIT_DIRECTORY_NAME = ".git"
-_COMMONDIR_FILE = "commondir"
 _MODE_KEY = "mode"
 _BASE_KEY = "base"
 _REQUIRED_CHECKS_KEY = "requiredChecks"
@@ -138,24 +137,6 @@ def read_original_policy(original: Path) -> WorkflowPolicy | None:
 def is_original_checkout(root: Path) -> bool:
     """Whether a repository root is the checkout the repository was cloned into, not a linked worktree."""
     return (root / GIT_DIRECTORY_NAME).is_dir()
-
-
-def read_worktree_creation_time(root: Path) -> float | None:
-    """When a linked worktree was added, or None for an original checkout, a submodule, or when Git cannot tell.
-
-    `git worktree add` writes the `commondir` file in the worktree's own Git
-    folder once and never again, so its time is the worktree's start. A
-    submodule's Git folder is its own common folder and has no such file.
-    """
-    result = _run_git(root, ["rev-parse", "--absolute-git-dir"])
-    git_directory = Path(result.stdout.strip()).resolve() if result is not None and result.returncode == 0 else None
-    common = read_common_git_directory(root)
-    marker = git_directory / _COMMONDIR_FILE if git_directory else None
-
-    if marker is not None and common is not None and git_directory != common.resolve() and marker.is_file():
-        return marker.stat().st_mtime
-    else:
-        return None
 
 
 def _run_git(root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str] | None:

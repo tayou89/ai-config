@@ -18,8 +18,9 @@ REVIEWED_OPTION = "--reviewed"
 OWN_LINES_OPTION = "--own-lines"
 INCLUDE_UNRECORDED_OPTION = "--include-unrecorded"
 PRIVATE_INDEX_OPTION = "--private-index"
+ACCEPT_GAPS_OPTION = "--accept-gaps"
 OPTION_PREFIX = "--"
-USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION} | {OWN_LINES_OPTION}] [{PRIVATE_INDEX_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] [{REVIEWED_OPTION}] [{INCLUDE_UNRECORDED_OPTION} <file>]... "<message>" [<file1> ...]'
+USAGE = f'Usage: claude-commit.py [{AMEND_OPTION}] [{NO_STAGE_OPTION} | {OWN_LINES_OPTION}] [{PRIVATE_INDEX_OPTION}] [{EXPECT_HEAD_OPTION} <sha>] [{REVIEWED_OPTION}] [{ACCEPT_GAPS_OPTION}] [{INCLUDE_UNRECORDED_OPTION} <file>]... "<message>" [<file1> ...]'
 
 
 class CommitArgumentsError(ValueError):
@@ -33,6 +34,7 @@ class CommitArguments:
     own_lines: bool
     reviewed: bool
     private_index: bool
+    accept_gaps: bool
     expected_head: str | None
     included_paths: tuple[str, ...]
     message: str
@@ -45,6 +47,7 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
     own_lines = False
     reviewed = False
     private_index = False
+    accept_gaps = False
     expected_head: str | None = None
     included_paths: list[str] = []
     index = 0
@@ -67,6 +70,9 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
         elif option == PRIVATE_INDEX_OPTION:
             private_index = True
             index += 1
+        elif option == ACCEPT_GAPS_OPTION:
+            accept_gaps = True
+            index += 1
         elif option == EXPECT_HEAD_OPTION and index + 1 < len(argv):
             expected_head = argv[index + 1]
             index += 2
@@ -82,6 +88,7 @@ def parse_commit_arguments(argv: Sequence[str]) -> CommitArguments:
         own_lines=own_lines,
         reviewed=reviewed,
         private_index=private_index,
+        accept_gaps=accept_gaps,
         expected_head=expected_head,
         included_paths=tuple(included_paths),
         message=argv[index],

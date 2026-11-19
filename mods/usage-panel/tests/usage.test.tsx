@@ -1,11 +1,17 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On, SessionMeasureInput } from 'claude-code'
+import type { On, SessionMeasureInput, TurnCompleteInput } from 'claude-code'
 import type { Engine } from 'claude-code/testing'
 import type { CacheOutput, ListedSession, SessionState, SessionStates } from '../types'
 
 type SessionRow = ListedSession & { isArchived: boolean }
+// The band timers a test counts, each by a call only its tick makes.
+type TimerKind = 'helpers' | 'places' | 'codex' | 'claude' | 'sessions'
 // A drawn surface, as far as finding a Text by its text goes.
 type TextFinder = { find: (query: { type: 'Text'; text: RegExp }) => Promise<{ text?: string } | undefined> }
+interface CountedCall {
+  kind: TimerKind
+  at: number
+}
 
 // The mod's own tool, as its schema declares it: the session that laid the
 // types had not registered it yet.
@@ -60,6 +66,7 @@ const codexReads: string[] = []
 // When a Codex record was last written and the config saved; 0 is none there.
 const codexDisk = { recordAt: 0, configAt: 0 }
 const CODEX_HOME = '/Users/t/.codex/'
+const CODEX_CONFIG = `${CODEX_HOME}config.toml`
 // The Claude reading the sessions share, as its file holds it: none is no file.
 const claudeShared: { text?: string } = {}
 const CLAUDE_SHARED = '/Users/t/Library/Caches/usage-panel/claude-limits.json'
@@ -95,8 +102,10 @@ const app = {
   sessionExit: 0,
   agentLists: 0,
   agentsHold: undefined as Promise<void> | undefined,
+  isAgentListFailing: false,
   tools: [] as string[],
   workFiles: {} as Record<string, string>,
+  countedCalls: [] as CountedCall[],
 }
 const WORK_FOLDER = '/Users/t/Library/Application Support/usage-panel/work'
 
@@ -194,8 +203,10 @@ const engine = (
   app.listCalls = []
   app.agentLists = 0
   app.agentsHold = undefined
+  app.isAgentListFailing = false
   app.tools = []
   app.workFiles = {}
+  app.countedCalls = []
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
   on('tool.register', (_, e) => (app.tools.push(e.name), { value: { tool: `mcp__usage-panel__${e.name}` } }))
   on('mcp.call', (_, e) => {
@@ -226,7 +237,8 @@ const engine = (
     if (e.argv[3]?.includes('def cache(')) return { value: { exitCode: 0, stdout: JSON.stringify(app.transcript), stderr: '' } }
     if (e.argv[0] === 'date') return { value: { exitCode: 0, stdout: '+0900\n', stderr: '' } }
     if (e.argv[0] === 'git' && !hasGit) return { value: { exitCode: 128, stdout: '', stderr: 'not a git repository' } }
-    if (e.argv[0] === 'git' && e.argv.includes('status'))
+    if (e.argv[0] === 'git' && e.argv.includes('status')) {
+      app.countedCalls.push({ kind: 'places', at: clock.now() })
       return {
         value: {
           exitCode: 0,
@@ -234,17 +246,33 @@ const engine = (
           stderr: '',
         },
       }
+    }
     return { value: { exitCode: 128, stdout: '', stderr: 'no stash' } }
   })
-  on('env.get', (_, e) => ({ value: e.name === 'CLAUDE_CODE_HOST_SESSION_ID' ? app.hostId : '/Users/t' }))
+  // The session count asks for the app's id of this session once per tick.
+  on('env.get', (_, e) => {
+    const isHostId = e.name === 'CLAUDE_CODE_HOST_SESSION_ID'
+
+    if (isHostId) {
+      app.countedCalls.push({ kind: 'sessions', at: clock.now() })
+    }
+    return { value: isHostId ? app.hostId : '/Users/t' }
+  })
   on('session.cwd', () => ({ value: cwd }))
-  on('fs.exists', (_, e) => ({
-    value: e.path.startsWith(`${CODEX_HOME}sessions/`)
-      ? codexDisk.recordAt > 0
-      : e.path === CLAUDE_SHARED
-        ? claudeShared.text !== undefined
-        : e.path in sharedFiles || (e.path === `${CODEX_HOME}config.toml` && codexDisk.configAt > 0),
-  }))
+  // The Codex tick looks for the config once, the Claude share for its file once.
+  on('fs.exists', (_, e) => {
+    if (e.path.startsWith(`${CODEX_HOME}sessions/`)) {
+      return { value: codexDisk.recordAt > 0 }
+    } else if (e.path === CODEX_CONFIG) {
+      app.countedCalls.push({ kind: 'codex', at: clock.now() })
+      return { value: codexDisk.configAt > 0 || e.path in sharedFiles }
+    } else if (e.path === CLAUDE_SHARED) {
+      app.countedCalls.push({ kind: 'claude', at: clock.now() })
+      return { value: claudeShared.text !== undefined }
+    } else {
+      return { value: e.path in sharedFiles }
+    }
+  })
   on('fs.read', (_, e) => ({
     value:
       e.path === CLAUDE_SHARED
@@ -264,7 +292,11 @@ const engine = (
   on('fs.stat', () => ({ value: { kind: 'file', size: 1, mtimeMs: codexDisk.configAt, isLink: false } }))
   on('agent.list', async () => {
     app.agentLists += 1
+    app.countedCalls.push({ kind: 'helpers', at: clock.now() })
     await app.agentsHold
+    if (app.isAgentListFailing) {
+      throw new Error('fixture agent list failure')
+    }
     return { value: agents }
   })
   on('fs.list', (_, e) => {
@@ -1554,4 +1586,234 @@ test('two runs started close together each take their own record', async ($, on)
   expect(rows).toEqual(['시간 3분 · 단계 4 · 토큰 2M', '시간 2분 · 단계 3 · 토큰 1M'])
   await pane.unmount()
   codexDisk.recordAt = 0
+})
+
+// The band goes idle a minute after the last activity; a test looks a second
+// before that minute ends or a second after it.
+const IDLE_MS = 60_000
+// A gap between replies, shorter than the idle minute.
+const GAP_MS = 31_000
+const BEFORE_IDLE_MS = IDLE_MS - 1_000
+const PAST_IDLE_MS = IDLE_MS + 1_000
+const NO_TICKS = { helpers: 0, places: 0, codex: 0, claude: 0, sessions: 0 }
+// Waking reads again what the idle pace paused or slowed; the sessions keep
+// their pace and are not read again.
+const WAKE_TICKS = { helpers: 1, places: 1, codex: 1, claude: 1, sessions: 0 }
+// A minute idle: no helpers or places, Codex and Claude once, the sessions
+// every 5 seconds as while at work.
+const IDLE_TICKS = { helpers: 0, places: 0, codex: 1, claude: 1, sessions: 12 }
+// A minute at work: helpers every 3 seconds, the folder every 15; a second
+// short of the idle minute, one helper tick fewer.
+const HELPER_TICKS_A_MINUTE = 20
+const HELPER_TICKS_BEFORE_IDLE = 19
+const PLACE_TICKS_A_MINUTE = 4
+const RUNNING_HELPER = { id: 'a1', description: 'Find usage', type: 'Explore', status: 'running' }
+
+// How many ticks of each counted timer ran in (from, to]. Each counted call is
+// made once per tick, so a timer started twice counts twice.
+function ticksBetween(from: number, to: number): Record<TimerKind, number> {
+  const ticks: Record<TimerKind, number> = { ...NO_TICKS }
+
+  for (const call of app.countedCalls) {
+    if (call.at > from && call.at <= to) {
+      ticks[call.kind] += 1
+    }
+  }
+  return ticks
+}
+
+function finishTurn(turnId: string): TurnCompleteInput {
+  return {
+    turnId,
+    answer: '',
+    durationMs: 1_000,
+    isAborted: false,
+    reason: 'answer',
+    usage: {
+      model: 'claude-opus-5-5',
+      input_tokens: 1,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 1,
+      output_tokens: 1,
+    },
+  }
+}
+
+test('an idle session pauses its fast timers after a minute and slows the rest', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const startedAt = clock.now()
+
+  await clock.advance(BEFORE_IDLE_MS)
+  expect(ticksBetween(startedAt, clock.now())).toEqual({ helpers: 19, places: 3, codex: 5, claude: 3, sessions: 11 })
+  await clock.advance(1_000)
+  const idleAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(idleAt, clock.now())).toEqual(IDLE_TICKS)
+})
+
+test('a reply on an idle band reads each paused timer once and goes back to the working pace', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  const wokeAt = clock.now()
+
+  await $.turn.start({ text: '다음', turnId: 'i1' })
+  await clock.advance(1)
+  expect(ticksBetween(wokeAt - 1, clock.now())).toEqual(WAKE_TICKS)
+  await clock.advance(15_000 - 1)
+  expect(ticksBetween(wokeAt + 1, clock.now())).toEqual({ helpers: 5, places: 1, codex: 1, claude: 1, sessions: 3 })
+})
+
+test('opening the details wakes an idle band too', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  const wokeAt = clock.now()
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  await ui.press({ key: 'details' })
+  await ui.unmount()
+  await clock.advance(1)
+  expect(ticksBetween(wokeAt - 1, clock.now())).toEqual(WAKE_TICKS)
+})
+
+test('a Codex run this session starts wakes an idle band and keeps it at work', async ($, on) => {
+  const clock = engine(on)
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  const wokeAt = clock.now()
+
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "check"', run_in_background: true })
+  await clock.advance(1)
+  expect(ticksBetween(wokeAt - 1, clock.now())).toEqual(WAKE_TICKS)
+  await clock.advance(PAST_IDLE_MS)
+  const workingAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(workingAt, clock.now()).helpers).toBe(HELPER_TICKS_A_MINUTE)
+})
+
+test('a wake while a slow read still goes reads once more after it', async ($, on) => {
+  const clock = engine(on, [], undefined, [], true, [], { running: 1 })
+  let release = () => {}
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  sharedReader.hold = new Promise<void>(resolve => {
+    release = resolve
+  })
+  await clock.advance(IDLE_MS)
+  const wokeAt = clock.now()
+
+  await $.turn.start({ text: '다음', turnId: 'w1' })
+  expect(ticksBetween(wokeAt - 1, clock.now()).codex).toBe(0)
+  sharedReader.hold = undefined
+  release()
+  await clock.advance(1)
+  expect(ticksBetween(wokeAt - 1, clock.now()).codex).toBe(1)
+})
+
+test('a busy helper keeps the band at work past a minute', async ($, on) => {
+  const agents = [RUNNING_HELPER]
+  const clock = engine(on, [], undefined, [], true, agents)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  const helperAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(helperAt, clock.now()).helpers).toBe(HELPER_TICKS_A_MINUTE)
+})
+
+test('a helper list that fails keeps the helpers last seen, so the band stays at work', async ($, on) => {
+  const agents = [RUNNING_HELPER]
+  const clock = engine(on, [], undefined, [], true, agents)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(GAP_MS)
+  app.isAgentListFailing = true
+  await clock.advance(PAST_IDLE_MS)
+  const failingAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(failingAt, clock.now()).places).toBe(PLACE_TICKS_A_MINUTE)
+})
+
+test('the idle minute starts when a helper is first seen done, not at the last busy look', async ($, on) => {
+  const helper = { ...RUNNING_HELPER }
+  const clock = engine(on, [], undefined, [], true, [helper])
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(IDLE_MS + 40_000)
+  helper.status = 'completed'
+  await clock.advance(20_000)
+  const quietAt = clock.now()
+
+  await clock.advance(BEFORE_IDLE_MS)
+  expect(ticksBetween(quietAt, clock.now()).helpers).toBe(HELPER_TICKS_BEFORE_IDLE)
+  await clock.advance(PAST_IDLE_MS - BEFORE_IDLE_MS)
+  const idleAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(idleAt, clock.now()).helpers).toBe(0)
+})
+
+test('a running reply keeps the band at work past a minute', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: '긴 답', turnId: 'r1' })
+  await clock.advance(PAST_IDLE_MS)
+  const replyAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(replyAt, clock.now()).places).toBe(PLACE_TICKS_A_MINUTE)
+})
+
+test('the gaps between replies leave the timers as they are', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.turn.start({ text: '첫 답', turnId: 'g1' })
+  await clock.advance(GAP_MS)
+  await $.turn.complete(finishTurn('g1'))
+  await clock.advance(GAP_MS)
+  const gapAt = clock.now()
+
+  await $.turn.start({ text: '둘째 답', turnId: 'g2' })
+  expect(ticksBetween(gapAt - 1, gapAt)).toEqual(NO_TICKS)
+  await $.turn.complete(finishTurn('g2'))
+  await clock.advance(BEFORE_IDLE_MS)
+  expect(ticksBetween(gapAt, clock.now()).helpers).toBe(HELPER_TICKS_A_MINUTE)
+  await clock.advance(PAST_IDLE_MS - BEFORE_IDLE_MS)
+  const idleAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(idleAt, clock.now()).helpers).toBe(0)
+})
+
+// The test engine keeps the timers an earlier start made, as a real reload
+// would not: an idle band before the reload adds none of the counted fast ones.
+test('a reload starts the band at work and finds the idle minute again', async ($, on) => {
+  const clock = engine(on)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(PAST_IDLE_MS)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const reloadAt = clock.now()
+
+  await clock.advance(BEFORE_IDLE_MS)
+  expect(ticksBetween(reloadAt, clock.now()).helpers).toBe(HELPER_TICKS_BEFORE_IDLE)
+  await clock.advance(PAST_IDLE_MS - BEFORE_IDLE_MS)
+  const idleAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  expect(ticksBetween(idleAt, clock.now()).helpers).toBe(0)
 })
