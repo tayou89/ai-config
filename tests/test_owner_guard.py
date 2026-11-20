@@ -18,6 +18,7 @@ from owner_world import (
     DENY,
     FOLDER_OWNER_COMMAND,
     FOURTH,
+    GAPS_FILE_NAME,
     OTHER,
     OWNER,
     PASS,
@@ -31,6 +32,8 @@ from owner_world import (
 from workflow_world import BASE, ENCODING
 
 NESTED_SHELLS = 14
+LONG_NAME_PROGRAM = "import json\nprint(" + "1" * 300 + " / 60)\n"
+LONG_PATH_PROGRAM = "".join(f"print({'2' * 150} / 3)\n" for _ in range(8))
 
 
 def nest(command: str) -> str:
@@ -471,6 +474,54 @@ class ReviewedBypassTest(unittest.TestCase):
         self.assertEqual(json.loads(first.stdout)["hookSpecificOutput"]["permissionDecision"], ASK)
         self.assertEqual(self.world.read_owner_cli(worktree), THIRD.cli)
         self.assertIn(OTHER.app, gaps)
+
+
+class GuardFailureTest(unittest.TestCase):
+    """Commands the guard once failed on, letting them through unjudged: words longer than a file name may be,
+    link loops, and one call judged before and after it ran."""
+
+    def setUp(self) -> None:
+        self.world = OwnerWorld()
+        self.addCleanup(self.world.close)
+        self.worktree = self.world.add_worktree_as(OWNER, "task-c")
+
+    def test_inline_programs_longer_than_a_file_name_neither_fail_nor_leave_gaps(self) -> None:
+        programs = [shlex.quote(LONG_NAME_PROGRAM), shlex.quote(LONG_PATH_PROGRAM)]
+        runners = ["python3 -c", "node -e", "docker run --rm image bash -e -c"]
+
+        for runner in runners:
+            for program in programs:
+                with self.subTest(runner=runner, length=len(program)):
+                    self.assertEqual(self.world.bash(OWNER, f"{runner} {program}", self.worktree), PASS)
+        self.assertFalse((self.world.git_directory(self.worktree) / GAPS_FILE_NAME).exists())
+
+    def test_another_sessions_long_inline_program_that_names_the_folder_is_refused(self) -> None:
+        writer = f"open({str(self.worktree / 'notes.txt')!r}, 'w')\n"
+        command = f"python3 -c {shlex.quote(LONG_NAME_PROGRAM + writer)}"
+
+        self.assertEqual(self.world.bash(OTHER, command, self.world.root), DENY)
+
+    def test_a_link_loop_neither_fails_nor_hides_a_write(self) -> None:
+        loop = self.world.root / "loop"
+
+        (self.world.root / "loop-a").symlink_to(self.world.root / "loop-b")
+        (self.world.root / "loop-b").symlink_to(self.world.root / "loop-a")
+        loop.symlink_to(self.world.root / "loop-a")
+        self.assertEqual(self.world.bash(OWNER, f"touch {loop}/x", self.worktree), PASS)
+        self.assertEqual(self.world.bash(OTHER, f"touch {loop}/x {self.worktree}/x", self.world.root), DENY)
+
+    def test_removing_a_name_too_long_for_a_file_does_not_fail(self) -> None:
+        self.assertEqual(self.world.bash(OWNER, f"rm -rf {'y' * 300}/z", self.worktree), PASS)
+
+    def test_a_call_the_guard_fails_on_before_and_after_it_runs_is_one_gap(self) -> None:
+        self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
+        command = {"command": f"echo x > {self.worktree / 'x.txt'}"}
+
+        self.world.run_guard(OTHER, "Bash", command, self.world.root)
+        self.world.run_guard(OTHER, "Bash", command, self.world.root, POST_TOOL_USE, {})
+        gaps = (self.world.git_directory(self.worktree) / GAPS_FILE_NAME).read_text(encoding=ENCODING)
+
+        self.assertEqual(len(gaps.splitlines()), 1, gaps)
 
 
 if __name__ == "__main__":
