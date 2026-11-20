@@ -17,6 +17,7 @@ recorded (user decision, 2026-11-17).
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from enum import Enum
@@ -99,11 +100,15 @@ def read_committed_policy(root: Path, ref: str) -> WorkflowPolicy | None:
 
 
 def find_repository_root(path: Path) -> Path | None:
-    """The nearest folder at or above a path holding `.git`: a folder in an original checkout, a file in a worktree."""
-    existing = next((folder for folder in [path, *path.parents] if folder.exists()), None)
+    """The nearest folder at or above a path holding `.git`: a folder in an original checkout, a file in a worktree.
+
+    Callers pass any word of a command that may be a path, so a name no file can have, such as one longer than the
+    system allows, counts as missing (os.path.exists) instead of raising as pathlib does.
+    """
+    existing = next((folder for folder in [path, *path.parents] if os.path.exists(folder)), None)
     folders = [existing, *existing.parents] if existing else []
 
-    return next((folder for folder in folders if (folder / GIT_DIRECTORY_NAME).exists()), None)
+    return next((folder for folder in folders if os.path.exists(folder / GIT_DIRECTORY_NAME)), None)
 
 
 def read_common_git_directory(root: Path) -> Path | None:
