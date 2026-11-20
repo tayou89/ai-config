@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tell a main session that it is one, at each user turn and before it changes files or starts a long command.
+"""Tell a main or role session what it is, at each user turn and before it changes files or starts a long command.
 
 A session is the main session once it has started another session while no
 other session started it, or after it was moved to the top level
@@ -22,8 +22,19 @@ Hook input carries no session lineage, so the hook reads the desktop app's
 session records through `session_lineage`; when they or the app's session
 variable are missing, as in a terminal session, the hook adds nothing. A
 top-level session whose title its project's role list marks `(not main)`,
-read through `project_rules` from the hook input's folder, gets nothing
-either, since the user set that role apart (user decision, 2026-11-16). The
+read through `project_rules` from the hook input's folder, is not main, since
+the user set that role apart (user decision, 2026-11-16). A role session
+gets a role sentence of its own, the same size and skill sentences, and a
+tool sentence like a main session's: it is a session whose title is in that
+role list and that is either directly under a top-level session, as under a
+project master, or top-level and marked `(not main)`. A
+task session under a role session is two levels down, so it gets nothing
+even when its title matches, and so does a top-level session that has not
+started one yet, such as a new master. A role session under a master ran
+on a skill copy loaded hours before the rule changed when it prepared
+another session's estimate itself (`session-management` "Project master and
+role sessions", user decision, 2026-11-19); the notice keeps the role and the
+installed skill's state in view and blocks nothing. The
 context's size is the last request's input tokens in the transcript, which
 matched the app's context reading within 1% on 2026-11-17. Hook input carries
 no window size, so the window is the 1,000,000 tokens the app reported for
@@ -40,11 +51,18 @@ import datetime
 import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from project_rules import list_not_main_role_titles
-from session_lineage import count_started_sessions, read_host_session_record, read_session_title
+from project_rules import list_not_main_role_titles, list_role_titles
+from session_lineage import (
+    count_started_sessions,
+    is_under_another_session,
+    read_host_session_record,
+    read_parent_record,
+    read_session_title,
+)
 
 _HOOK_NAME = "main-session-hook"
 _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
@@ -90,11 +108,13 @@ _ROLE_NOTICE = (
     f'a main session, which {_LEAD_SKILL} "Working alongside other sessions" limits to '
     "conversation and managing sessions."
 )
-_SIZE_NOTICE = "Its context is about {size}k of the {window}k window ({percent}%), {position} the {threshold}% replacement threshold."
+_SIZE_NOTICE = "Its context is about {size}k of the {window}k window ({percent}%), {position} the {threshold}% {threshold_name}."
+_MAIN_THRESHOLD_NAME = "replacement threshold"
+_ROLE_THRESHOLD_NAME = "context threshold"
 _PAST_POSITION = "past"
 _BELOW_POSITION = "below"
 _SKILL_CHANGED_NOTICE = (
-    f"The installed {_LEAD_SKILL} skill changed after this session last loaded it, "
+    f"The installed {_LEAD_SKILL} skill file was modified after this session last called the Skill tool for it, "
     "and a compaction restores each skill as it was loaded."
 )
 _SKILL_NOT_LOADED_NOTICE = f"This session has not loaded the {_LEAD_SKILL} skill with the Skill tool."
@@ -102,6 +122,18 @@ _TOOL_NOTICE = (
     f"{_NOTICE_TAG} This is a main session, where file changes and long commands go to a session of their own "
     "unless the tool allows neither starting nor proposing one."
 )
+_ROLE_NOTICE_TAG = "[ROLE SESSION]"
+_ROLE_SESSION_NOTICE = f"{_ROLE_NOTICE_TAG} Its project's role list and its place in the session tree mark this session `{{title}}` as a role session; under {_LEAD_SKILL}, file changes, runs, and preparing a new estimate, analysis, comparison, or review belong to a task session under it, other sessions' requests included."
+_ROLE_TOOL_NOTICE = f"{_ROLE_NOTICE_TAG} This is a role session, where file changes and long commands go to a task session under it unless the tool allows neither starting nor proposing one."
+
+
+@dataclass(frozen=True)
+class _Lead:
+    """What a session that leads others is told: its role sentence, its tool notice, and its context threshold."""
+
+    role_notice: str
+    tool_notice: str
+    threshold_name: str
 
 
 def main() -> int:
@@ -136,7 +168,9 @@ def _make_notice(hook_input: dict[str, Any]) -> str | None:
     elif event == _USER_PROMPT_SUBMIT:
         return _make_turn_notice(hook_input)
     elif event == _PRE_TOOL_USE and _is_writing_call(hook_input):
-        return _TOOL_NOTICE if _count_led_sessions(hook_input) else None
+        lead = _read_lead(hook_input)
+
+        return lead.tool_notice if lead is not None else None
     else:
         return None
 
@@ -149,34 +183,62 @@ def _read_hook_input() -> dict[str, Any]:
 
 
 def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
-    count = _count_led_sessions(hook_input)
+    lead = _read_lead(hook_input)
 
-    if count:
+    if lead is not None:
         transcript = _read_transcript_records(hook_input.get(_TRANSCRIPT_PATH_KEY))
-        lines = [_ROLE_NOTICE.format(count=count, noun="session" if count == 1 else "sessions")]
+        lines = [lead.role_notice]
 
         if transcript is not None:
-            lines.extend(_list_transcript_notices(transcript))
+            lines.extend(_list_transcript_notices(transcript, lead.threshold_name))
         return " ".join(lines)
     else:
         return None
 
 
-def _count_led_sessions(hook_input: dict[str, Any]) -> int:
-    """The sessions this one leads as a main session: none when its project's rules mark its role `(not main)`."""
+def _read_lead(hook_input: dict[str, Any]) -> _Lead | None:
+    """How this session leads others: as a main session, as a role session, or not at all.
+
+    A title its project's rules mark `(not main)` is never main, and a main session is told only that role.
+    """
     record = read_host_session_record()
-
-    if record is not None and not _is_set_apart_from_main(record, hook_input):
-        return count_started_sessions(record)
-    else:
-        return 0
-
-
-def _is_set_apart_from_main(record: dict[str, Any], hook_input: dict[str, Any]) -> bool:
-    title = read_session_title(record)
+    title = read_session_title(record) if record is not None else ""
     folder = _get_session_folder(hook_input)
+    is_set_apart = bool(title) and title in list_not_main_role_titles(folder)
+    count = count_started_sessions(record) if record is not None and not is_set_apart else 0
 
-    return bool(title) and title in list_not_main_role_titles(folder)
+    if count:
+        return _Lead(
+            role_notice=_ROLE_NOTICE.format(count=count, noun="session" if count == 1 else "sessions"),
+            tool_notice=_TOOL_NOTICE,
+            threshold_name=_MAIN_THRESHOLD_NAME,
+        )
+    elif _is_role_session(record, title, folder, is_set_apart):
+        return _Lead(
+            role_notice=_ROLE_SESSION_NOTICE.format(title=title),
+            tool_notice=_ROLE_TOOL_NOTICE,
+            threshold_name=_ROLE_THRESHOLD_NAME,
+        )
+    else:
+        return None
+
+
+def _is_role_session(record: dict[str, Any] | None, title: str, folder: Path, is_set_apart: bool) -> bool:
+    return record is not None and title in list_role_titles(folder) and _is_placed_as_role(record, is_set_apart)
+
+
+def _is_placed_as_role(record: dict[str, Any], is_set_apart: bool) -> bool:
+    """Whether the session tree puts a listed title at a role session's place, not at a task session's.
+
+    A role session is directly under a top-level session such as its project master, or top-level and marked
+    `(not main)`; a task session is under a role session, and a session whose parent record is missing is not judged.
+    """
+    parent = read_parent_record(record)
+
+    if parent is not None:
+        return not is_under_another_session(parent)
+    else:
+        return is_set_apart and not is_under_another_session(record)
 
 
 def _get_session_folder(hook_input: dict[str, Any]) -> Path:
@@ -212,9 +274,9 @@ def _read_transcript_records(transcript_path: Any) -> list[dict[str, Any]] | Non
         return None
 
 
-def _list_transcript_notices(transcript: list[dict[str, Any]]) -> list[str]:
+def _list_transcript_notices(transcript: list[dict[str, Any]], threshold_name: str) -> list[str]:
     size = _read_context_size(transcript)
-    notices = [_make_size_notice(size)] if size is not None else []
+    notices = [_make_size_notice(size, threshold_name)] if size is not None else []
 
     return notices + _list_skill_notices(transcript)
 
@@ -251,7 +313,7 @@ def _sum_input_tokens(record: dict[str, Any]) -> int | None:
         return None
 
 
-def _make_size_notice(size: int) -> str:
+def _make_size_notice(size: int, threshold_name: str) -> str:
     is_past = size * _PERCENT_SCALE > _CONTEXT_WINDOW * _REPLACEMENT_PERCENT
 
     return _SIZE_NOTICE.format(
@@ -260,6 +322,7 @@ def _make_size_notice(size: int) -> str:
         percent=round(size * _PERCENT_SCALE / _CONTEXT_WINDOW),
         position=_PAST_POSITION if is_past else _BELOW_POSITION,
         threshold=_REPLACEMENT_PERCENT,
+        threshold_name=threshold_name,
     )
 
 
