@@ -38,13 +38,21 @@ MAIN_SESSION = "local_main"
 CHILD_SESSION = "local_child"
 GRANDCHILD_SESSION = "local_grandchild"
 OTHER_SESSION = "local_other"
+ROLE_NOTICE_TAG = "[ROLE SESSION]"
+ROLE_TOOL_NOTICE_TEXT = "where file changes and long commands go to a task session under it"
+ROLE_TOOL_NOTICE = f"{ROLE_NOTICE_TAG} This is a role session, {ROLE_TOOL_NOTICE_TEXT} unless the tool allows neither starting nor proposing one."
+SKILL_CHANGED_TEXT = "skill file was modified after this session last called the Skill tool for it"
 MANAGEMENT_ROLE = "웹사이트 관리"
 DESIGN_ROLE = "웹사이트 디자인"
+DEVELOPMENT_ROLE = "웹사이트 개발"
 AGENTS_FILE = "AGENTS.md"
 CLAUDE_FILE = "CLAUDE.md"
 MANAGEMENT_ITEM = f"- `{MANAGEMENT_ROLE}`: the main session."
 DESIGN_ITEM = f"- `{DESIGN_ROLE}` (not main): design work, which opens short-lived sub-sessions."
-ROLE_LIST = "\n".join(["## Role sessions (user decisions, 2026-11-13)", "", MANAGEMENT_ITEM, DESIGN_ITEM, ""])
+DEVELOPMENT_ITEM = f"- `{DEVELOPMENT_ROLE}`: code, opened under the master."
+ROLE_LIST = "\n".join(
+    ["## Role sessions (user decisions, 2026-11-13)", "", MANAGEMENT_ITEM, DESIGN_ITEM, DEVELOPMENT_ITEM, ""]
+)
 MISPLACED_ROLE_LIST = "\n".join(["## Role sessions", "", MANAGEMENT_ITEM, "", "## Notes", "", DESIGN_ITEM, ""])
 FIRST_REQUEST_TOKENS = 90_000
 SKILL_LOADED_AT = "2026-11-11T09:28:44.763Z"
@@ -165,10 +173,54 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertEqual(self._run_hook(MAIN_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
 
-    def test_role_marked_not_main_gets_nothing(self) -> None:
+    def test_role_marked_not_main_is_told_it_is_a_role_session(self) -> None:
         self._write_record(MAIN_SESSION, spawned_from=OTHER_SESSION, detached=True, title=DESIGN_ROLE)
         self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
         self._write_rules(AGENTS_FILE, ROLE_LIST)
+        turn_context = self._read_turn_context()
+        tool_context = self._read_context(MAIN_SESSION, PRE_TOOL_USE, tool_name="Edit", tool_input={})
+
+        self.assertTrue(turn_context.startswith(ROLE_NOTICE_TAG))
+        self.assertIn(f"`{DESIGN_ROLE}`", turn_context)
+        self.assertNotIn(NOTICE_TAG, turn_context)
+        self.assertIn(ROLE_TOOL_NOTICE_TEXT, tool_context)
+
+    def test_role_session_under_a_master_gets_role_size_and_skill_sentences(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION, title=DEVELOPMENT_ROLE)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+        self._write_transcript(make_skill_load_record(SKILL_LOADED_AT), make_usage_record(812_345))
+        self._write_skill(SKILL_LOADED_EPOCH + 3_600)
+        context = self._read_context(CHILD_SESSION, USER_PROMPT_SUBMIT)
+
+        self.assertTrue(context.startswith(ROLE_NOTICE_TAG))
+        self.assertIn("belong to a task session under it, other sessions' requests included", context)
+        self.assertIn("(81%), past the 80% context threshold", context)
+        self.assertIn(SKILL_CHANGED_TEXT, context)
+
+    def test_role_session_under_a_master_gets_the_tool_notice(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION, title=DEVELOPMENT_ROLE)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+        context = self._read_context(CHILD_SESSION, PRE_TOOL_USE, tool_name="Write", tool_input={})
+
+        self.assertEqual(context, ROLE_TOOL_NOTICE)
+
+    def test_role_session_foreground_command_gets_nothing(self) -> None:
+        self._write_master_with_development_role()
+        hook_input = {EVENT_KEY: PRE_TOOL_USE, TOOL_NAME_KEY: "Bash", TOOL_INPUT_KEY: {"command": "git status"}}
+
+        self.assertEqual(self._run_hook(CHILD_SESSION, hook_input), "")
+
+    def test_task_session_outside_the_role_list_gets_nothing(self) -> None:
+        self._write_master_with_development_role()
+        self._write_record(GRANDCHILD_SESSION, spawned_from=CHILD_SESSION, title="결제 화면 고치기")
+
+        self.assertEqual(self._run_hook(GRANDCHILD_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_task_session_with_a_role_title_gets_nothing(self) -> None:
+        self._write_master_with_development_role()
+        self._write_record(GRANDCHILD_SESSION, spawned_from=CHILD_SESSION, title=DEVELOPMENT_ROLE)
         hook_inputs: list[dict[str, Any]] = [
             {EVENT_KEY: USER_PROMPT_SUBMIT},
             {EVENT_KEY: PRE_TOOL_USE, TOOL_NAME_KEY: "Edit", TOOL_INPUT_KEY: {}},
@@ -176,7 +228,32 @@ class MainSessionHookTest(unittest.TestCase):
 
         for hook_input in hook_inputs:
             with self.subTest(event=hook_input[EVENT_KEY]):
-                self.assertEqual(self._run_hook(MAIN_SESSION, hook_input), "")
+                self.assertEqual(self._run_hook(GRANDCHILD_SESSION, hook_input), "")
+
+    def test_master_before_its_first_session_gets_nothing(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+
+        self.assertEqual(self._run_hook(MAIN_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_listed_session_whose_parent_record_is_missing_gets_nothing(self) -> None:
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION, title=DEVELOPMENT_ROLE)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
+
+        self.assertEqual(self._run_hook(CHILD_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_role_title_outside_the_role_list_does_not_count(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION, title=DESIGN_ROLE)
+        self._write_rules(AGENTS_FILE, MISPLACED_ROLE_LIST)
+
+        self.assertEqual(self._run_hook(CHILD_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_subagent_of_a_role_session_gets_nothing(self) -> None:
+        self._write_master_with_development_role()
+        hook_input = {EVENT_KEY: PRE_TOOL_USE, TOOL_NAME_KEY: "Edit", TOOL_INPUT_KEY: {}, "agent_id": "agent-1"}
+
+        self.assertEqual(self._run_hook(CHILD_SESSION, hook_input), "")
 
     def test_other_role_in_the_same_list_is_still_main(self) -> None:
         self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
@@ -199,8 +276,9 @@ class MainSessionHookTest(unittest.TestCase):
         self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
         self._write_rules(CLAUDE_FILE, f"# Project\n\n#### Role sessions\n- `{DESIGN_ROLE}` (Not Main): design.\n")
         folder.mkdir(parents=True)
+        context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, cwd=str(folder))
 
-        self.assertEqual(self._run_hook(MAIN_SESSION, {EVENT_KEY: USER_PROMPT_SUBMIT, "cwd": str(folder)}), "")
+        self.assertTrue(context.startswith(ROLE_NOTICE_TAG))
 
     def test_session_without_a_title_is_still_main(self) -> None:
         self._write_main_with_child()
@@ -235,7 +313,7 @@ class MainSessionHookTest(unittest.TestCase):
         self._write_transcript(make_skill_load_record(SKILL_LOADED_AT))
         self._write_skill(SKILL_LOADED_EPOCH + 3_600)
 
-        self.assertIn("skill changed after this session last loaded it", self._read_turn_context())
+        self.assertIn(SKILL_CHANGED_TEXT, self._read_turn_context())
 
     def test_skill_loaded_after_install_adds_no_skill_sentence(self) -> None:
         self._write_main_with_child()
@@ -243,7 +321,7 @@ class MainSessionHookTest(unittest.TestCase):
         self._write_skill(SKILL_LOADED_EPOCH - 3_600)
         context = self._read_turn_context()
 
-        self.assertNotIn("skill changed", context)
+        self.assertNotIn(SKILL_CHANGED_TEXT, context)
         self.assertNotIn(NOT_LOADED_TEXT, context)
 
     def test_unreadable_transcript_gives_only_the_role(self) -> None:
@@ -328,6 +406,11 @@ class MainSessionHookTest(unittest.TestCase):
     def _write_main_with_child(self) -> None:
         self._write_record(MAIN_SESSION)
         self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION)
+
+    def _write_master_with_development_role(self) -> None:
+        self._write_record(MAIN_SESSION, title=MANAGEMENT_ROLE)
+        self._write_record(CHILD_SESSION, spawned_from=MAIN_SESSION, title=DEVELOPMENT_ROLE)
+        self._write_rules(AGENTS_FILE, ROLE_LIST)
 
     def _write_record(
         self,

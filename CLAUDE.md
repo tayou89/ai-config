@@ -10,7 +10,7 @@ Hooks enforce these and say why when they stop or ask; follow their message, and
 - A question that points elsewhere in the chat, or a question dialog in a session another session started, is sent back to where the user sees it (`[BACK-REFERENCE]`, `[SUB-SESSION QUESTION]`).
 - A closing message that says a recommendation changed without saying when its evidence appeared, or that is not in the user's language, is continued once (`[RECOMMENDATION CHANGE]`, `[REPLY LANGUAGE]`).
 - A next-step box or question dialog holding a commit number, command option, exit code, file name, or code is sent back, and a next-step box that asks a decision carries a notice for the closing message (`[PLAIN WORDS]`).
-- Notices never block: `[CONFIG SYNC]`, `[PROJECT GOAL]`, `[BULLETIN]`, `[MAIN SESSION]`, `[LANGUAGE REMINDER]`, `[PLAN CODE REMINDER]`, and `[REPORT CHECK]`.
+- Notices never block: `[CONFIG SYNC]`, `[PROJECT GOAL]`, `[BULLETIN]`, `[MAIN SESSION]`, `[ROLE SESSION]`, `[LANGUAGE REMINDER]`, `[PLAN CODE REMINDER]`, and `[REPORT CHECK]`.
 
 ## Skill Triggers
 

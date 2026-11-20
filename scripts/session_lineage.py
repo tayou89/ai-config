@@ -105,6 +105,17 @@ def is_under_another_session(record: dict[str, Any]) -> bool:
     return bool(record.get(_SPAWNED_FROM_KEY)) and record.get(_DETACHED_KEY) is not True
 
 
+def read_parent_record(record: dict[str, Any]) -> dict[str, Any] | None:
+    """The record of the session this one is still under, or None for a top-level session or a missing record."""
+    spawned_from = record.get(_SPAWNED_FROM_KEY)
+    parent_id = spawned_from.get(_SESSION_ID_KEY) if isinstance(spawned_from, dict) else None
+
+    if isinstance(parent_id, str) and parent_id and is_under_another_session(record):
+        return find_session_record(parent_id)
+    else:
+        return None
+
+
 def _get_host_session() -> str:
     return os.environ.get(HOST_SESSION_VARIABLE, "")
 

@@ -55,5 +55,6 @@ Follow project rules first.
 ## Time estimates and progress
 
 - At the start of a task with several steps, tell the user a rough time estimate and what it depends on (approvals, reviews, builds, other sessions), and give a new estimate when the plan changes a lot; skip this for tasks of a few minutes (user decision, 2026-11-09).
+- Give every duration or deadline you state, in a reply, plan, or report, with its basis in a clause: whether it is measured or an estimate (`work-principles` 8), what it was worked out from (such as working days in the commit history, or a comparable past task's actual time), and what it leaves out (waiting, parallel work, usage limits) (user decision, 2026-11-19).
 - On a long task, give a one-line progress note at each milestone, not on a timer; a session started by another session also sends that line to the session that started it.
 - When work answers a question, send the first conclusion as soon as one forms, in two or three plain lines that say what is still a guess or still being checked, to the user and, in a session another session started, to that session too; keep working, and say in the final report if that conclusion changed (user decision, 2026-11-11).
