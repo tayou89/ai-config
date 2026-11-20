@@ -10,8 +10,6 @@ Rules for work on this repository itself. The root `CLAUDE.md` is the global Cla
 
 Each role also owns the edits to a project's rules that its shared changes bring with them, and other fields get a role session when their work appears (user decision, 2026-11-19). The role sessions use this repository's original checkout as their folder, where they only coordinate and read, since the session hooks look for this list in the rules of the session's own repository; their task sessions make the changes, runs, analyses, and reviews, as `session-management` describes.
 
-The top-level session “깃 관리 방식 점검과 운영안” has led the Git work so far (2026-11-20). Once `설정 관리 깃` is open, the master sends that session no new work, and `설정 관리 깃` takes over its context at once by the move steps in `session-management` "Project master and role sessions"; until it reports the takeover, Git work and that session's open tasks stay there. That session is not listed above with `(not main)`, since it works outside this repository, where the hooks would not read the mark. `설정 관리 깃` removes this paragraph when it reports the takeover.
-
 ## Where the two fields meet
 
 - Ownership follows the behavior a change makes, not the kind of file it is in: Git behavior belongs to the Git role even inside a shared rule, skill, hook, setting, or document, and other configuration behavior to the AI role. The owning role's task session changes the source together with its generated copies, tests, settings, and documentation.
