@@ -21,8 +21,10 @@ codex exec -m <model> -c model_reasoning_effort="<effort>" -s workspace-write -C
 Research or record collection, outside any repository:
 
 ```bash
-codex --search exec -m <model> -c model_reasoning_effort="<effort>" --skip-git-repo-check -s workspace-write -C "<run folder>" -o "<run folder>/codex-result-<topic>.md" -- "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
+codex --search exec -m <model> -c model_reasoning_effort="<effort>" --skip-git-repo-check -s workspace-write -C "<run folder>" -o "<brief folder>/codex-result-<topic>.md" -- "$(cat "<brief folder>/codex-brief-<topic>.md")" </dev/null
 ```
+
+Only the run command writes the result file: `-o` saves Codex's final message there when the run ends and replaces whatever was in it, so a report Codex wrote to that path is lost (seen in two runs on 2026-11-18 and eight on 2026-11-23; reproduced with codex-cli 0.163.0, whose sandbox refused a write beside the brief). So the brief never names that file or asks Codex to save its report to a file, and its final message is the report; the result file sits beside the brief, outside the worktree or run folder Codex writes in, never under a temporary folder its sandbox can write. Codex may save scripts and data under its own names in that folder and list them in the report.
 
 `--search` turns on web search and goes before `exec`, which rejects it; leave it out for record collection that needs no web. `--skip-git-repo-check` lets Codex run in a folder that is not a Git repository (a run without it fails there; seen 2026-11-18). `--` ends the options, so a brief is never read as one. Codex can still read files outside the run folder, such as transcripts and logs.
 
@@ -30,7 +32,7 @@ Take `<model>` and `<effort>` from `agent-usage` section 13; change the names wh
 
 ## 3. Review and Commit
 
-- Wait until the process has exited. Exit is not completion: read the result file, then set the entry to `review-waiting`.
+- Wait until the process has exited. Exit is not completion: read the result file and check that its first word is `done`, `partial`, or `blocked` and that it holds the report the brief asked for, not a short note pointing to another file; then set the entry to `review-waiting`. If it does not, take the full text from the run's session log under `~/.codex/sessions/`, and fix the brief before any rerun.
 - For implementation, run `git status`, `git diff <base>`, and `git log <base>..` in the worktree and check that only the brief's files changed and Codex made no commit; anything else is a finding. The brief's "do not commit" is an instruction, not a block. Read the diff against the brief and the skills it names, run the brief's checks yourself, and fix what fails: Codex's sandbox can block some checks, such as tests that list processes, so its failures are not the repository's until you rerun them. Do not trust its report without the diff. A Claude review of Codex's code is the other-family review; a later Codex review of the same code is not independent.
 - For research, open each cited source for the findings you use and check that it says what the report claims; drop or mark what does not hold, and count those in the result.
 - Commit implementation from the worktree through `git-commit`: the session that made the worktree owns it, so Codex's writes there are its own and the owner commits them without being asked about their lines (another session cannot commit there). Finish through the repository's workflow, then close the entry with `--state done`. Close a research entry once its findings are checked.
@@ -67,7 +69,7 @@ Read these before writing: <skills under ~/.codex/skills/ and project instructio
 <commands and tests that must pass, with their expected result>
 
 ## Report
-Start with one word: `done`, `partial`, or `blocked`. Then list the files changed, the commands run and their results, and anything you could not do or decided yourself.
+Your final message is the report; do not save it to a file. Start it with one word: `done`, `partial`, or `blocked`. Then list the files changed, the commands run and their results, and anything you could not do or decided yourself.
 ```
 
 ## Research Brief Template
@@ -88,5 +90,5 @@ You collect facts that Claude will check and use. Write only in `<run folder>`. 
 <every question answered or marked not found, with the counts or quotes asked for>
 
 ## Report
-Start with one word: `done`, `partial`, or `blocked`. For each question, give the answer, each source as a link or path with the place in it (section, line, timestamp), and a quote of at most two sentences. List what you could not find and why.
+Your final message is the report; do not save it to a file, and list any scripts or data files you saved in the run folder. Start it with one word: `done`, `partial`, or `blocked`. For each question, give the answer, each source as a link or path with the place in it (section, line, timestamp), and a quote of at most two sentences. List what you could not find and why.
 ```
