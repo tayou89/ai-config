@@ -46,6 +46,7 @@ CODE_STYLE = "code-style"
 PYTHON = "python"
 TYPESCRIPT = "typescript"
 UX_DESIGN = "ux-design"
+REPORT_WRITING = "report-writing"
 FRONTEND_DESIGN = "frontend-design"
 DECISIONS = "decisions-and-collaboration"
 SESSIONS = "session-management"
@@ -364,7 +365,8 @@ class SkillGateHookTest(unittest.TestCase):
         self.config_directory = Path(self.directory.name) / "config"
         self.transcript = Path(self.directory.name) / f"{SESSION}.jsonl"
         self.transcript.write_text(json.dumps({"type": "user"}) + "\n")
-        patcher = mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": str(self.config_directory)})
+        environment = {"CLAUDE_CONFIG_DIR": str(self.config_directory), "HOME": self.directory.name}
+        patcher = mock.patch.dict(os.environ, environment)
 
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -983,6 +985,82 @@ class SkillGateHookTest(unittest.TestCase):
         self.assertEqual((broken.returncode, broken.stdout), (0, ""))
         self.assertIn("skill-gate-hook:", broken.stderr)
         self.assertEqual((missing_session.returncode, missing_session.stdout), (0, ""))
+
+    def test_writes_that_move_folder_inside_the_command_are_judged_where_they_land(self) -> None:
+        folder = self._app_notes() / "local_1"
+        cases = (
+            (f"cd '{folder}' && echo text > r.md", str(self.directory.name), True),
+            ("cd /tmp && echo text > r.md", str(folder), False),
+        )
+
+        for command, cwd, is_refused in cases:
+            with self.subTest(command=command):
+                hook_input = {**self._make_edit_input(), "tool_name": "Bash", "tool_input": {"command": command}}
+
+                hook_input["cwd"] = cwd
+                output = skill_gate_hook.handle_event(hook_input, GATE_ON)
+                self.assertEqual("would be a new file" in self._read_reason(output) if output else False, is_refused)
+
+    def test_copies_of_the_app_notes_folder_elsewhere_are_not_refused(self) -> None:
+        copy = Path(self.directory.name) / "Documents" / "session-notes-backup" / "snapshot" / "side-session-notes"
+        restored = copy / "local_1" / "restored.json"
+
+        self.assertIsNone(self._decide(None, "Write", {"file_path": str(restored), "content": "{}"}))
+
+    def test_new_files_in_app_session_folders_are_refused_for_every_agent(self) -> None:
+        new_report = str(self._app_notes() / "local_1" / "new.md")
+
+        for agent in (None, GUIDE_AGENT, {"agent_id": "x1"}):
+            with self.subTest(agent=agent):
+                reason = self._read_reason(self._decide(agent, "Write", {"file_path": new_report, "content": "x"}))
+
+                self.assertIn("`new.md` would be a new file", reason)
+                self.assertIn("~/Documents/session-notes/<project>/", reason)
+        self.assertIsNone(self._decide(None, "Write", {"file_path": new_report}, gate_setting=GATE_OFF))
+
+    def test_files_already_in_app_session_folders_can_still_be_edited(self) -> None:
+        existing = self._app_notes() / "local_1" / "INDEX.md"
+
+        existing.parent.mkdir(parents=True)
+        existing.write_text("목록\n", encoding="utf-8")
+        self._load(REPORT_WRITING)
+        edit = {"file_path": str(existing), "old_string": "목록", "new_string": "목록 고침"}
+        self.assertIsNone(self._decide(None, "Edit", edit))
+        self.assertIsNone(self._decide(None, "Write", {"file_path": str(existing), "content": "새 목록"}))
+        self.assertIsNone(self._decide(None, "Bash", {"command": f"echo row >> '{existing}'"}))
+
+    def test_bulletin_and_folders_the_app_keeps_are_not_refused(self) -> None:
+        notes = self._app_notes()
+
+        for path in (notes / "bulletin.md", notes / ".obsidian" / "workspace.json"):
+            with self.subTest(path=path):
+                self.assertIsNone(self._decide(None, "Write", {"file_path": str(path), "content": "x"}))
+
+    def test_shell_writes_of_new_files_in_app_session_folders_are_refused(self) -> None:
+        folder = self._app_notes() / "local_1"
+        commands = (
+            (f"cat > '{folder}/r.md' <<'EOF'\ntext\nEOF", str(self.directory.name)),
+            ("echo text > r.md", str(folder)),
+            (f"echo text | tee '{folder}/log.txt'", str(self.directory.name)),
+        )
+
+        for command, cwd in commands:
+            with self.subTest(command=command):
+                hook_input = {**self._make_edit_input(), "tool_name": "Bash", "tool_input": {"command": command}}
+
+                hook_input["cwd"] = cwd
+                reason = self._read_reason(skill_gate_hook.handle_event(hook_input, GATE_ON))
+                self.assertIn("would be a new file", reason)
+
+    def test_project_notes_folder_reports_need_report_writing(self) -> None:
+        report = Path(self.directory.name) / "Documents" / "session-notes" / "ai-config" / "r.md"
+        requirement = skill_gate_hook.find_requirement("Write", {"file_path": str(report)}, "/tmp")
+
+        self.assertEqual(requirement.skills if requirement else None, (REPORT_WRITING,))
+        self.assertIn("needs `report-writing`", self._read_reason(self._decide(None, "Write", {"file_path": str(report)})))
+
+    def _app_notes(self) -> Path:
+        return Path(self.directory.name) / "Library" / "Application Support" / "Claude" / "side-session-notes"
 
     def _decide(
         self,

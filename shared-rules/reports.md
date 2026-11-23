@@ -1,6 +1,6 @@
 # Report Writing Principles
 
-Apply when writing or revising a report, plan, review, decision document, or any other document that the user or another session will read later, in a shared notes folder or a project, and when keeping a shared notes folder. The prose principles come first and apply to any document others will read; the rest sets the shape of reports and plans. Follow project rules first.
+Apply when writing or revising a report, plan, review, decision document, or any other document that the user or another session will read later, in a notes folder or a project, and when keeping a notes folder. The prose principles come first and apply to any document others will read; the rest sets the shape of reports and plans. Follow project rules first.
 
 ## Prose
 
@@ -61,13 +61,15 @@ Apply these principles when writing or revising documents, plans, reports, and e
 ## Checks
 
 - Before handing a report over, run `python3 ~/.claude/scripts/report_check.py <file>`, which measures the opening, table cells and columns, repeated summaries, section-number references, and bare paths, and fix what it reports or say in the report why a finding stays (user decision, 2026-11-16).
-- In Claude Code, writing a report in a shared notes folder is refused until this skill is loaded, and a hook runs the same check after each write there.
+- In Claude Code, writing a report in a notes folder is refused until this skill is loaded, and a hook runs the same check after each write there.
 
-## Shared notes folders
+## Notes folders
 
-- When a group of sessions shares a notes folder, keep an `INDEX.md` there with one row per report or plan, in the user's language: date, file, topic, conclusion, user decisions with dates, and open items, marking what could not be verified (user decision, 2026-11-08).
+- Keep every note a group of sessions leaves for later (reports, plans other than the code plans `code-plan` keeps in `claude-plans/`, decision documents, handovers, review briefs and results, captures) in its project's notes folder, `~/Documents/session-notes/<project>/`, from the moment you write it, naming the folder after the project's repository in English lowercase with hyphens, or after the topic for work outside a repository (user decision, 2026-11-23). Do not keep them in the session folder the Claude desktop app names in a brief as the group's shared notes folder: the app deletes that folder, skipping the Trash, once the session that owns it and every session it started are closed (app code, read 2026-11-20), and 26 of the 54 such folders that transcripts name were gone by then.
+- A hook refuses new files in the app's session folders and copies those folders, adding and updating files but never deleting any, into `~/Documents/session-notes-backup/app-notes/` at the end of every turn and before a session tool closes, deletes, or moves a session to the cloud, a safety net that a close from the sidebar after an interrupted turn can still miss; find in that copy what a closed group left in the app's folder.
+- Keep an `INDEX.md` in each project's notes folder with one row per report or plan, in the user's language: date, file, topic, conclusion, user decisions with dates, and open items, marking what could not be verified (user decision, 2026-11-08).
 - Keep each index cell to a sentence or two and the conclusion to one sentence, leaving details to the report (user decision, 2026-11-16).
 - The session that writes a report adds its row in the same task, a session that later records a user decision on it updates that row, and the session that started it checks the row before closing it. Re-read the index right before editing and change only that row or append one; this exempts the index from the one-editor rule (user decision, 2026-11-08).
-- Before researching or recommending in work that has such a folder, read its `INDEX.md` first, and do not re-recommend what it records as decided, rejected, or on hold unless there is new evidence.
-- In a report or plan in such a folder, which the user reads in Obsidian (user decision, 2026-11-13), write every file link, images included, as a `file:///` URL with spaces as `%20` and any line number as text after the link, such as `[hook](file:///path/to/hook.py) line 33`: a plain absolute path makes Obsidian create an empty note, `name.md:3` reads as a URL scheme, and `file:///` opens in Obsidian and the chat client alike (tested 2026-11-13).
+- Before researching or recommending in a project, read its notes folder's `INDEX.md` first, and do not re-recommend what it records as decided, rejected, or on hold unless there is new evidence.
+- In a report or plan in a notes folder, which the user reads in Obsidian (user decision, 2026-11-13), write every file link, images included, as a `file:///` URL with spaces as `%20` and any line number as text after the link, such as `[hook](file:///path/to/hook.py) line 33`: a plain absolute path makes Obsidian create an empty note, `name.md:3` reads as a URL scheme, and `file:///` opens in Obsidian and the chat client alike (tested 2026-11-13).
 - When you hand over such a report or plan in a reply, give its link and also `open "<absolute path>"` in a shell code block of its own, since the chat client opens every file link in its own pane, and that block's run button opens the file in Obsidian (tested 2026-11-13).

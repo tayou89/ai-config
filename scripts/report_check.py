@@ -7,20 +7,25 @@ text before the first section, table cells stay short because the note app's
 reading column is about 700 pixels wide, only one summary stands before the
 appendix, sections are linked by heading rather than by number, and file paths
 are `file:///` links. `report-check-hook.py` runs these checks after a write to
-a shared notes folder; `python3 report_check.py <file>...` runs them by hand.
+a notes folder; `python3 report_check.py <file>...` runs them by hand.
 The checks see shape only, not whether the conclusion is right or the words
 are plain.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 INDEX_FILE_NAME = "INDEX.md"
-_NOTES_DIRECTORY_NAME = "side-session-notes"
+APP_NOTES_PATH = Path("Library") / "Application Support" / "Claude" / "side-session-notes"
+PROJECT_NOTES_PATH = Path("Documents") / "session-notes"
+_NOTES_DIRECTORY_NAME = APP_NOTES_PATH.name
+_PROJECT_NOTES_PARTS = PROJECT_NOTES_PATH.parts
+_SESSION_FOLDER_PREFIX = "local_"
 _REPORT_SUFFIX = ".md"
 _USAGE = "usage: report_check.py <report.md>..."
 _EXIT_FINDINGS = 1
@@ -63,12 +68,44 @@ class Finding:
 
 
 def is_notes_report(path: str) -> bool:
-    """Whether a path is a Markdown file inside a session folder of the shared notes folder."""
+    """Whether a path is a Markdown file in a project notes folder or a session folder of the app's notes folder."""
     candidate = Path(path).expanduser()
     parts = candidate.parts
-    is_inside_session_folder = _NOTES_DIRECTORY_NAME in parts and len(parts) - parts.index(_NOTES_DIRECTORY_NAME) > 2
+    is_in_notes = _is_inside_app_notes(parts) or _is_inside_project_notes(parts)
 
-    return is_inside_session_folder and candidate.suffix.lower() == _REPORT_SUFFIX
+    return is_in_notes and candidate.suffix.lower() == _REPORT_SUFFIX
+
+
+def is_app_session_folder_file(path: str, home: Path | None = None) -> bool:
+    """Whether a path lies inside a session folder of the desktop app's notes folder, which the app may delete.
+
+    Only the real notes folder under the home folder counts, not a copy of it elsewhere, and only folders named
+    after a session (`local_…`), since the app keeps its bulletin and other top-level files.
+    """
+    root = Path(os.path.normpath((home or Path.home()) / APP_NOTES_PATH))
+    candidate = Path(os.path.normpath(os.path.expanduser(path)))
+
+    try:
+        relative_parts = candidate.relative_to(root).parts
+    except ValueError:
+        return False
+    else:
+        return len(relative_parts) > 1 and relative_parts[0].startswith(_SESSION_FOLDER_PREFIX)
+
+
+def _is_inside_app_notes(parts: tuple[str, ...]) -> bool:
+    """A file inside a folder of the app's notes folder, wherever that folder or a copy of it sits."""
+    return _NOTES_DIRECTORY_NAME in parts and len(parts) - parts.index(_NOTES_DIRECTORY_NAME) > 2
+
+
+def _is_inside_project_notes(parts: tuple[str, ...]) -> bool:
+    """`Documents/session-notes/<project>/…`: a file at the folder's top or in its backup does not count."""
+    width = len(_PROJECT_NOTES_PARTS)
+
+    return any(
+        parts[index : index + width] == _PROJECT_NOTES_PARTS and len(parts) - index > width + 1
+        for index in range(len(parts) - width)
+    )
 
 
 def check_report(text: str) -> list[Finding]:
