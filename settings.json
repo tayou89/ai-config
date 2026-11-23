@@ -45,7 +45,9 @@
       "Bash(python3 ~/.claude/skills/outside-review/run-review.py:*)",
       "Bash(python3 ~/.claude/scripts/choice-shown.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
-      "mcp__ccd_session_mgmt__archive_session"
+      "mcp__ccd_session_mgmt__archive_session",
+      "mcp__ccd_session_mgmt__unarchive_session",
+      "mcp__ccd_sidebar__set_unread"
     ]
   },
   "model": "opus[1m]",
