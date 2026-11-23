@@ -43,13 +43,13 @@ _HOOK_EVENT = "SessionStart"
 _DIFFERENCES_HEADING = (
     "[CONFIG SYNC] This computer and the shared AI configuration repository differ (install.py --check below). "
     "Tell the user once, in one line, in your first reply. Resolve it only when your task is the shared "
-    "configuration; otherwise leave it to such a session (the settings sync rule in CLAUDE.md)."
+    'configuration; otherwise leave it to such a session (`rule-writing` "Changing the shared configuration").'
 )
 _FAILURE_HEADING = (
     "[CONFIG SYNC] The check that compares this computer with the shared AI configuration repository could not run "
     "(details below), so differences would go unnoticed. Tell the user once, in one line, in your first reply. Fix it "
-    "only when your task is the shared configuration; otherwise leave it to such a session (the settings sync rule in "
-    "CLAUDE.md)."
+    "only when your task is the shared configuration; otherwise leave it to such a session "
+    '(`rule-writing` "Changing the shared configuration").'
 )
 
 
