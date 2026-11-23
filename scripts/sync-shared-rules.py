@@ -53,7 +53,7 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, or handle design-tool comments.",
+        "Present or compare alternatives in any answer, ask for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, or handle design-tool comments.",
     ),
     "sessions.md": (
         "session-management",

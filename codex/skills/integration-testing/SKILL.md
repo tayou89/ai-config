@@ -1,15 +1,20 @@
 ---
 name: integration-testing
-description: Run authorized integration or runtime tests with external services, simulators, databases, or brokers; diagnose prerequisites and preserve test evidence.
+description: Run authorized integration or runtime tests with external services, simulators, databases, or brokers; diagnose prerequisites and preserve test evidence; and start or restart applications, servers, simulators, or daemons safely.
 ---
 
-<!-- Adapted from skills/integration-testing/SKILL.md at c5defd3a4f27b077ad685913d5ff840e66f9b228 -->
+<!-- Adapted from skills/integration-testing/SKILL.md at d7fbb8f0730c15f7c829c5756c27777027953c23 -->
 
 # Integration Testing Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.
 
-Apply these rules when running integration/runtime tests against a live or simulated environment.
+Apply these rules when running integration/runtime tests against a live or simulated environment, and the startup rules below whenever you start or restart an application, server, simulator, or daemon.
+
+## Starting Applications
+
+- **Startup failure**: When a process fails to start, comes up partially (some endpoints listening, others not), or behaves inconsistently after a startup attempt, find which component failed and why (env, config, port collision, dependency, code) and fix it before retrying or moving to later steps, never by blind restarts or retry loops. This applies to test environments, dev servers, simulators, daemons, and any multi-process startup.
+- **Production, staging, or live mode**: Never start an application in these modes on a development machine without the user's explicit approval, whatever selects the mode (an environment variable, a command-line option, or a production-only script). Even after approval, first (1) inspect the config and secrets the mode will load and report whether endpoints point at real production infrastructure, and (2) if so, evaluate which active connections it forms on boot (API writes, databases, message brokers, hardware controllers, subscriptions) and re-confirm, since even a few seconds of startup can affect production. Verify in simulation, sandbox, or test modes instead; production-mode startup belongs only on the production host.
 
 ## 1. Verify Infrastructure First (Hard Prereq)
 
