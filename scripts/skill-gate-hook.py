@@ -16,6 +16,13 @@ about a screen. A next-step box with an app action asks to go ahead with a
 step rather than to choose a design, so it is not checked. A choice record
 that cannot be read lets the question through with a note on stderr.
 
+For every agent, whether or not its type is gated, a write that would create
+a new file in a session folder of the desktop app's notes folder is refused
+with the project notes folder to use instead, since the app deletes those
+folders without the Trash (`report-writing` "Notes folders", user decision,
+2026-11-23); edits to files already there pass, and SKILL_GATE=off turns
+this refusal off too.
+
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
 subagent starts without its parent's context, so its own loads count, while a
@@ -43,7 +50,7 @@ from pathlib import Path
 from typing import Any
 
 from motion_values import TextKind, has_in_place_motion, has_motion_text, is_motion_change
-from report_check import is_notes_report
+from report_check import is_app_session_folder_file, is_notes_report
 from shell_command import IN_PLACE_EDITORS, CommandCall, ExpansionLimitError, expand_shell_command
 from skill_gate_records import (
     get_choice_record_path,
@@ -231,6 +238,7 @@ _AGENT_OWNER = "this agent"
 _AGENT_SINCE = "it started (its parent session's loads do not count here)"
 _CHOICE_DENY_REASON = 'A choice question in a session that has loaded `ux-design` needs, before it is asked, a record of what shows each option or of why it is not a choice about a screen (decisions-and-collaboration "Presenting decisions"). Not recorded: {gaps}. Show every option first, then record it with `python3 ~/.claude/scripts/choice-shown.py --question "<the question as asked>" --option "<label>" "<sent file path or URL>"`, one `--option` per option (one board may show several), or with `--not-visual "<why it is not a choice about a screen>"` in place of the options. Asking again without the record is refused again.'
 _UNASKED_GAP = "a box with buttons but no question, which needs its question in `ask` before it can be recorded"
+_NOTES_PLACE_REASON = '`{name}` would be a new file in a session folder of the desktop app\'s notes folder, which the app deletes without the Trash once that session group closes. Write new notes in the project\'s notes folder `~/Documents/session-notes/<project>/` (report-writing "Notes folders"); editing a file already there stays allowed.'
 
 
 @dataclass(frozen=True)
@@ -523,19 +531,24 @@ def _list_language_skills(extension: str) -> list[str]:
 
 def _find_command_requirement(command: str, cwd: str | None) -> Requirement | None:
     """The skills a command line needs; what a script file on disk does when the line runs it is not written here."""
+    calls = _list_line_calls(command, cwd)
+    skills = [skill for call in calls for skill in _list_call_skills(call)]
+    motion_targets = [target for target in (_find_call_motion_target(call, cwd) for call in calls) if target]
+
+    if motion_targets:
+        return _make_motion_requirement(motion_targets[0], skills)
+    else:
+        return _make_requirement(_name_command_target(calls), skills)
+
+
+def _list_line_calls(command: str, cwd: str | None) -> list[CommandCall]:
+    """The calls the command line makes itself, none when it is too large to expand."""
     try:
         expanded = expand_shell_command(command, cwd, get_config_directory())
     except ExpansionLimitError:
-        return None
+        return []
     else:
-        calls = [call for call in expanded if not call.is_from_script_file]
-        skills = [skill for call in calls for skill in _list_call_skills(call)]
-        motion_targets = [target for target in (_find_call_motion_target(call, cwd) for call in calls) if target]
-
-        if motion_targets:
-            return _make_motion_requirement(motion_targets[0], skills)
-        else:
-            return _make_requirement(_name_command_target(calls), skills)
+        return [call for call in expanded if not call.is_from_script_file]
 
 
 def _name_command_target(calls: Sequence[CommandCall]) -> str:
@@ -698,7 +711,9 @@ def _make_requirement(target: str, skills: Iterable[str]) -> Requirement | None:
 
 
 def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
-    reason = _find_deny_reason(hook_input) if _is_gated(hook_input) else None
+    """A new file in an app session folder is refused for every agent, before and apart from the skill checks."""
+    place_reason = _find_notes_place_reason(hook_input)
+    reason = place_reason or (_find_deny_reason(hook_input) if _is_gated(hook_input) else None)
 
     if reason:
         return {
@@ -710,6 +725,36 @@ def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
         }
     else:
         return None
+
+
+def _find_notes_place_reason(hook_input: dict[str, Any]) -> str | None:
+    """The desktop app deletes its session folders, so notes go in the project's notes folder (`report-writing`)."""
+    tool_name = str(hook_input.get(_TOOL_NAME_KEY) or "")
+    tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
+    written = _list_tool_written_files(tool_name, tool_input, hook_input.get(_CWD_KEY))
+    new_files = [path for path in written if is_app_session_folder_file(path) and not os.path.lexists(path)]
+
+    return _NOTES_PLACE_REASON.format(name=os.path.basename(new_files[0])) if new_files else None
+
+
+def _list_tool_written_files(tool_name: str, tool_input: dict[str, Any], cwd: str | None) -> list[str]:
+    file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
+
+    if isinstance(file_path, str) and file_path:
+        return [os.path.expanduser(file_path)]
+    elif tool_name in _SHELL_TOOLS:
+        return _list_command_written_files(str(tool_input.get(_COMMAND_KEY) or ""), cwd)
+    else:
+        return []
+
+
+def _list_command_written_files(command: str, cwd: str | None) -> list[str]:
+    """Files the command line itself writes, relative ones resolved from the folder each call runs in."""
+    return [
+        os.path.join(call.cwd or cwd or "", os.path.expanduser(path))
+        for call in _list_line_calls(command, cwd)
+        for path in call.list_written_files()
+    ]
 
 
 def _find_deny_reason(hook_input: dict[str, Any]) -> str | None:

@@ -65,7 +65,7 @@ SKILL_RULES = {
     ),
     "reports.md": (
         "report-writing",
-        "Write and shape reports, plans, reviews, decision documents, and any other document read later: prose principles, the first screen, current state only, short tables, plain words, an appendix, and the report check. Apply when writing or revising one, or keeping a shared notes folder and its index.",
+        "Write and shape reports, plans, reviews, decision documents, and any other document read later: prose principles, the first screen, current state only, short tables, plain words, an appendix, and the report check. Apply when writing or revising one, or keeping a notes folder and its index.",
     ),
     "rule-writing.md": (
         "rule-writing",
