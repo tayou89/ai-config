@@ -8,8 +8,8 @@ Steps for a Codex run the user asked for or approved for work other than a revie
 - A project's own Codex runs, such as a builder that drafts design options, are reserved the same way, with the folder they run in.
 - For code with many hidden edge cases (parsers, concurrency, security, hooks and guards, code that can lose data or money), Claude first writes the cases it must handle and the tests that prove them, names those tests in the brief, and reviews Codex's result at the strongest level; the independent reviews the rules require still run (user decision, 2026-11-18).
 - Close every entry you open: an entry left `running` expires after 12 hours and one never started after 24, but until then it holds its share.
-- For implementation, create the worktree and branch the way the repository's recorded Git workflow names them; in a repository without that workflow, use `git worktree add -b codex/<topic> ../<repository>-codex-<topic>`. Record the base commit in the brief. For research, create a new empty folder for the run, such as `<notes folder>/codex-<topic>/`.
-- Write the brief from a template below to the session's shared notes folder, or to `claude-plans/codex/` in the project root, as `codex-brief-<topic>.md`.
+- For implementation, create the worktree and branch the way the repository's recorded Git workflow names them; in a repository without that workflow, use `git worktree add -b codex/<topic> ../<repository>-codex-<topic>`. Record the base commit in the brief. For research, create a new empty folder for the run, such as `<project notes folder>/codex-<topic>/` (`report-writing` "Notes folders").
+- Write the brief from a template below to the project's notes folder as `codex-brief-<topic>.md`.
 
 ## 2. Run
 
