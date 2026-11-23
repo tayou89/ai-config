@@ -1307,7 +1307,6 @@ test('past its end the cache goes on from a summary made while idle, and any oth
 const START = Date.parse('2026-11-04T07:00:00Z')
 const HOUR = 60 * 60_000
 const ESTIMATE = 'mcp__usage-panel__work_estimate'
-const COMBINED = { options: { codexLine: 'combined' } }
 const REPLY_USAGE = {
   model: 'claude-opus-5-5',
   input_tokens: 2,
@@ -2024,7 +2023,7 @@ test('a run a script starts later takes the estimate given for it, not the last 
   expect(minutes).toEqual({ 'rollout-first.jsonl': 20, 'rollout-second.jsonl': 7 })
 })
 
-test('the combined line still shows a run at work beside an unknown one', COMBINED, async ($, on) => {
+test('the line still shows a run at work beside an unknown one', async ($, on) => {
   const output: CodexLocalOutput = { working: [], running: 0 }
   const clock = engine(on, [], undefined, [], true, [], output)
 
@@ -2037,102 +2036,86 @@ test('the combined line still shows a run at work beside an unknown one', COMBIN
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
   const text = (await ui.find({ key: 'codex' }))?.text ?? ''
 
-  expect(text).toContain('실행 2개')
   expect(text).toContain('진행')
   expect(text).toContain('확인 불가 포함')
   expect(text).not.toContain('✓')
   await ui.unmount()
 })
 
-for (const mode of ['latest-due', 'combined'] as const) {
-  const options = { options: { codexLine: mode } }
+test('the line shows the run due last and counts the others in every run state', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
 
-  test(`the ${mode} line renders every run state on desktop and terminal`, options, async ($, on) => {
-    const output: CodexLocalOutput = { working: [], running: 0 }
-    const clock = engine(on, [], undefined, [], true, [], output)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const first = codexRecord('a', clock.now(), { read: 1000 })
+  const second = codexRecord('b', clock.now(), { read: 2000 })
 
-    await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
-    await clock.advance(1)
-    const first = codexRecord('a', clock.now(), { read: 1000 })
-    const second = codexRecord('b', clock.now(), { read: 2000 })
+  await publishCodex(output, [first, second], clock)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10, reservation: first.reservation })
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 20, reservation: second.reservation })
+  const scenarios: { name: string; records: CodexRecord[]; expected: string; isDone: boolean }[] = [
+    { name: 'running', records: [first, second], expected: '외 1개', isDone: false },
+    {
+      name: 'partly done',
+      records: [{ ...first, state: 'done', finishedAt: START + 60_000 }, second],
+      expected: 'model-b',
+      isDone: false,
+    },
+    {
+      name: 'all done',
+      records: [
+        { ...first, state: 'done', finishedAt: START + 60_000 },
+        { ...second, state: 'done', finishedAt: START + 120_000 },
+      ],
+      expected: '16:02 끝',
+      isDone: true,
+    },
+    {
+      name: 'no estimate',
+      records: [first, second, codexRecord('unestimated', clock.now())],
+      expected: '예정 모름 포함',
+      isDone: false,
+    },
+    {
+      name: 'stopped',
+      records: [
+        { ...first, state: 'stopped' },
+        { ...second, state: 'stopped' },
+        codexRecord('unestimated', clock.now(), { state: 'stopped' }),
+      ],
+      expected: '멈춤',
+      isDone: false,
+    },
+    {
+      name: 'unknown',
+      records: [
+        { ...first, state: 'unknown' },
+        { ...second, state: 'unknown' },
+        codexRecord('unestimated', clock.now(), { state: 'unknown' }),
+      ],
+      expected: '확인 불가',
+      isDone: false,
+    },
+  ]
 
-    await publishCodex(output, [first, second], clock)
-    await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10, reservation: first.reservation })
-    await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 20, reservation: second.reservation })
-    const scenarios: { name: string; records: CodexRecord[]; expected: string; isDone: boolean }[] = [
-      {
-        name: 'running',
-        records: [first, second],
-        expected: mode === 'combined' ? '실행 2개' : '외 1개',
-        isDone: false,
-      },
-      {
-        name: 'partly done',
-        records: [{ ...first, state: 'done', finishedAt: START + 60_000 }, second],
-        expected: mode === 'combined' ? '실행 1개' : 'model-b',
-        isDone: false,
-      },
-      {
-        name: 'all done',
-        records: [
-          { ...first, state: 'done', finishedAt: START + 60_000 },
-          { ...second, state: 'done', finishedAt: START + 120_000 },
-        ],
-        expected: '16:02 끝',
-        isDone: true,
-      },
-      {
-        name: 'no estimate',
-        records: [first, second, codexRecord('unestimated', clock.now())],
-        expected: '예정 모름 포함',
-        isDone: false,
-      },
-      {
-        name: 'stopped',
-        records: [
-          { ...first, state: 'stopped' },
-          { ...second, state: 'stopped' },
-          codexRecord('unestimated', clock.now(), { state: 'stopped' }),
-        ],
-        expected: '멈춤',
-        isDone: false,
-      },
-      {
-        name: 'unknown',
-        records: [
-          { ...first, state: 'unknown' },
-          { ...second, state: 'unknown' },
-          codexRecord('unestimated', clock.now(), { state: 'unknown' }),
-        ],
-        expected: '확인 불가',
-        isDone: false,
-      },
-    ]
+  for (const scenario of scenarios) {
+    await publishCodex(output, scenario.records, clock)
+    for (const surface of ['desktop', 'terminal'] as const) {
+      const props = { ...ABOVE.props, bodyColumns: 44 }
+      const ui = await $.ui.mount({ ...ABOVE, props, surface })
+      const line = (await ui.find({ key: 'codex' }))?.text ?? ''
 
-    for (const scenario of scenarios) {
-      await publishCodex(output, scenario.records, clock)
-      for (const surface of ['desktop', 'terminal'] as const) {
-        const props = { ...ABOVE.props, bodyColumns: 44 }
-        const ui = await $.ui.mount({ ...ABOVE, props, surface })
-        const line = (await ui.find({ key: 'codex' }))?.text ?? ''
-
-        expect(line).toContain(scenario.expected)
-        expect(line.includes('✓')).toBe(scenario.isDone)
-        if (mode === 'combined') {
-          expect(await ui.find({ key: 'codex-setting' })).toBeUndefined()
-          if (scenario.name === 'running') {
-            expect(line).toContain('3K')
-            expect(line).toContain('16:20')
-          }
-        } else if (scenario.name === 'running') {
-          expect(line).toContain('model-b high')
-          expect(line).toContain('2K')
-        }
-        await ui.unmount()
+      expect(line).toContain(scenario.expected)
+      expect(line.includes('✓')).toBe(scenario.isDone)
+      if (scenario.name === 'running') {
+        expect(line).toContain('model-b high')
+        expect(line).toContain('2K')
       }
+      await ui.unmount()
     }
-  })
-}
+  }
+})
 
 test('recent old stored runs relink by unique owned start or become unknown while old history stays', async ($, on) => {
   const output: CodexLocalOutput = { working: [], running: 0 }
