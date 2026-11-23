@@ -2,5 +2,14 @@
   "name": "usage-panel",
   "version": "0.1.0",
   "description": "사용 한도, 답변별 토큰, 최근 7일 사용 기록을 채팅 옆 패널에 보여 줍니다",
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "codexLine": {
+      "type": "string",
+      "title": "Codex 줄 모양",
+      "description": "여러 실행 중 마지막 예정 실행을 보거나 한 줄로 합쳐 봅니다.",
+      "options": ["latest-due", "combined"],
+      "default": "latest-due"
+    }
+  }
 }
