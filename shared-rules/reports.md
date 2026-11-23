@@ -55,6 +55,7 @@ Apply these principles when writing or revising documents, plans, reports, and e
 - Keep tables to six columns and cells to a few words (about 40 characters in the opening, 100 in the body), and explain each option's reasons in a paragraph below the table: the note app's reading column is about 700 pixels wide, so a long cell turns one row into dozens of lines (user decision, 2026-11-16; measured 2026-11-13).
 - Prefer plain words in the user's language to English terms and acronyms; write a needed term in the user's language with the original once in parentheses, and quote commands, file names, and rule text only where the reader uses them (user decision, 2026-11-16).
 - Move what the reader only checks (logs, timelines, measurements, long source lists, request transcripts, history) into an appendix at the end, as folded callouts (`> [!note]- title`) (user decision, 2026-11-16).
+- When writing or revising a Markdown report in a project folder the knowledge vault reads (its subfolders included), read `knowledge-vault` and put a `## 보관함에 올릴 교훈` section just before the appendix, or at the end when there is none, whatever the report's kind: lessons in the form that skill gives, or `없음` with the reason, never an empty section (user decision, 2026-11-23).
 - Head the appendix "부록" or "Appendix" and the summary section, if any, with "요약", "결론", or "Summary", since the check finds them by those words.
 
 ## Checks
