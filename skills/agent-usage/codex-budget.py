@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Keep Codex's weekly share for reviews first and hand the rest to implementation and research runs.
+"""Keep Codex's weekly share for reviews, and let a run the user approves for other work take only what they leave.
 
     codex-budget.py status
     codex-budget.py reserve --kind implementation --percent 5 --topic T --worktree PATH --session ID
@@ -10,8 +10,13 @@
 `status` and `reserve` print one JSON line. Nothing here spends Codex usage: the quota is read
 through `outside-review/codex-limits.py`, and the review use per day comes from the Codex session
 logs. Reservations live in one ledger under a file lock, so two sessions cannot hand out the same
-share (user decision, 2026-11-17). Exit codes: 0 done, 2 the quota could not be read, 3 the
-reservation does not fit, 4 unknown reservation.
+share (user decision, 2026-11-17). Codex runs only reviews unless the user approves another run,
+so `status` reports the shares and Claude's projection but no advice to hand work over (user
+decision, 2026-11-23). `available` is what a non-review run may take after the expected review
+use, so a review can still be reserved while it is negative. `window_use_percent` splits Codex's
+reported weekly percent by each purpose's share of the window's token use, and `claude_projected`
+counts weekday daytime only. Exit codes: 0 done, 2 the quota could not be read, 3 the reservation
+does not fit, 4 unknown reservation.
 
 Each run's brief starts with `Budget reservation: <id>`, and its use counts to that reservation's
 kind (user decision, 2026-11-19). A helper run such as Codex's command-approval check follows its
@@ -79,6 +84,8 @@ _RESERVATION_LINE = re.compile(r"Budget reservation:\s*(\d{8}-[0-9a-f]{8})")
 _SETUP_MESSAGE_STARTS = ("<", "# AGENTS.md instructions")
 _LABEL_KINDS = (KIND_IMPLEMENTATION, KIND_RESEARCH, KIND_REVIEW, KIND_BUILDER)
 _SATURDAY = 5
+_REFUSAL_REASON = "not enough weekly share left for this reservation"
+_PURPOSE_UNKNOWN = "unknown"
 
 
 @dataclass
@@ -234,6 +241,30 @@ def resolve_purposes(
     return purposes
 
 
+def split_window_use(
+    window: list[UsageEvent],
+    purposes: dict[str, Purpose],
+    codex_percent: float,
+) -> dict[str, float]:
+    """Split Codex's reported weekly percent by each purpose's share of the window's token use, as an estimate.
+
+    A run with no known purpose is `unknown`. Use that these logs miss, such as another computer's, is split
+    along with the rest.
+    """
+    weights: dict[str, float] = defaultdict(float)
+
+    for event in window:
+        purpose = purposes.get(event.thread_id)
+
+        weights[purpose.kind if purpose is not None else _PURPOSE_UNKNOWN] += event.weight
+    total = sum(weights.values())
+
+    if total > 0:
+        return {kind: round(codex_percent * weight / total, 1) for kind, weight in sorted(weights.items())}
+    else:
+        return {}
+
+
 def measure_daily_reviews(
     events: list[UsageEvent],
     implementation_folders: list[str],
@@ -340,23 +371,12 @@ def is_expired(reservation: Reservation, now: datetime) -> bool:
         return reservation.state == STATE_RESERVED and now - last_change > timedelta(hours=RESERVED_EXPIRY_HOURS)
 
 
-def decide_verdict(available: float, claude_blocked: bool, claude_projected: float | None) -> tuple[str, str]:
-    verdict = "delegate" if available > 0 else "hold"
-
-    if claude_blocked or (claude_projected is not None and claude_projected >= 100):
-        return verdict, "offload-claude"
-    elif claude_projected is None:
-        return verdict, "unknown"
-    else:
-        return verdict, "extra-work"
-
-
 def run_status(arguments: argparse.Namespace) -> int:
     now = _now_local()
     codex = _read_codex_limits()
 
     if codex.error:
-        print(json.dumps({"verdict": "error", "error": codex.error}))
+        print(json.dumps({"error": codex.error}))
         return EXIT_UNREADABLE
     else:
         print(json.dumps(_load_status(arguments, now, codex).report, ensure_ascii=False))
@@ -392,7 +412,7 @@ def run_reserve(arguments: argparse.Namespace) -> int:
                 print(json.dumps(answer))
                 return 0
             else:
-                refusal = {"reserved": False, "reason": "does not fit the spare share", "status": status.report}
+                refusal = {"reserved": False, "reason": _REFUSAL_REASON, "status": status.report}
 
                 print(json.dumps(refusal, ensure_ascii=False))
                 return EXIT_REFUSED
@@ -817,15 +837,11 @@ def _compute_status(
     open_total = sum(unfilled.values())
     available = 100 - codex_percent - open_total - expected - swing
     claude_projected = _project_claude(claude, now)
-    verdict, priority = decide_verdict(available, claude_blocked, claude_projected)
     current_window = (group_windows(events) or [[]])[-1]
     current_window_weight = sum(event.weight for event in current_window)
     unknown_weight = sum(event.weight for event in current_window if event.thread_id not in purposes)
     report: dict[str, object] = {
-        "verdict": verdict,
-        "priority": priority,
         "available": round(available, 1),
-        "pace_today": round(available / max(1.0, workdays), 1),
         "codex_percent": codex_percent,
         "codex_resets": codex_resets.isoformat(timespec="minutes"),
         "open_reserved": round(open_total, 1),
@@ -837,6 +853,7 @@ def _compute_status(
         "percent_per_million": round(percent_per_weight * 1e6, 3),
         "unattributed_percent": round(max(0.0, codex_percent - current_window_weight * percent_per_weight), 1),
         "purpose_unknown_percent": round(unknown_weight * percent_per_weight, 1),
+        "window_use_percent": split_window_use(current_window, purposes, codex_percent),
         "claude_percent": claude.percent,
         "claude_projected": None if claude_projected is None else round(claude_projected),
         "claude_blocked": claude_blocked,

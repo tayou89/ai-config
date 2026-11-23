@@ -43,10 +43,6 @@ When a plan adopts a new language, framework, or external service, or enters a s
 
 When a plan gives an application a production, staging, or live mode, select that mode only on the command line that starts it: a mode or environment option (`--mode live`, `--env production`) or an environment variable set on the command itself (`APP_MODE=live <command>`), with the safe mode as the default. Never let a config-file or `.env` value alone turn it on, and do not use a separate confirmation flag as the switch. Command guards (the shell guard hook, which the production mode principle in `work-principles` relies on) see only the command line and recognize mode words such as `production`, `staging`, and `live` in mode and environment options and variables; tested 2026-11-09, the guard asked before `--mode live` and `<NAME>_MODE=live` but let `--confirm-live` and a config-file `mode = "live"` run without asking.
 
-## 3d. Codex Work
-
-While the `agent-usage` budget verdict is `delegate`, mark each step's actual work for Codex with its model, estimated share, and the files or sources it may touch, unless an exception in `agent-usage` section 14 keeps it with Claude, which the step names (user decision, 2026-11-18).
-
 ## 4. Pattern Alignment Check
 
 For structural decisions (new file layout, where a new type lives, module split, naming), grep 2-3 analogous cases in the same codebase. Match the dominant local pattern, or justify the deviation in the plan. Skill rules don't override local conventions. If no precedent exists, flag it.

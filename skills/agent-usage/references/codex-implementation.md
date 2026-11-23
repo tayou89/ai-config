@@ -1,11 +1,12 @@
 # Codex Work Runs
 
-Steps for work that `agent-usage` section 14 hands to Codex: implementation in a worktree, and research or record collection in an empty folder.
+Steps for a Codex run the user asked for or approved for work other than a review (`agent-usage` section 14): implementation in a worktree, and research or record collection in an empty folder.
 
 ## 1. Prepare
 
-- The run is approved as section 1 says. Reserve its share before starting: `python3 ~/.claude/skills/agent-usage/codex-budget.py reserve --kind implementation --percent <estimate> --topic <topic> --worktree <path> --session ${CLAUDE_SESSION_ID}`, or `--kind research --folder <empty folder>` for research and record collection. Estimate from earlier closed entries of the same kind in `~/.claude/codex-budget/ledger.jsonl` (their `actual_percent`); with none, use 1 for a small exact edit, 2 for a record count, 3 for web research, and 5 for a feature-sized bundle. Put the id it prints on the brief's first line as `Budget reservation: <id>`, so the budget tool counts the run's use to it; a non-review reservation also names its folder, for runs whose brief lacks the line. If `python3 ~/.claude/skills/outside-review/codex-limits.py` shows a five-hour window 90% used or more, wait for its reset rather than start.
+- The user asked for or approved this Codex run in words, as `agent-usage` section 14 says. Reserve its share before starting: `python3 ~/.claude/skills/agent-usage/codex-budget.py reserve --kind implementation --percent <estimate> --topic <topic> --worktree <path> --session ${CLAUDE_SESSION_ID}`, or `--kind research --folder <empty folder>` for research and record collection. Estimate from earlier closed entries of the same kind in `~/.claude/codex-budget/ledger.jsonl` (their `actual_percent`); with none, use 1 for a small exact edit, 2 for a record count, 3 for web research, and 5 for a feature-sized bundle. Put the id it prints on the brief's first line as `Budget reservation: <id>`, so the budget tool counts the run's use to it and not as review use (user decision, 2026-11-19); a non-review reservation also names its folder, for runs whose brief lacks the line. Start only after the reservation succeeds: when it is refused, the run would take share the reviews need, and when the quota cannot be read, nothing shows it fits, so tell the user the refusal or the read error with Codex's reset time where known, and do the work yourself unless they choose to wait. If `python3 ~/.claude/skills/outside-review/codex-limits.py` shows a five-hour window 90% used or more, wait for its reset rather than start.
 - A project's own Codex runs, such as a builder that drafts design options, are reserved the same way, with the folder they run in.
+- For code with many hidden edge cases (parsers, concurrency, security, hooks and guards, code that can lose data or money), Claude first writes the cases it must handle and the tests that prove them, names those tests in the brief, and reviews Codex's result at the strongest level; the independent reviews the rules require still run (user decision, 2026-11-18).
 - Close every entry you open: an entry left `running` expires after 12 hours and one never started after 24, but until then it holds its share.
 - For implementation, create the worktree and branch the way the repository's recorded Git workflow names them; in a repository without that workflow, use `git worktree add -b codex/<topic> ../<repository>-codex-<topic>`. Record the base commit in the brief. For research, create a new empty folder for the run, such as `<notes folder>/codex-<topic>/`.
 - Write the brief from a template below to the session's shared notes folder, or to `claude-plans/codex/` in the project root, as `codex-brief-<topic>.md`.
@@ -60,7 +61,7 @@ You implement one bundle that Claude planned and will review. Work only in `<wor
 <files to change or create. If the work needs any other file, stop before writing it and say why in your report.>
 
 ## Tests to add
-<for code with many hidden edge cases: the cases Claude wrote, one test each>
+<for code with many hidden edge cases: the tests Claude already wrote, by path; they must pass unchanged>
 
 ## Rules
 Read these before writing: <skills under ~/.codex/skills/ and project instructions>.

@@ -1,4 +1,4 @@
-"""Tests for the Codex budget check that keeps reviews first and reserves the spare share."""
+"""Tests for the Codex budget check that keeps Codex's share for reviews and reserves each run's share."""
 
 from __future__ import annotations
 
@@ -391,13 +391,47 @@ class PurposeTest(unittest.TestCase):
         self.assertAlmostEqual(daily.days[moment(16, 0).date()], 0.0)
 
 
-class VerdictTest(unittest.TestCase):
-    def test_spare_share_is_used_whatever_claude_expects(self) -> None:
-        self.assertEqual(budget.decide_verdict(10.0, False, 95.0), ("delegate", "extra-work"))
-        self.assertEqual(budget.decide_verdict(10.0, False, 120.0), ("delegate", "offload-claude"))
-        self.assertEqual(budget.decide_verdict(10.0, True, None), ("delegate", "offload-claude"))
-        self.assertEqual(budget.decide_verdict(10.0, False, None), ("delegate", "unknown"))
-        self.assertEqual(budget.decide_verdict(0.0, False, 80.0), ("hold", "extra-work"))
+class LimitsTest(unittest.TestCase):
+    def test_status_reports_the_shares_and_no_advice_to_hand_work_over(self) -> None:
+        now = moment(17, 12)
+        claude = budget.ClaudeLimits(40.0, moment(22, 20))
+
+        for codex_percent in (10.0, 99.0):
+            with self.subTest(codex_percent=codex_percent):
+                status = budget._compute_status(codex_percent, moment(18, 9), claude, [], {}, now, {})
+
+                self.assertFalse({"verdict", "priority", "pace_today"} & status.report.keys())
+                self.assertEqual(status.report["available"], status.available)
+                self.assertIsNotNone(status.report["claude_projected"])
+                self.assertIn("review_per_weekday", status.report)
+                self.assertEqual(status.report["window_use_percent"], {})
+
+    def test_window_use_is_split_by_purpose_with_unknown_apart(self) -> None:
+        window = [
+            make_usage(10, 2e6, "/repo", "review-run"),
+            make_usage(11, 1e6, WORKTREE, "build-run"),
+            make_usage(12, 5e5, "/repo", "stray-run"),
+        ]
+        purposes = {
+            "review-run": budget.Purpose(budget.KIND_REVIEW, REVIEW_ID),
+            "build-run": budget.Purpose(budget.KIND_IMPLEMENTATION, IMPLEMENTATION_ID),
+        }
+
+        self.assertEqual(
+            budget.split_window_use(window, purposes, 35.0),
+            {"implementation": 10.0, "review": 20.0, "unknown": 5.0},
+        )
+        self.assertEqual(budget.split_window_use([], purposes, 35.0), {})
+
+    def test_unreadable_quota_prints_only_the_error(self) -> None:
+        output = io.StringIO()
+        unreadable = budget.CodexLimits(0.0, None, "down")
+        arguments = argparse.Namespace(claude_percent=None, claude_resets=None)
+
+        with mock.patch.object(budget, "_read_codex_limits", lambda: unreadable), redirect_stdout(output):
+            code = budget.run_status(arguments)
+        self.assertEqual(code, budget.EXIT_UNREADABLE)
+        self.assertEqual(json.loads(output.getvalue()), {"error": "down"})
 
     def test_codex_errors_are_reported(self) -> None:
         self.assertTrue(budget.parse_codex_limits({"error": "down"}).error)
@@ -566,6 +600,16 @@ class LedgerTest(unittest.TestCase):
 
         self.assertEqual(self.reserve("review", 3.0)[0], 0)
         self.assertEqual(self.reserve("review", 3.0)[0], budget.EXIT_REFUSED)
+
+    def test_review_fits_while_the_expected_reviews_leave_nothing_for_other_runs(self) -> None:
+        with mock.patch.object(budget, "compute_review_reserve", lambda *unused: (30.0, 5.0, 1.0)):
+            refused_code, refused = self.reserve("implementation", 1.0)
+            review_code, review = self.reserve("review", 3.0)
+
+        self.assertEqual(refused_code, budget.EXIT_REFUSED)
+        self.assertEqual(refused["reason"], "not enough weekly share left for this reservation")
+        self.assertEqual(review_code, 0)
+        self.assertLess(float(str(review["available_before"])), 0)
 
     def test_unstarted_reservations_expire(self) -> None:
         old = datetime.now(timezone.utc) - timedelta(hours=budget.RESERVED_EXPIRY_HOURS + 1)
