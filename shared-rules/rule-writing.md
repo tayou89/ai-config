@@ -29,7 +29,10 @@ Apply before adding, changing, moving, or removing a rule, skill, hook, or memor
 
 ## Size
 
-- The repository's commit check measures always-loaded rules in bytes and stops a commit over budget; when it does, make room by removing or moving text rather than raising the budget, unless the user decides otherwise.
+- The repository's commit check compares each always-loaded total with its hard budget and with the approved size recorded in `always-loaded-sizes.json`; record every increase or decrease in the same commit as the rule change, listing the record with the rule files in that commit (user decision, 2026-11-23).
+- Include the record change in the user's review of the rule text: before recording an increase, show the old and new totals, the bytes added, and why each added line must load in every session. Running `python3 scripts/check-rule-size.py --record` writes the measured totals and is not itself approval; a decrease needs no approval beyond the reviewed text.
+- To bring the base into a task branch, merge it with `git merge --no-commit` so the merge waits, resolve rule conflicts first, keeping both sides' approved record entries, regenerate the copies, check the merged text against the approved changes, have only new growth or changed text reviewed, then record the totals, `git add` the record and the copies, and commit the merge with the wrapper's `--no-stage` and no file list. When the base only fast-forwards the branch, commit the record change on its own. Restore a broken record from the committed versions on both sides rather than rewriting it from the current sizes.
+- Raise a hard budget only when the user decides so, and revert rules together with their size record.
 - Keep a skill under 500 lines and put its most important rules first: after a compaction only the first part of each loaded skill (about 20,000 characters) is restored. Move long examples and rarely needed procedures into a reference file one level deep that the skill names.
 
 ## Changing the shared configuration
