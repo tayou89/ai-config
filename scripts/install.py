@@ -113,6 +113,7 @@ RUNTIME_SCRIPTS = (
     "recommendation-change-hook.py",
     "report-check-hook.py",
     "report_check.py",
+    "session-notes-hook.py",
     "motion_values.py",
     "skill_gate_records.py",
     "choice-shown.py",
