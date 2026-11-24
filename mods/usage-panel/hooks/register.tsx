@@ -2216,30 +2216,6 @@ function shownCodexWork(list: readonly Work[], now: number): Work | undefined {
     closed.sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))[0] ?? codexWorks.at(-1)
 }
 
-function combinedCodexWork(list: readonly Work[], shown: Work, now: number): Work {
-  const open = list.filter(w => isCodexWorkOpen(w, now))
-  const estimates = open.flatMap(w => w.estimate ? [w.estimate] : [])
-  const estimate = estimates.sort((a, b) => b.dueAt - a.dueAt)[0]
-  const isAnyWorking = open.some(isCodexWorkActive)
-  // Running wins over unknown: the line says a run is at work while any is.
-  const state = isAnyWorking ? 'running' : open.some(w => w.state === 'unknown') ? 'unknown' : shown.state
-
-  if (open.length > 0) {
-    return {
-      ...shown,
-      estimate,
-      state,
-      finishedAt: undefined,
-      tokens: open.reduce((sum, w) => sum + w.tokens, 0),
-      weight: open.reduce((sum, w) => sum + w.weight, 0),
-      steps: open.reduce((sum, w) => sum + w.steps, 0),
-      expected: undefined,
-    }
-  } else {
-    return shown
-  }
-}
-
 function runningClaudeWork(list: readonly Work[]): Work | undefined {
   return [...list].reverse().find(w => w.maker === 'claude' && w.finishedAt === undefined)
 }
@@ -2825,17 +2801,12 @@ function percentParts(actual: WorkLoad, expected: WorkLoad | undefined): WorkPar
 }
 
 // A work's pieces as its usage line draws them, each after its own mark.
-function workPieces(work: Work, pace: WorkPace, now: number, offset: number, isCombined = false): WorkPieces {
+function workPieces(work: Work, pace: WorkPace, now: number, offset: number): WorkPieces {
   const actual = actualLoad(work, pace)
-  const expected = isCombined || isCodexWorkUncertain(work)
-    ? undefined
-    : work.expected ?? expectedLoad(work, pace)
-  const time = isCombined && isCodexWorkActive(work) && work.estimate
-    ? [{ key: 'due', text: `마지막 예정 ${local(work.estimate.dueAt, offset).hm}` }]
-    : timeParts(work, now, offset)
+  const expected = isCodexWorkUncertain(work) ? undefined : work.expected ?? expectedLoad(work, pace)
 
   return {
-    time,
+    time: timeParts(work, now, offset),
     tokens: tokenParts(work, actual, expected),
     percent: percentParts(actual, expected),
   }
@@ -2891,7 +2862,7 @@ async function registerEstimateTool($: EngineInterface): Promise<void> {
   }
 }
 
-export const register: Register = (on, options) => {
+export const register: Register = on => {
   // Set by session.start, which runs again on every reload.
   let recounter: (() => Promise<void>) | undefined
   let relocater: (() => Promise<void>) | undefined
@@ -3453,12 +3424,11 @@ export const register: Register = (on, options) => {
       claude: workPace(pastWorks, pastSteps, 'claude'),
       codex: workPace(pastWorks, pastSteps, 'codex'),
     }
-    const workBox = (maker: WorkMaker, work: Work, isAllDone?: boolean, isCombined = false) => {
-      const pieces = workPieces(work, paces[maker], now, offset, isCombined)
+    const workBox = (maker: WorkMaker, work: Work, isAllDone?: boolean) => {
+      const pieces = workPieces(work, paces[maker], now, offset)
       const hasShare = pieces.percent.length > 0
       const isDone = isAllDone ?? work.finishedAt !== undefined
-      const isWorking = work.state === 'running' || work.state === 'starting' ||
-        (maker === 'claude' && work.finishedAt === undefined)
+      const isWorking = isCodexWorkActive(work) || (maker === 'claude' && work.finishedAt === undefined)
 
       return (
         <Box key={`work-${maker}`} flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
@@ -3656,27 +3626,22 @@ export const register: Register = (on, options) => {
       })
     }
 
-    const codexWork = shownCodexWork(ownWorks, now)
+    // The run due last stands for the others, which the line only counts.
+    const shown = shownCodexWork(ownWorks, now)
     const openCodexWorks = ownWorks.filter(w => isCodexWorkOpen(w, now))
     const activeCodexWorks = openCodexWorks.filter(isCodexWorkActive)
-    const isCombined = options.codexLine === 'combined'
-    const isAllCodexDone = openCodexWorks.length === 0 && codexWork?.state !== 'stopped' &&
-      codexWork?.state !== 'unknown'
-    const shown = codexWork && isCombined ? combinedCodexWork(ownWorks, codexWork, now) : codexWork
+    const isAllCodexDone = openCodexWorks.length === 0 && shown?.state !== 'stopped' && shown?.state !== 'unknown'
     // At the end of the line, as the app puts the model under the prompt: the
     // setting of the run at work, or with none at work, the setting the next
     // run takes, greyed with its time once old.
-    const workSetting = codexWork ? runSetting(codexWork) : undefined
-    const codexSetting = isCombined && codexWork ? undefined : codexWork ? workSetting : codexState.configured
+    const workSetting = shown ? runSetting(shown) : undefined
+    const codexSetting = shown ? workSetting : codexState.configured
     const isCodexSettingOld = workSetting === undefined && isReadingOld(codexState.configuredAt, now)
     const codexSettingAsOf = codexState.configuredAt === undefined ? '' : local(codexState.configuredAt, offset).hm
     const codexWorkItem = shown ? (
       <Box key="codex-summary" flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs">
-        {isCombined && openCodexWorks.length > 0 ? (
-          <Text size="caption">{`실행 ${openCodexWorks.length}개`}</Text>
-        ) : null}
-        {workBox('codex', shown, isAllCodexDone, isCombined)}
-        {!isCombined && activeCodexWorks.length > 1 ? (
+        {workBox('codex', shown, isAllCodexDone)}
+        {activeCodexWorks.length > 1 ? (
           <Text size="caption">{` 외 ${activeCodexWorks.length - 1}개`}</Text>
         ) : null}
         {shown.state !== 'unknown' && openCodexWorks.some(w => w.state === 'unknown') ? (
