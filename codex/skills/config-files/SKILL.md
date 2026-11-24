@@ -4,6 +4,9 @@ description: Design or refactor application configuration modules, environment f
 ---
 
 <!-- Adapted from skills/config-files/SKILL.md at 695374c3b7dd58721a15fbd54e191ca6c9793aa2 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line only: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals"). The rules are otherwise the same.
+-->
 
 # Config & Env File Rules
 

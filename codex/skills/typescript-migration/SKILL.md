@@ -3,7 +3,11 @@ name: typescript-migration
 description: Preserve runtime behavior while converting JavaScript to TypeScript; use only for JS-to-TS migration.
 ---
 
-<!-- Adapted from skills/typescript-migration/SKILL.md at a364ddfbf2465906ff86a4fb1c16965847c0a4ce -->
+<!-- Adapted from skills/typescript-migration/SKILL.md at ae002706bc1ffa97a0ad8f1b99f46a695a99cb01 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
+- "Library Callback Undeclared Variables" is worded for Codex but says the same as the Claude text: a library cannot add a variable to a callback's own scope, so find the real runtime source (codex/MIGRATION.md, "Clarified Technical Assumptions").
+-->
 
 # JS → TS Conversion Rules
 
@@ -19,7 +23,7 @@ Never convert `this.xxx = ...` instance properties to local variables (`const xx
 
 **Before conversion, always grep for external property access:**
 ```bash
-rg "\.<member-name>" <source-and-consumer-directories>
+grep -rn "\.<property>" <consumer directories>
 ```
 
 ## Value Preservation

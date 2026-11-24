@@ -4,6 +4,12 @@ description: Apply personal coding conventions when writing or editing code, inc
 ---
 
 <!-- Adapted from skills/code-style/SKILL.md at 9f47f5b08216923702bbac732a9c16032d7695dc, skills/code-style/references/examples-and-procedures.md at cd1632743deb04a0cd4b9bff3e7c604d5d133787 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line, and the scope paragraph that limits syntax rules to languages that have them and leaves unrelated code alone: Codex permissions and codex/MIGRATION.md, "Clarified Technical Assumptions".
+- One file holds the rules JavaScript and TypeScript share and the reference file's examples and class member order. History: Claude split them out on 2026-11-12 to fit how much of a skill Claude Code restores after context compaction. Kept in this audit: whether Codex cuts long skills the same way is not checked, and the content is the same wherever it sits.- "File Top Structure" makes type aliases and interfaces one section, "Direct Method Reference for Callbacks" keeps receiver binding, and "Await Only Thenables" keeps intentional background work: codex/MIGRATION.md, "Clarified Technical Assumptions".
+- "Avoid Redundant State Checks" allows only value-returning early returns, which "No Early Void Return / Guard Throw" requires.
+- "Post-Change Verification" uses the linter already installed and reuses an existing authorization for an output build: codex/MIGRATION.md, "Clarified Technical Assumptions" and "Repeated plan/build/commit approvals".
+-->
 
 # Coding Style Rules
 
@@ -11,16 +17,34 @@ Follow the current user request, applicable project instructions, and Codex perm
 
 Apply these conventions to implementation code and relevant code examples in plans or explanations. Syntax-specific rules (braces, strict equality, imports, class access, and TypeScript types) apply only to languages that support them; use the target language and project conventions elsewhere. For `.py` files the python skill overrides these conventions where they conflict. Do not rewrite unrelated existing code solely to impose this style. During type-only migration, preserve runtime behavior and defer cosmetic refactoring.
 
-## Design and Ownership
+## Design-First Proposal
 
-- Before structural changes, search for 2–3 analogous local patterns and check normal completion, error, cancellation, disposal, and repeated calls. Preserve ownership, lifecycle symmetry, idempotency, and dependency direction.
-- Compare at least two viable designs for a substantive change, using the code-plan skill for deeper structural alternatives, and do not label necessary separation or existing patterns as over-engineering.
-- Fix incorrect types, schemas, contracts, and ownership at their source rather than hiding them with casts, suppressions, loose types, or symptom-only wrappers.
-- Define and export shared types, interfaces, constants, and enums from their provider or genuine shared owner. Reuse definitions; keep derived values local for one consumer and shared when multiple consumers need them.
+Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and present multi-axis comparison.
+
+## Standards Over Workarounds
+
+- Always prefer **industry standard / best practices** when writing, modifying, or suggesting code.
+- Resolution order: (1) find the standard approach first, (2) workarounds (casts, non-null assertions, loose types) only when standard is technically impossible, (3) if workaround needed, explain why standard is impossible and get user approval.
+- **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (`work-principles` "Proposals and options").
+- **Definitions are root causes**: When casts, assertions, or workarounds exist because a type/interface/schema definition is wrong or incomplete, the definition IS the root cause — fix it first. Never classify a workaround as "unavoidable" without verifying the underlying definition is correct and complete.
+- **Never settle for "first working solution"**: Before proposing any fix, refactoring, or design change, evaluate at least 2 alternatives (plans: at least 3, see `code-plan` 4a). Check standard language features before introducing new types or cross-module imports. Verify dependency direction, ownership, and naming. Present the best solution, not the first one found.
+- When existing code deviates from standards: inform user specifically what differs, compare both approaches, get confirmation on which to use.
+- When standard is unclear, use widely-adopted patterns (official language documentation, major framework conventions). If still unclear, ask user.
+- **Compile-time > runtime**: When both solve the same problem, prefer compile-time enforcement (types, generics, discriminated unions) over runtime checks (assertions, guards). Compile-time catches prevent future rework; runtime checks leave loose types in the type system, inviting the same issue to recur.
+- **YAGNI applies to hypothetical future requirements only**: Adopting an industry-standard pattern (Observer, Strategy, AbortController, dependency injection, etc.) for the current case, or matching the codebase's existing pattern, is **not** premature abstraction — it is correct expression. SRP/OCP/DRY-compliant separation is not "abstraction"; classifying it as such to justify hardcoded duplication is misuse of YAGNI. Apply YAGNI only against speculative generality ("might need 5 cases later", "configurable for future"), never against present-tense standard patterns.
+
+## Definition Ownership
+
+All types, interfaces, constants, enums are defined and exported by the **provider**, not redefined inline by consumers.
+
+- Server interfaces → server files; DTOs → receiver or shared type files; component or device config → that component's files; common structures → shared definition files
+- Find inline redefinitions → move to provider and replace with import
+- No duplicate definitions. Search for existing ones first; extend the existing definition if fields are insufficient (TypeScript specifics in `typescript` "Definition Ownership in TypeScript").
+- **Derived constants** (arrays/maps derived from a const, e.g. the list of a const object's keys or values): if **multiple consumers** use the same derivation → define in provider; if **single consumer** → define in that consumer file (don't preemptively pollute provider API).
 
 ## Control Flow Braces
 
-All control statements (`if`, `else`, `for`, `while`, `do`) MUST use braces `{}` with body on a new line. Never omit braces or write single-line bodies.
+All control statements (`if`, `else`, `for`, `while`, `do`) use braces `{}` with the body on a new line. Never omit braces or write single-line bodies.
 
 ## No Early Void Return / Guard Throw — Use if-else or Check Functions
 
@@ -74,7 +98,7 @@ All `import`/`require` at file top. No inline `import()` or `require()` mid-code
 
 ## Line Wrapping Style
 
-When wrapping a line over 120 chars: **one item per line** (destructuring, literals, params, args, imports) and **trailing operator** (`&&`, `||` at line end, not line start). Exceptions: type union `|` stays **leading**, ternary `?`/`:` stays **leading**, intersection `&` stays trailing. For long `if`/`while` conditions, break right after `(` and put `)` on its own line. Do not split string/template literals using `+`; wrap the surrounding call structure and keep the literal intact, allowing it to exceed 120 characters when necessary.
+When wrapping a line over 120 chars: **one item per line** (destructuring, literals, params, args, imports) and **trailing operator** (`&&`, `||` at line end, not line start). Exceptions: type union `|` stays **leading**, ternary `?`/`:` stays **leading**, intersection `&` stays trailing. For long `if`/`while` conditions, break right after `(` and put `)` on its own line. Do not split string or template literals with `+`; wrap the call structure and keep the literal on one line, even past 120 characters.
 
 ## Type/Interface Section — No Blank Lines Between
 
@@ -116,7 +140,7 @@ Same-prefix methods must be adjacent. The numbered order above is the default; a
 
 ## Method Naming Convention
 
-All method and function names MUST use camelCase. PascalCase is reserved for classes, interfaces, types, and enums only.
+Method and function names use camelCase. PascalCase is reserved for classes, interfaces, types, and enums only.
 
 ## Avoid Filler Prepositions in Identifier Names
 
@@ -139,7 +163,7 @@ Prefer the most restrictive access modifier: private > protected > public. Use p
 
 **No speculative exceptions**: interface implementations must match the interface. Everything else follows the "no external caller → private" rule strictly.
 
-**Underscore prefix**: All non-public members (both `private` and `protected` — methods *and* fields) MUST use `_` prefix. Public members never use `_`. Rationale: the prefix gives a visible cue at call sites (`this._foo`) so consumers can spot accidental access to non-public API without jumping to the definition. Renaming a member's visibility therefore also renames it (and updates all call sites in the class hierarchy).
+**Underscore prefix**: All non-public members (both `private` and `protected` — methods *and* fields) use the `_` prefix. Public members never use `_`. Rationale: the prefix gives a visible cue at call sites (`this._foo`) so consumers can spot accidental access to non-public API without jumping to the definition. Renaming a member's visibility therefore also renames it (and updates all call sites in the class hierarchy).
 
 ## No Unnecessary Blank Lines Inside Methods
 
@@ -232,7 +256,7 @@ Use full words in variable names, function names, and **type/interface names** u
 
 ## Value Names Follow Source of Truth
 
-When a data source (backend API, protocol, external system) already defines value names (enum values, status strings, constants), consumers MUST use the same names directly. Never create consumer-specific aliases that require a mapping layer (e.g. backend `'FULL'` → frontend `'fullCharge'`). Display labels that differ from data values belong in the rendering layer (e.g. a label map for UI text), not as renamed data values.
+When a data source (backend API, protocol, external system) already defines value names (enum values, status strings, constants), consumers use the same names directly. Never create consumer-specific aliases that require a mapping layer (e.g. backend `'FULL'` → frontend `'fullCharge'`). Display labels that differ from data values belong in the rendering layer (e.g. a label map for UI text), not as renamed data values.
 
 ## check vs is Naming
 
@@ -280,7 +304,7 @@ Logic repeated in 2+ places → extract to a method. Check existing codebase for
 
 ## Boilerplate Belongs on the Owner
 
-When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner (e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
+When two or more clients perform the same multi-line guard/narrow/query pattern against the same owner's internal state (current task, config, flag; e.g. `owner.getCurrent()` → `if (!== undefined && !== SENTINEL && .flag)` → invoke), the boilerplate belongs on the owner as a typed API, not as a shared helper outside the owner.
 
 - Anti-pattern: two modules define `_registerXxxHandler` private methods, each performing identical narrowing on `jobQueue.getCurrentJob()`. → Promote into `jobQueue.registerXxxHandler(callback)` and call sites become one line.
 - Anti-pattern: multiple consumers each implement the same `find by id + null check + cast` lookup. → Expose `findX(id): X | undefined` on the owner.
@@ -306,3 +330,7 @@ Callback release, listener removal, schedule cancellation — place cleanup logi
 ## Post-Change Verification
 
 Run the repository's configured linter on changed files using already installed tools. Use ESLint for applicable JavaScript/TypeScript projects; do not install it or apply it to unrelated languages by default. For Python, follow the python skill's "Tooling" order. Report errors and warnings, distinguish pre-existing failures, and do not increase their count or weaken checks merely to pass.
+
+Then show the changes to the user and confirm before running an output-generating build (e.g. `npm run build`, `tsc`), reusing an explicit authorization already given for it. Commits follow `git-commit`.
+
+When writing a pre-commit check, check what is being committed — the index git uses, including a private `GIT_INDEX_FILE` — not the working tree; copy the index out with `git checkout-index` and check that copy.
