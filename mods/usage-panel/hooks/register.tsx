@@ -190,8 +190,13 @@ const CLAUDE_SHARE_EVERY_MS = 15 * 1000
 const CLAUDE_SHARE_IDLE_EVERY_MS = 60 * 1000
 // The Codex readings and the 7-day count pass through the same folder: one
 // session reads, under a lock on the file, and the others take its reading.
+// A session that never reloads keeps an older band, which goes on reading and
+// writing these files, so a name changes whenever an older and a newer band
+// could not safely take on each other's readings, places read up to, or kept
+// totals: an old band copies fields it does not know, so a mark inside each
+// kept entry cannot keep them apart. A field both can read safely keeps it.
 const SHARED_NAME = {
-  codexLocal: 'codex-local',
+  codexLocal: 'codex-local-2',
   codexServer: 'codex-server',
   history: 'history',
   sessionStates: 'session-states',

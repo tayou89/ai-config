@@ -948,6 +948,8 @@ test('a reload neither recounts nor asks the Codex server again, and keeps the d
 })
 
 const FOLDER = '/Users/t/Desktop/project/또갈래'
+// The shared Codex reading of this band; older bands keep the name before it.
+const CODEX_LOCAL_SHARED = 'codex-local-2'
 const seedShared = (name: string, key: string, at: number, output: object) => {
   sharedFiles[`${SHARED}${name}.json`] = JSON.stringify({ entries: { [key]: { at, output } } })
 }
@@ -955,7 +957,7 @@ const seedShared = (name: string, key: string, at: number, output: object) => {
 test('a Codex reading another session made since is taken without reading again', async ($, on) => {
   codexReads.length = 0
   const clock = engine(on)
-  seedShared('codex-local', '', clock.now() - 1_000, { ...pick(CODEX, LOCAL_KEYS), working: [] })
+  seedShared(CODEX_LOCAL_SHARED, '', clock.now() - 1_000, { ...pick(CODEX, LOCAL_KEYS), working: [] })
   seedShared('codex-server', FOLDER, clock.now() - 60_000, pick(CODEX, SERVER_KEYS))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -966,6 +968,22 @@ test('a Codex reading another session made since is taken without reading again'
   expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
   expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
   expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
+  await ui.unmount()
+})
+
+test("an older band's newer Codex reading under the old name is neither taken nor read", async ($, on) => {
+  codexReads.length = 0
+  const clock = engine(on, [], undefined, [], true, [], CODEX)
+  const oldReading = { ...pick(CODEX, LOCAL_KEYS), working: [], running: 3, error: 'old band' }
+
+  seedShared('codex-local', '', clock.now() - 1_000, oldReading)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(codexReads).toContain('local')
+  expect(await ui.find({ type: 'Text', text: /old band/ })).toBeUndefined()
+  expect(sharedFiles[`${SHARED}codex-local.json`]).toContain('old band')
   await ui.unmount()
 })
 
@@ -990,7 +1008,7 @@ test('while another session reads Codex, this one keeps its line and takes that 
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
-  seedShared('codex-local', '', clock.now(), { ...pick(CODEX, LOCAL_KEYS), working: [], running: 1 })
+  seedShared(CODEX_LOCAL_SHARED, '', clock.now(), { ...pick(CODEX, LOCAL_KEYS), working: [], running: 1 })
   seedShared('codex-server', FOLDER, clock.now(), pick(CODEX, SERVER_KEYS))
   sharedReader.isBusy = false
   await clock.advance(10_000)
