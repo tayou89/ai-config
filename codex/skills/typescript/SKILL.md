@@ -3,7 +3,15 @@ name: typescript
 description: Apply personal TypeScript and TSX conventions for type safety, module interoperability, ownership, and verification.
 ---
 
-<!-- Adapted from skills/typescript/SKILL.md at 04887ad46a0df96101ff4ff85db228e3a75c841c, skills/typescript/references/examples-and-procedures.md at f9bd78d17cb5c3374c8c7b7d9d7c3785757f0c8a -->
+<!-- Adapted from skills/typescript/SKILL.md at 04887ad46a0df96101ff4ff85db228e3a75c841c, skills/typescript/references/examples-and-procedures.md at baf1863c778a24cf97a93dbb19afa1a98dd8654d -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line, and the scope paragraph that covers TSX, uses the installed toolchain, and lets typescript-migration lead on behavior preservation: Codex permissions and codex/MIGRATION.md, "Clarified Technical Assumptions".
+- The "JavaScript and TypeScript" rules, and the TypeScript rules "Type/Interface Section — No Blank Lines Between" and "Named Alias for Complex Type Constraints", stay in code-style, and the reference file's examples sit beside their rules. History: Claude moved them on 2026-11-12 to fit how much of a skill Claude Code restores after context compaction. Kept in this audit: whether Codex cuts long skills the same way is not checked, and the content is the same wherever it sits.
+- "Build Quality" adjusts a lint rule only for a demonstrated false positive, "Source and Build Artifacts" checks the build before treating a .js file as generated, and "ESModule Syntax" checks the real module output: codex/MIGRATION.md, "Clarified Technical Assumptions".
+- "Build Procedure" runs an output build within authorized scope instead of asking each time: codex/MIGRATION.md, "Repeated plan/build/commit approvals".
+- "Generic Variance — Plan-Time Check" is a shorter Codex wording of the same rule and its reference example (codex/MIGRATION.md, "Clarified Technical Assumptions").
+- "Honest Nullability + Guard Narrowing" narrows with guards that keep valid falsy values, which "Nullish Checks" requires.
+-->
 
 # TypeScript Rules
 
@@ -66,7 +74,7 @@ Don't use `import * as X`. Use named imports. **Exception**: CJS modules where `
 - **`protected`**: Explicit. For subclass-accessed members.
 - **`private`**: Explicit. For class-internal members.
 
-Internal-only members MUST be `private` or `protected`.
+Internal-only members are `private` or `protected`.
 
 **`_` prefix**: Applied to `private` and `protected` members (properties and methods). Not applied to `public` members.
 
@@ -255,6 +263,10 @@ Co-locate types near their module: `types/` folder with `{module}.types.ts`.
 - Module-shared types → module's `types/` folder
 - Cross-module shared types → a shared types file (e.g. `types/shared.ts`)
 - File-internal types → inline at file top
+
+## Definition Ownership in TypeScript
+
+Follow `code-style` "Definition Ownership". When the provider's definition lacks fields, extend it (`extends`, `&`, optional fields) instead of redefining it. For an unconverted JS module, define a temporary interface in the consumer with `// TODO: [module] replace with import after TS conversion`.
 
 ## Conditional Types for Input Shape Detection
 

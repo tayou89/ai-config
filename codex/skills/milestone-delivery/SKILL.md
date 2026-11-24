@@ -4,6 +4,10 @@ description: Milestone workflow for a project whose rules explicitly adopt miles
 ---
 
 <!-- Adapted from skills/milestone-delivery/SKILL.md at 567b017b7f9ea914b8a4e9a190a37e27f719e701 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- "Approvals" says an approved milestone plan counts as the file-change approval the Codex global instructions ask for, since Codex asks before creating or modifying files.
+- "Milestone report" keeps the report in the project's report folder and points at knowledge-vault "Read only": Codex only reads the vault (user decision, 2026-11-13).
+-->
 
 # Milestone Delivery
 
@@ -14,7 +18,7 @@ Apply only after a project's rules explicitly adopt milestone delivery (user dec
 - A milestone is one flow the user can use from start to end.
 - First get the designs the milestone depends on approved, as `code-plan` 3a requires. Then get the milestone plan approved: its scope, the feature list version, and each feature's acceptance check.
 - An approved milestone plan authorizes the implementation inside that version, and counts as the approval that the global instructions ask for before creating or modifying files there. Record substantial implementation units as child plans under `code-plan`, and revise a child plan without a new approval while it stays inside the approved scope and the approved designs.
-- All existing approval requirements remain in force. Milestone approval does not waive the prerequisite-design check, required reviews, or the global instructions' pause after three unanticipated type, signature, or cast changes. Ask when work leaves the approved scope or reaches an action that needs approval; do not ask again for a concrete action already authorized.
+- All existing approval requirements remain in force. Milestone approval does not waive the prerequisite-design check, required reviews, or the `code-plan` stop after three unanticipated changes. Ask when work leaves the approved scope or reaches an action that needs approval; do not ask again for a concrete action already authorized.
 - The other user confirmations are the planning scope, screen drafts on a comparison board, each production deploy, each change to a running service, and the demo at the milestone end.
 
 ## Always ask, even mid-milestone
