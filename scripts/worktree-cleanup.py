@@ -8,7 +8,8 @@ Cleanup is its own step after the merge, so a cleanup that fails never
 repeats a merge, and it removes nothing it cannot show is kept elsewhere
 (user decision, 2026-11-13). It refuses while the worktree holds
 uncommitted or untracked files, ignored files that .agent-workflow.json's
-cleanupIgnored does not list as regenerable, or a process whose working
+cleanupIgnored does not list as regenerable, a folder holding its own Git
+repository, whose commits may exist nowhere else, or a process whose working
 folder is inside it other than the calling session and what that session
 started, and until the branch's last commit is integrated:
 
@@ -25,6 +26,14 @@ skips the integration proof and keeps both branches, so the work stays
 recoverable. Closing a pull request is not abandoning it. A program that
 only holds files open in the worktree, without working in it, is not seen.
 
+cleanupIgnored holds positive Git path patterns read from the repository
+root, which Git itself matches with letter case kept: `build` is only the
+top entry of that name, `app/build/` that folder, `**/node_modules` the name
+at any depth. They reach Git's command line, not a .gitignore file, so a
+leading `!` or `#`, an unescaped trailing space or tab, a lone trailing
+backslash, a null character, and patterns that name no file (only
+wildcards, character ranges, and slashes) are refused.
+
 Exit codes:
     0  removed
     2  not removed: something in it is not preserved; the reasons are printed
@@ -35,13 +44,14 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import fnmatch
+import os
 import sys
 from collections.abc import Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from integration_commands import (
     BRANCH_REF_PREFIX,
+    ENCODING,
     EXIT_COMMAND_FAILED,
     EXIT_DONE,
     EXIT_NO_POLICY,
@@ -55,22 +65,33 @@ from integration_commands import (
     print_problems,
     read_current_branch,
     read_json,
-    run_command,
+    run_binary_command,
 )
 from workflow_policy import (
+    POLICY_FILE,
     PolicyError,
     WorkflowMode,
     WorkflowPolicy,
+    check_cleanup_patterns,
     find_repository_root,
     is_original_checkout,
     read_original_checkout,
     read_original_policy,
 )
 
-IGNORED_STATUS = "!!"
+IGNORED_STATUS = b"!!"
 STATUS_PATH_START = 3
-STATUS_ENTRY_SEPARATOR = "\0"
-RENAMED_STATUSES = ("R", "C")
+ENTRY_SEPARATOR = b"\0"
+FOLDER_ENTRY_SUFFIX = b"/"
+RENAMED_STATUS_LETTERS = frozenset(b"RC")
+REPOSITORY_ENTRY = b".git"
+BARE_REPOSITORY_ENTRIES = frozenset((b"HEAD", b"objects", b"refs"))
+ROOT_ANCHOR = "/"
+DISPLAY_ERRORS = "backslashreplace"
+STATUS_ARGUMENTS = ("status", "--porcelain", "--ignored", "--untracked-files=all", "-z")
+VOUCHED_ARGUMENTS = ("-c", "core.ignorecase=false", "ls-files", "--others", "--ignored", "-z")
+REPOSITORY_PROBLEM = "folders holding their own Git repository, whose commits may exist nowhere else"
+KEPT_PROBLEM = "ignored files that cleanupIgnored does not list as regenerable (its patterns are read from the repository root; write **/<name> for any depth)"
 MAX_SHOWN_PATHS = 5
 PULL_REQUEST_FIELDS = "number,url,headRefOid"
 
@@ -140,6 +161,7 @@ def read_cleanup_policy(original: Path) -> WorkflowPolicy:
             f"{original} records the {policy.mode.value} workflow, which gives tasks no worktrees to clean up"
         )
     else:
+        check_cleanup_patterns(policy.cleanup_ignored, f"{POLICY_FILE} in {original}")
         return policy
 
 
@@ -150,16 +172,21 @@ def list_branch_problems(branch: str) -> list[str]:
         return ["the worktree has no branch checked out, so nothing shows where its commits are kept"]
 
 
-def list_file_problems(worktree: Path, regenerable: Sequence[str]) -> list[str]:
-    entries = parse_status_entries(read_status(worktree))
+def list_file_problems(worktree: Path, patterns: Sequence[str]) -> list[str]:
+    entries = parse_status_entries(_read_git_output(worktree, *STATUS_ARGUMENTS))
+    ignored = [path for status, path in entries if status == IGNORED_STATUS]
     unsaved = [path for status, path in entries if status != IGNORED_STATUS]
-    kept = [path for status, path in entries if status == IGNORED_STATUS and not is_regenerable(path, regenerable)]
+    repositories = _list_nested_repositories(worktree)
+    vouched = _list_vouched_paths(worktree, patterns)
+    kept = [path for path in ignored if not _is_vouched(path, vouched) and not _is_inside_any(path, repositories)]
     problems = []
 
     if unsaved:
         problems.append(f"uncommitted or untracked files: {show_paths(unsaved)}")
+    if repositories:
+        problems.append(f"{REPOSITORY_PROBLEM}: {show_paths(repositories)}")
     if kept:
-        problems.append(f"ignored files that cleanupIgnored does not list as regenerable: {show_paths(kept)}")
+        problems.append(f"{KEPT_PROBLEM}: {show_paths(kept)}")
     return problems
 
 
@@ -237,20 +264,9 @@ def check_linked_worktree(worktree: Path) -> None:
         raise NotReadyError([f"{worktree} is the original checkout, not a task's worktree"])
 
 
-def read_status(worktree: Path) -> str:
-    """The raw status output; its first entry starts with a space, which a stripped answer would lose."""
-    arguments = ["git", "-C", str(worktree), "status", "--porcelain", "--ignored", "--untracked-files=all", "-z"]
-    result = run_command(arguments)
-
-    if result.returncode == 0:
-        return result.stdout
-    else:
-        raise CommandError(f"`git status` failed in {worktree}: {result.stderr.strip()}")
-
-
-def parse_status_entries(output: str) -> list[tuple[str, str]]:
-    """Status and path pairs from `git status --porcelain -z`, skipping the source path a rename adds."""
-    fields = output.split(STATUS_ENTRY_SEPARATOR)
+def parse_status_entries(output: bytes) -> list[tuple[bytes, bytes]]:
+    """Status and path pairs from `git status --porcelain -z`, skipping the source path a rename or copy adds."""
+    fields = output.split(ENTRY_SEPARATOR)
     entries = []
     index = 0
 
@@ -260,20 +276,85 @@ def parse_status_entries(output: str) -> list[tuple[str, str]]:
 
         if field:
             entries.append((status, field[STATUS_PATH_START:]))
-        index += 2 if status.startswith(RENAMED_STATUSES) else 1
+        index += 2 if RENAMED_STATUS_LETTERS & set(status) else 1
     return entries
 
 
-def show_paths(paths: Sequence[str]) -> str:
-    shown = ", ".join(paths[:MAX_SHOWN_PATHS])
+def show_paths(paths: Sequence[bytes]) -> str:
+    """Each name quoted with its escapes, so a backslash, a line break, and an unreadable byte stay distinguishable."""
+    shown = ", ".join(repr(os.fsdecode(path)) for path in paths[:MAX_SHOWN_PATHS])
 
     return f"{shown} and {len(paths) - MAX_SHOWN_PATHS} more" if len(paths) > MAX_SHOWN_PATHS else shown
 
 
-def is_regenerable(path: str, patterns: Sequence[str]) -> bool:
-    parts = PurePosixPath(path.rstrip("/")).parts
+def _read_git_output(worktree: Path, *arguments: str) -> bytes:
+    """Raw bytes, so a file name reaches the comparison unchanged and a first entry keeps its leading space."""
+    result = run_binary_command(["git", "-C", str(worktree), *arguments])
 
-    return any(fnmatch.fnmatch(part, pattern) for part in parts for pattern in patterns)
+    if result.returncode == 0:
+        return result.stdout
+    else:
+        error = result.stderr.decode(ENCODING, DISPLAY_ERRORS).strip()
+
+        raise CommandError(f"`git {' '.join(arguments)}` failed in {worktree}: {error}")
+
+
+def _list_vouched_paths(worktree: Path, patterns: Sequence[str]) -> set[bytes]:
+    """The untracked paths Git matches to cleanupIgnored; without a pattern Git would refuse to list any."""
+    if patterns:
+        excludes = [f"--exclude={_anchor_pattern(pattern)}" for pattern in patterns]
+        output = _read_git_output(worktree, *VOUCHED_ARGUMENTS, *excludes)
+
+        return set(output.split(ENTRY_SEPARATOR)) - {b""}
+    else:
+        return set()
+
+
+def _list_nested_repositories(worktree: Path) -> list[bytes]:
+    """Folders below the top holding a `.git` folder, file, or link, or entries named like a bare repository's.
+
+    Git lists a bare repository as plain files and skips a `.git` inside a folder it tracks, so its status cannot
+    show them all. The names alone decide, so a folder that only looks like a repository also keeps the worktree.
+    Links are not followed, since removing a link leaves its target. Every error stops the search: os.walk would
+    treat a folder whose kind cannot be read as a file and skip what is inside it.
+    """
+    root = os.fsencode(worktree)
+    repositories = []
+    pending = [root]
+
+    try:
+        while pending:
+            folder = pending.pop()
+            entries = _list_folder_entries(folder)
+            names = {entry.name for entry in entries}
+
+            if folder != root and (REPOSITORY_ENTRY in names or names.issuperset(BARE_REPOSITORY_ENTRIES)):
+                repositories.append(os.path.relpath(folder, root))
+            else:
+                pending.extend(entry.path for entry in entries if entry.is_dir(follow_symlinks=False))
+    except OSError as error:
+        raise CommandError(f"could not look through {worktree} for repositories inside it: {error}") from error
+    else:
+        return repositories
+
+
+def _list_folder_entries(folder: bytes) -> list[os.DirEntry[bytes]]:
+    with os.scandir(folder) as entries:
+        return list(entries)
+
+
+def _anchor_pattern(pattern: str) -> str:
+    """Git matches a pattern whose only slash is a trailing one at any depth; this list reads each from the root."""
+    return pattern if pattern.startswith(ROOT_ANCHOR) else ROOT_ANCHOR + pattern
+
+
+def _is_vouched(path: bytes, vouched: set[bytes]) -> bool:
+    """A folder entry is one Git did not look inside, so no pattern vouches for it."""
+    return not path.endswith(FOLDER_ENTRY_SUFFIX) and path in vouched
+
+
+def _is_inside_any(path: bytes, folders: Sequence[bytes]) -> bool:
+    return any(path.startswith(folder + FOLDER_ENTRY_SUFFIX) for folder in folders)
 
 
 if __name__ == "__main__":

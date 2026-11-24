@@ -18,7 +18,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -33,6 +35,15 @@ _CHECK_COMMANDS_KEY = "checkCommands"
 _CLEANUP_IGNORED_KEY = "cleanupIgnored"
 _ENCODING = "utf-8"
 _GIT_TIMEOUT_SECONDS = 10
+_CLEANUP_EXCEPTION_PREFIX = "!"
+_CLEANUP_COMMENT_PREFIX = "#"
+_NULL_CHARACTER = "\0"
+_ESCAPE = "\\"
+_TRAILING_BLANKS = " \t"
+_PATTERN_SYNTAX = "*?/"
+_ESCAPED_CHARACTER = re.compile(r"\\(.)", re.DOTALL)
+_CHARACTER_RANGE = re.compile(r"\[!?\]?[^\]]*\]")
+_LITERAL_STAND_IN = "x"
 
 
 class WorkflowMode(str, Enum):
@@ -144,6 +155,20 @@ def is_original_checkout(root: Path) -> bool:
     return (root / GIT_DIRECTORY_NAME).is_dir()
 
 
+def check_cleanup_patterns(patterns: Sequence[str], source: str) -> None:
+    """Git takes these patterns on its command line, which skips the .gitignore file grammar, so the parts of it a
+    reader expects are refused rather than read as names. Only the cleanup tool calls this: the hooks read the same
+    file and stop guarding when reading it fails.
+    """
+    findings = [(pattern, _find_cleanup_pattern_problem(pattern)) for pattern in patterns]
+    refused = [f"{pattern!r} {problem}" for pattern, problem in findings if problem]
+
+    if refused:
+        raise PolicyError(
+            f"{source} lists {_CLEANUP_IGNORED_KEY!r} patterns this tool cannot use: {'; '.join(refused)}"
+        )
+
+
 def _run_git(root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str] | None:
     try:
         return subprocess.run(
@@ -208,6 +233,48 @@ def _read_policy_text(path: Path) -> str:
         return path.read_text(encoding=_ENCODING)
     except (OSError, UnicodeDecodeError) as error:
         raise PolicyError(f"{path} cannot be read: {error}") from error
+
+
+def _find_cleanup_pattern_problem(pattern: str) -> str | None:
+    if pattern.startswith(_CLEANUP_EXCEPTION_PREFIX):
+        return f"starts with {_CLEANUP_EXCEPTION_PREFIX!r}, an exception the list does not support"
+    elif pattern.startswith(_CLEANUP_COMMENT_PREFIX):
+        return f"starts with {_CLEANUP_COMMENT_PREFIX!r}, a comment in .gitignore; escape it with a backslash"
+    elif _NULL_CHARACTER in pattern:
+        return "holds a null character"
+    elif _has_unescaped_trailing_blank(pattern):
+        return "ends in an unescaped space or tab, which this list refuses; escape a kept space with a backslash"
+    elif _has_lone_trailing_escape(pattern):
+        return "ends in a backslash that escapes nothing, so it matches no file"
+    elif _is_wildcard_only(pattern):
+        return "names no file or folder, only wildcards, character ranges, or slashes"
+    else:
+        return None
+
+
+def _count_trailing_escapes(text: str) -> int:
+    return len(text) - len(text.rstrip(_ESCAPE))
+
+
+def _has_unescaped_trailing_blank(pattern: str) -> bool:
+    """A single trailing blank is escaped by an odd run of backslashes before it; any other trailing blank is not."""
+    kept = pattern.rstrip(_TRAILING_BLANKS)
+    blanks = len(pattern) - len(kept)
+    is_escaped = blanks == 1 and _count_trailing_escapes(kept) % 2 == 1
+
+    return blanks > 0 and not is_escaped
+
+
+def _has_lone_trailing_escape(pattern: str) -> bool:
+    return _count_trailing_escapes(pattern) % 2 == 1
+
+
+def _is_wildcard_only(pattern: str) -> bool:
+    """An escaped character is part of a name, and a character range such as `[a-z]` stands for any letter in it."""
+    literal = _ESCAPED_CHARACTER.sub(_LITERAL_STAND_IN, pattern)
+    unranged = _CHARACTER_RANGE.sub("", literal)
+
+    return all(character in _PATTERN_SYNTAX for character in unranged)
 
 
 def _is_command(command: Any) -> bool:
