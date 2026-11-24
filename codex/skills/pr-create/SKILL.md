@@ -4,6 +4,11 @@ description: Create or update GitHub PRs whose body opens with what changed and 
 ---
 
 <!-- Adapted from skills/pr-create/SKILL.md at c662f32e3befb6c6564787ab8778d0bafd134f2e -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line, and section 4 reuses an existing authorization outside guarded repositories instead of always showing the body first: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
+- The opening and section 5 work through the GitHub connector, CLI, or browser and pass the body as a file, not a heredoc: Codex reaches GitHub through whichever of these is connected, and a file keeps the body's newlines out of shell quoting.
+- Section 6 attaches the pull request to the Codex task where that tool exists, and applies the reviewers, labels, or milestone the user asked for instead of asking about them: a Codex adaptation from 2026-10-28 with no recorded reason beyond reusing authorization (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
+-->
 
 # PR Creation Workflow
 
@@ -32,7 +37,7 @@ Where `<base>` is the target branch (usually `main`, `dev`). If a PR already exi
 
 ## 3. PR Body
 
-In a repository with its own pull request template or team rules, follow those. Elsewhere, write the body for the user: they read each pull request without the code at hand, in a notification email or on the pull request page, and do not know developer terms (user decision, 2026-11-18); reviewers and later sessions read the same page for the record. Put what changes and whether the user must act first and background toward the end, keep every fact a reviewer needs in a developer record at the end, and write in the user's language and everyday words, as the shared "Plain replies and labels" principles describe.
+In a repository with its own pull request template or team rules, follow those. Elsewhere, write the body for the user: they read each pull request without the code at hand, in a notification email or on the pull request page, and do not know developer terms (user decision, 2026-11-18); reviewers and later sessions read the same page for the record. Put what changes and whether the user must act first and background toward the end, keep every fact a reviewer needs in a developer record at the end, and write in the user's language and everyday words, as `collaboration-core` "Plain replies and labels" describes.
 
 Use these parts in this order, with headings in the user's language (Korean shown):
 
@@ -75,7 +80,7 @@ models, cases not handled.>
 - Keep the parts before the developer record within about 1,200 characters, moving detail into the record rather than dropping a check, risk, or undo fact.
 - Write the body complete when creating it, and tell the user something learned later in a comment rather than only by editing the body.
 - Gmail shows `<details>` unfolded (caniemail, tested 2019-07) while GitHub folds it, so the order, not the fold, puts what matters first.
-- Each part adds what the earlier ones do not; use paragraphs for connected explanations and bullets for independent points, following the prose principles in the `report-writing` skill.
+- Each part adds what the earlier ones do not; use paragraphs for connected explanations and bullets for independent points, as `report-writing` "Prose" describes.
 
 ## 4. Show Body Before Creating
 
@@ -93,7 +98,7 @@ Flags:
 
 ## 6. After Creation
 
-- Return the PR URL and attach the created or worked-on PR to the current Codex task using the available artifact attachment tool.
+- Return the PR URL, and attach the created or worked-on PR to the current Codex task where the environment offers an artifact attachment tool.
 - Apply requested reviewers, labels, or milestones; do not contact reviewers without authorization.
 - Never enable GitHub auto-merge, and merge only as section 4 allows
 

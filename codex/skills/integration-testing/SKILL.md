@@ -4,6 +4,13 @@ description: Run authorized integration or runtime tests with external services,
 ---
 
 <!-- Adapted from skills/integration-testing/SKILL.md at d7fbb8f0730c15f7c829c5756c27777027953c23 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening authorization line: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
+- Section 1 probes only the endpoints the test needs, through authorized checks, and does not treat a blocked ping as down; section 4 fixes other repositories only within their own authorized scope: codex/MIGRATION.md, "Runtime test probes and remote fixes".
+- Section 8 runs a bounded soak test only when it is in scope, and section 11 applies only the specific labeled test stash instead of popping one at session start: codex/MIGRATION.md, "Mandatory soak tests and automatic test-stash pop".
+- Section 13 pauses and inspects on user concern instead of reverting at once, keeping files that may hold concurrent work: codex/MIGRATION.md, "Automatic stashing, rebase aborts, and cleanup".
+- Section 11 documents test patches in AGENTS.md, the Codex instruction file, where Claude uses CLAUDE.md.
+-->
 
 # Integration Testing Rules
 
@@ -18,7 +25,7 @@ Apply these rules when running integration/runtime tests against a live or simul
 
 ## 1. Verify Infrastructure First (Hard Prereq)
 
-Before starting, identify the endpoints the selected test actually requires and check reachability through approved health checks or connection probes. A blocked ICMP ping alone does not prove an endpoint is down. Probe only authorized test infrastructure. Diagnose failed prerequisites before attributing failures to application code; redact secrets in reported results.
+Before starting, identify the endpoints the selected test actually requires and check reachability through approved health checks or connection probes. A blocked ICMP ping alone does not prove an endpoint is down. Probe only authorized test infrastructure. Log each probe's result visibly, redacting secrets. If any required endpoint is down, stop the test and diagnose the environment before attributing failures to application code; "should be up" is not verification. When connection errors appear mid-test, return to this step before diagnosing them as code.
 
 ## 2. Structured Test Execution
 
@@ -55,7 +62,7 @@ Never declare a test "complete" or "passed" for a scope narrower than what was a
 
 ## 8. Soak Test
 
-When stability over time is in the agreed scope, run a soak test for a bounded, stated duration and verify the logs. Do not add an indefinite run or scheduled monitoring to an ordinary test request.
+When stability over time is in the agreed scope, run a soak test for a bounded, stated duration after all manual tests pass, and verify zero errors in its logs. Do not add an indefinite run or scheduled monitoring to an ordinary test request.
 
 ## 9. Clean Revert
 
@@ -71,7 +78,7 @@ Test-time only changes (config switches like `config.test.sim`, simulator-friend
 
 - **Isolation**: keep test-time edits in a **labeled git stash** (`git stash push -m "test-patches: <project>"`) or a dedicated **test-only branch**. Never commit them to feature/main branches.
 - **Documentation**: enumerate the patch list (file + change description) in the project's AGENTS.md or README. Stashes can be lost (manual `stash drop`, `git gc`); the documented list is the recovery source.
-- **Apply when resuming the authorized test**: inspect the exact labeled stash and the working tree before applying it; preserve the stash until the result is verified. Never pop an unrelated stash automatically at session start.
+- **Apply when resuming the authorized test**: inspect the exact labeled stash and the working tree before applying it; preserve the stash until the result is verified. If the labeled stash is missing, re-apply the patch from its documentation. Never pop an unrelated stash automatically at session start.
 - **Revert at session end**: re-stash with the same label, never commit. Verify `git diff --staged` is clean of test-patch files before any commit.
 - **Interval shortening**: if a test requires waiting on a periodic interval (cache refresh, retry backoff, etc.), shorten the constant temporarily as part of the test-patches stash. Don't shorten if the test is specifically validating the timing.
 

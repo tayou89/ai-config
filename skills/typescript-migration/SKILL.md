@@ -34,7 +34,7 @@ Don't restructure code during type-only conversion. Keep original variable posit
 
 ## Library Callback Undeclared Variables
 
-When JS code references undeclared variables inside library callbacks, check the **library source** first — the library may dynamically inject variables into callback scope. Don't blindly replace with `Buffer.alloc(0)` etc. Understand the library's intent before deciding alternatives.
+When JS code references undeclared variables inside library callbacks, check the **library source** first. JavaScript scope is lexical, so a library cannot add a variable to an existing callback's own scope; such a name comes from a global the library sets, a `with` block, or code the library generates (`eval`, `new Function`). Don't blindly replace with `Buffer.alloc(0)` etc. Find where the value actually comes from at run time and understand the library's intent before deciding alternatives.
 
 ## Post-Conversion Verification
 

@@ -4,12 +4,17 @@ description: Apply personal Python conventions for PEP 8 naming, formatter-owned
 ---
 
 <!-- Adapted from skills/python/SKILL.md at 0de0df5805a6f3b52ad5334a481c63d13550f932 -->
+<!-- Left out or changed on purpose (audited 2026-11-24):
+- The opening paragraph adds the installed-toolchain line, and "Tooling" limits uv add and uvx to authorized scope: codex/MIGRATION.md, "Applied", says the Codex copy adds the authorization preamble.
+- The JavaScript rules are named as code-style rules, and the overrides heading says "Overrides of code-style": the Codex code-style still holds the rules JavaScript and TypeScript share, which Claude moved into typescript on 2026-11-12.
+- "Mis-declared sync functions" keeps intentional background work as it is and demotes an async def only when the public return contract allows: codex/MIGRATION.md, "Applied" and "Clarified Technical Assumptions".
+-->
 
 # Python Rules
 
 Follow the current user request, applicable project instructions, and Codex permissions. Existing explicit authorization remains valid; do not ask again for the same approved action. These are personal working conventions, not universal language requirements.
 
-Apply these rules together with code-style to Python code and relevant code examples in plans or explanations. For `.py` files this skill overrides code-style where they conflict: naming, operator placement in wrapped lines, braces, and the other layout rules in "Overrides of code-style". Use the project's installed toolchain and configuration; commands below are examples, not permission to download dependencies or change project configuration.
+Apply these rules together with `code-style` when writing or modifying Python code, including plans and example code. For `.py` files this skill overrides `code-style` where they conflict: naming, operator placement in wrapped lines, braces, and the other layout rules in "Overrides of code-style". Use the project's installed toolchain and configuration; commands below are examples, not permission to download dependencies or change project configuration.
 
 ## Tooling
 
@@ -22,11 +27,11 @@ Check changed files in this order; lint fixes such as import sorting change stru
 3. `uv run mypy --strict` (or the project's mypy configuration with `strict = true`): the final gate, with 0 errors
 4. `uv run pytest`
 
-Preview `--unsafe-fixes` with `--diff` and review them before applying. In a project without ruff configuration, where `ruff format --diff` would rewrite whole files, do not reformat; keep fixes to the code you change. Fix type and lint errors at their source instead of adding `# type: ignore` or `# noqa`. This is the Python form of code-style "Post-Change Verification".
+Preview `--unsafe-fixes` with `--diff` and review them before applying. In a project without ruff configuration, where `ruff format --diff` would rewrite whole files, do not reformat; keep fixes to the code you change. Fix type and lint errors at their source instead of adding `# type: ignore` or `# noqa`. This is the Python form of `code-style` "Post-Change Verification".
 
 ## Formatter-Owned Layout
 
-`ruff format` decides line wrapping and the blank lines around definitions, and its output wins over hand style and over code-style "Line Wrapping Style". Use the project's `line-length` (120 to match code-style). Verified with ruff 0.17.4 on 2026-11-09:
+`ruff format` decides line wrapping and the blank lines around definitions, and its output wins over hand style and over `code-style` "Line Wrapping Style". Use the project's `line-length` (120 to match `code-style`). Verified with ruff 0.17.4 on 2026-11-09:
 
 - A wrapped boolean condition goes inside parentheses with `)` on its own line, and `and`/`or` start each continuation line. The formatter has no option to change this, and PEP 8 (the official Python style guide) recommends breaking before binary operators in new code.
 - The formatter joins items that fit on one line inside the brackets. To keep one item per line, put a trailing comma after the last item (the "magic trailing comma"); this works for parameters, arguments, collections, and parenthesized imports.
@@ -35,22 +40,22 @@ Preview `--unsafe-fixes` with `--diff` and review them before applying. In a pro
 
 ## Hand Rules the Formatter Keeps
 
-The formatter keeps the blank lines written inside function bodies (collapsing runs to one), so these code-style rules stay manual:
+The formatter keeps the blank lines written inside function bodies (collapsing runs to one), so these `code-style` rules stay manual:
 
 - Consecutive assignments of local variables form one block, followed by one blank line, even before `return` ("Blank Line After Variable Declarations").
 - No other blank lines inside a function body ("No Unnecessary Blank Lines Inside Methods").
 
 ## Naming
 
-Follow PEP 8 instead of code-style "Method Naming Convention":
+Follow PEP 8 instead of `code-style` "Method Naming Convention":
 
 - Functions, methods, variables, modules, and packages: `snake_case`.
 - Classes (including enums, exceptions, and protocols) and type aliases: `PascalCase`.
 - Module constants and enum members: `UPPER_SNAKE_CASE`.
 
-Python has no access modifiers, so code-style "Minimum Access Exposure" is expressed through the name: every non-public module member, method, and attribute (private and protected alike) starts with a single `_`, and public names never do. Use a double leading underscore only to avoid attribute clashes with subclasses, as PEP 8 describes.
+Python has no access modifiers, so `code-style` "Minimum Access Exposure" is expressed through the name: every non-public module member, method, and attribute (private and protected alike) starts with a single `_`, and public names never do. Use a double leading underscore only to avoid attribute clashes with subclasses, as PEP 8 describes.
 
-code-style "check vs is Naming", "Avoid Abbreviations", "Avoid Filler Prepositions in Identifier Names", and "Concrete Verbs for Identifiers" apply unchanged in `snake_case`: `check_connection()` raises on failure and returns `None`, and `is_connected()` returns a `bool`.
+`code-style` "check vs is Naming", "Avoid Abbreviations", "Avoid Filler Prepositions in Identifier Names", and "Concrete Verbs for Identifiers" apply unchanged in `snake_case`: `check_connection()` raises on failure and returns `None`, and `is_connected()` returns a `bool`.
 
 ## Control Flow and Comparisons
 
@@ -62,19 +67,19 @@ code-style "check vs is Naming", "Avoid Abbreviations", "Avoid Filler Prepositio
 
 ## Imports
 
-Put every import at the top of the file (PEP 8). Order them as standard library, third-party packages, then first-party modules, with one blank line between groups, as ruff's isort rules (`I`) enforce. This replaces code-style "Import Ordering", which puts no blank lines between groups.
+Put every import at the top of the file (PEP 8). Order them as standard library, third-party packages, then first-party modules, with one blank line between groups, as ruff's isort rules (`I`) enforce. This replaces `code-style` "Import Ordering", which puts no blank lines between groups.
 
 ## Constants and Enums
 
-Express a fixed set of string values as a `StrEnum` and a single value as a module constant. code-style "Repeated Literals → Constants", "String Literal Constants", and "Constant Location by Scope" otherwise apply unchanged.
+Express a fixed set of string values as a `StrEnum` and a single value as a module constant. `code-style` "Repeated Literals → Constants", "String Literal Constants", and "Constant Location by Scope" otherwise apply unchanged.
 
 ## Comments
 
-code-style "Minimize Comments + Explicit Naming" applies unchanged: no comments that restate what the code does, and no section dividers (`# ---`, `# region`). Docstrings pass the same test: write one only when it states why, or a contract that names and type hints cannot show.
+`code-style` "Minimize Comments + Explicit Naming" applies unchanged: no comments that restate what the code does, and no section dividers (`# ---`, `# region`). Docstrings pass the same test: write one only when it states why, or a contract that names and type hints cannot show.
 
 ## asyncio
 
-These are the Python forms of the code-style async rules ("Remove Unnecessary async", "Sync Return When Signature Allows", "await Over Promise Chains", "Floating Promises in Fan-out Callbacks", "Await Only Thenables", and "throw Over Promise.reject"):
+These are the Python forms of the `code-style` async rules ("Remove Unnecessary async", "Sync Return When Signature Allows", "await Over Promise Chains", "Floating Promises in Fan-out Callbacks", "Await Only Thenables", and "throw Over Promise.reject"):
 
 - **No `async` without `await`:** declare `async def` only when the body uses `await`, `async for`, or `async with`; otherwise write `def`. When a callback type accepts both a plain and an awaitable return, write the plain function.
 - **No floating coroutines or tasks:** await every coroutine, since calling a coroutine function without `await` never runs it (mypy reports `unused-coroutine`). Keep every `asyncio.create_task()` result in its owner and await or cancel it before the owner stops: the event loop holds tasks only weakly, so an unreferenced task can be garbage-collected mid-run and its exception is never seen (ruff RUF006 flags a discarded task).
@@ -102,7 +107,7 @@ async def load_pages(urls: list[str]) -> list[str]:
 
 ## Overrides of code-style
 
-| code-style rule | Python rule |
+| `code-style` rule | Python rule |
 | --- | --- |
 | "Method Naming Convention" (camelCase) | `snake_case`, with `PascalCase` classes and `UPPER_SNAKE_CASE` constants |
 | "Line Wrapping Style" (trailing `&&`/`\|\|`) | Formatter output: leading `and`/`or`, and a magic trailing comma for one item per line |

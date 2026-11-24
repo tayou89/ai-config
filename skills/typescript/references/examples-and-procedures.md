@@ -18,7 +18,7 @@ type Event = { sid: string } & (
 TypeScript generic types' variance is determined by how the parameter is used:
 
 - **Return position** (`get(): T`, `metadata?: T`, `() => Promise<T>`): **covariant** — `Container<narrow>` → `Container<wide>` is assignable
-- **Parameter position** (`set(x: T)`, `func(t: T)`): **contravariant** — `Container<wide>` → `Container<narrow>` is assignable
+- **Parameter position** (`func: (t: T) => void`): **contravariant** under `strictFunctionTypes` — `Container<wide>` → `Container<narrow>` is assignable. Parameters of methods written in method syntax (`set(x: T): void`) stay bivariant, so syntax and compiler options decide the result
 - **Both** (`(x: T) => T`, or any field where `T` is in both an argument position and a return position): **invariant** — only exact match assignable
 
 **Plan-time rule**: When introducing a new generic or changing one in a widely-referenced interface, map every usage position of the type parameter explicitly:
@@ -31,7 +31,7 @@ Task<T>:
   Result: covariant, Task<narrow> assignable to Task<wide>
 ```
 
-If any position is "both" (or any function has `T` in an argument position), expect invariance — pre-verify consumer compatibility on stubbed sample code before plan approval.
+If any function field takes `T` as input, `Container<narrow>` is no longer assignable to `Container<wide>`: the type is contravariant, or invariant when `T` is also an output. Pre-verify consumer compatibility on stubbed sample code with the project's compiler settings before plan approval, and record which assignment directions pass.
 
 **Common pitfall** — function field with `T` in argument:
 
@@ -42,7 +42,7 @@ interface Step<T> {
 interface Container<T> {
     steps: Step<T>;  // ← propagates argument-position usage of T
 }
-// → Container<T> is invariant — Container<Narrow> NOT assignable to Container<Wide>
+// → Container<T> is contravariant in T — Container<Narrow> NOT assignable to Container<Wide>
 ```
 
 Sibling generics (collections containing `Container<NarrowT>` typed as `Container<WideT>[]`) won't compile. This is a frequent silent-failure pattern when refactoring lazy callbacks.
