@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Notice the shape problems of a report right after it is written to the shared notes folder.
+"""Notice the shape problems of a report right after it is written to a notes folder.
 
 A PostToolUse hook on Edit and Write. When the written file is a Markdown
-report inside a session folder of the shared notes folder (not an index), it
+report in a project notes folder or in a session folder of the app's notes
+folder (not an index), it
 runs the checks in `report_check.py` and, if any finds a problem, adds a
 `[REPORT CHECK]` notice with what it measured, so the session fixes the
 report before handing it over (user decision, 2026-11-16). It never blocks,

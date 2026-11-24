@@ -6,6 +6,9 @@
     "SKILL_GATE": "on"
   },
   "permissions": {
+    "additionalDirectories": [
+      "~/Documents/session-notes"
+    ],
     "allow": [
       "Read",
       "Glob",
@@ -45,7 +48,9 @@
       "Bash(python3 ~/.claude/skills/outside-review/run-review.py:*)",
       "Bash(python3 ~/.claude/scripts/choice-shown.py:*)",
       "PowerShell(python3 *claude-commit.py*)",
-      "mcp__ccd_session_mgmt__archive_session"
+      "mcp__ccd_session_mgmt__archive_session",
+      "mcp__ccd_session_mgmt__unarchive_session",
+      "mcp__ccd_sidebar__set_unread"
     ]
   },
   "model": "opus[1m]",
@@ -207,6 +212,17 @@
             "timeout": 10
           }
         ]
+      },
+      {
+        "matcher": "mcp__ccd_session_mgmt__archive_session|mcp__ccd_session_mgmt__delete_session|mcp__ccd_session__move_to_cloud",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/session-notes-hook.py\"",
+            "timeout": 60,
+            "onFailure": "block"
+          }
+        ]
       }
     ],
     "Stop": [
@@ -227,6 +243,11 @@
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/session-notes-hook.py\"",
+            "timeout": 60
           }
         ]
       }

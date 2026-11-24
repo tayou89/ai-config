@@ -134,6 +134,21 @@ class OwnerCommitTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("task worktree", result.stdout)
 
+    def test_the_shell_guard_resolves_a_folder_reached_through_links(self) -> None:
+        linked = self.world.root / "linked-task"
+        loop = self.world.root / "loop"
+        wrapper = f"python3 ~/.claude/scripts/claude-commit.py --include-unrecorded {NOTES} 'Fix: x' {NOTES}"
+
+        linked.symlink_to(self.worktree)
+        (self.world.root / "loop-a").symlink_to(self.world.root / "loop-b")
+        (self.world.root / "loop-b").symlink_to(self.world.root / "loop-a")
+        loop.symlink_to(self.world.root / "loop-a")
+        looped = json.dumps(self.run_shell_guard(f"cd {loop} && {wrapper}"), ensure_ascii=False)
+
+        self.assertIsNone(self.run_shell_guard(f"cd {linked} && {wrapper}"))
+        self.assertNotIn("could not analyze", looped)
+        self.assertIn(NOTES, looped)
+
     def test_owner_commits_a_prepared_merge(self) -> None:
         self.world.world.push_base_commit("base.txt", "from the base\n")
         self.world.write(self.worktree, NOTES, CODEX_TEXT)

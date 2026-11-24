@@ -53,7 +53,7 @@ SKILL_RULES = {
     ),
     "decisions-and-collaboration.md": (
         "decisions-and-collaboration",
-        "Present options for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, or handle design-tool comments.",
+        "Present or compare alternatives in any answer, ask for user decisions, record decision status, run checkpoint reviews, choose the model and effort for a run you start, or handle design-tool comments.",
     ),
     "sessions.md": (
         "session-management",
@@ -65,7 +65,7 @@ SKILL_RULES = {
     ),
     "reports.md": (
         "report-writing",
-        "Write and shape reports, plans, reviews, decision documents, and any other document read later: prose principles, the first screen, current state only, short tables, plain words, an appendix, and the report check. Apply when writing or revising one, or keeping a shared notes folder and its index.",
+        "Write and shape reports, plans, reviews, decision documents, and any other document read later: prose principles, the first screen, current state only, short tables, plain words, an appendix, and the report check. Apply when writing or revising one, or keeping a notes folder and its index.",
     ),
     "rule-writing.md": (
         "rule-writing",

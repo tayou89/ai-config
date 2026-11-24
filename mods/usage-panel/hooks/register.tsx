@@ -1,5 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import {
+  CODEX_WORK_STATES,
   MINUTE_MS,
   WORK_KEEP_MS,
   actualLoad,
@@ -7,6 +8,8 @@ import {
   codexTokens,
   codexWeight,
   expectedLoad,
+  isCodexWorkActive,
+  isCodexWorkUncertain,
   isNewWeek,
   keptSteps,
   keptWorks,
@@ -19,10 +22,10 @@ import type {
   CacheOutput,
   CacheTtl,
   Codex,
-  CodexEnded,
   CodexLocalOutput,
   CodexRecord,
   CodexReading,
+  CodexReservations,
   CodexServerOutput,
   CodexSetting,
   CodexTotals,
@@ -54,7 +57,7 @@ import type {
 } from '../types'
 
 // What the estimate tool was asked to record, once its input checked out.
-type EstimateInput = { maker: WorkMaker; minutes: number; steps?: number }
+type EstimateInput = { maker: WorkMaker; minutes: number; steps?: number; reservation?: string }
 type EstimateCheck = { input: EstimateInput; error?: undefined } | { input?: undefined; error: string }
 // A model call's usage, as a step or a turn reports it.
 type Usage = {
@@ -82,6 +85,7 @@ type SharedName = keyof SharedOutputs
 type SharedRequest<N extends SharedName> = { name: N; key: string; since: number; arguments: readonly string[] }
 // One piece of work a session repeats: a timer's tick, or a refresh an event asks for.
 type OneAtATime = { tick: () => Promise<void>; refresh: () => Promise<void> }
+type WorkObserver = (list: readonly Work[]) => void
 // A timer of the band: `busyMs` is its pace while the session works, `idleMs`
 // its pace while idle; left out, the timer waits while the session is idle.
 // `tick` runs at its pace and skips while its last run still goes; `refresh`,
@@ -95,6 +99,18 @@ interface BandTimer {
 interface TimerOwner {
   markActive: () => Promise<void>
 }
+interface SettledCodexWorks {
+  works: Work[]
+  usedPending: boolean
+  usedReservations: string[]
+}
+interface SeenCodexRecords {
+  records: readonly CodexRecord[]
+  foundIds: ReadonlySet<string | undefined>
+  usedCommands: ReadonlySet<string>
+  sessionId: string
+  isReadFailed: boolean
+}
 
 const PANE = 'usage'
 const TITLE = '사용량'
@@ -106,8 +122,7 @@ const TURN_TICK_MS = 1000
 // long, so the short gaps between replies leave the timers as they are.
 const IDLE_AFTER_MS = 60 * 1000
 
-// Change a tag when that value's fields change: it declines what an earlier
-// version stored, which outlives a reload.
+// Keep tags for compatible additions: another tag discards stored work.
 const live = atom({ plugin: 'usage-panel', key: 'live' } as const, { limits: [], contextWindow: 0 } as Live, {
   shape: 'live-1',
 })
@@ -154,12 +169,12 @@ const CODEX_SERVER_EVERY_MS = 5 * 60 * 1000
 // A reading older than this is drawn grey with the time it was read.
 const STALE_MS = 15 * 60 * 1000
 const CODEX_READ_MS = 40 * 1000
-const CODEX_RUN = /\bcodex\s+(?:exec|e)\b/
+const CODEX_RUN = /\bcodex\b[^\n;&]*\s(?:exec|e)\b/
 // A command that runs codex exec itself, not one that only names it (a
 // commit message, a search): at the start of the line or after a separator,
 // past variable settings and a few wrappers, and not asking for its help.
 const CODEX_INVOCATION =
-  /(?:^|[;&|(\n]|\$\()\s*(?:\w+=\S*\s+)*(?:(?:env|nohup|caffeinate(?:\s+-\w+)*|timeout\s+\S+)\s+)*(?:\S*\/)?codex\s+(?:exec|e)\b(?!\s+(?:--help|-h)\b)/
+  /(?:^|[;&|\n])\s*(?:\w+=\S*\s+)*(?:(?:env|nohup|caffeinate(?:\s+-\w+)*|timeout\s+\S+)\s+)*(?:[^\s'";|&]*\/)?codex\s+(?:(?:--[\w-]+(?:=[^\s'";|&]+)?|-\w)(?:\s+[^\s'";|&]+=[^\s'";|&]+)?\s+)*(?:exec|e)\b(?!\s+(?:--help|-h)\b)/
 const CODEX_MODE = { local: 'local', server: 'server' } as const
 const CODEX_READ_FAILED = 'Codex 사용량을 읽지 못했어요'
 const CLAUDE_NAME = 'Claude'
@@ -250,6 +265,11 @@ const pendingCodexEstimate = atom(
   null as WorkEstimate | null,
   { shape: 'pending-codex-1' },
 )
+const reservedCodexEstimates = atom(
+  { plugin: 'usage-panel', key: 'reservedCodexEstimates' } as const,
+  {} as CodexReservations,
+  { shape: 'codex-reservations-1' },
+)
 // Bumped twice a minute while work runs, so its minutes left redraw.
 const workTick = atom({ plugin: 'usage-panel', key: 'workTick' } as const, 0, { shape: 'work-tick-1' })
 const WORK_TICK_MS = 30 * 1000
@@ -265,9 +285,10 @@ const CODEX_ESTIMATE_MS = 10 * 60 * 1000
 // and up to the approval wait after it, since the command waits for the
 // person's approval before it runs.
 const CODEX_MATCH_MS = 15 * 1000
+// The owner the reader names for a run whose reservation it could not trace.
+const UNKNOWN_OWNER = 'unknown'
 const CODEX_APPROVAL_MS = 5 * 60 * 1000
-// A run whose record is not found this long after it ended keeps the end it
-// was seen at and no totals.
+// Recent legacy completions need proof before they can keep their check.
 const CODEX_SETTLE_MS = 10 * 60 * 1000
 // No estimate runs past a day: a longer one is a slip.
 const ESTIMATE_MAX_MINUTES = 24 * 60
@@ -279,13 +300,14 @@ const PLAN_TOOL_NAME = 'mcp__ccd_turn__update_plan'
 const ESTIMATE_SPEC = {
   name: ESTIMATE_TOOL,
   description:
-    'Record a time estimate so the usage band shows it next to the actual result. Call it whenever you tell the user how long work will take: maker "claude" for the rest of this turn, with steps as the number of tool calls you expect; maker "codex" right before you start a codex exec run, without steps, or while a run you started is at work to change its estimate. Call it again when the estimate changes.',
+    'Record a time estimate so the usage band shows it next to the actual result. Call it whenever you tell the user how long work will take: maker "claude" for the rest of this turn, with steps as the number of tool calls you expect. For maker "codex", omit steps and give reservation to attach or update the estimate for that reservation, now or when its record appears. Without reservation, attach to the only running or starting run in this session that has no estimate; otherwise keep it for the next run appearing within ten minutes. Every run from that same command receives it. Claude estimates are unchanged.',
   inputSchema: {
     type: 'object',
     properties: {
       maker: { enum: ['claude', 'codex'] },
       minutes: { type: 'number', minimum: 1, maximum: ESTIMATE_MAX_MINUTES },
       steps: { type: 'integer', minimum: 1 },
+      reservation: { type: 'string', minLength: 1 },
     },
     required: ['maker', 'minutes'],
   },
@@ -631,12 +653,20 @@ run_shared(read_history)
 // stopped, and only for the runs those need. Keys without a value are left out.
 const CODEX_READER = String.raw`
 import glob, subprocess, select, shutil, datetime, functools
+import re
 HOME = os.path.expanduser('~')
 ROOT = os.path.join(HOME, '.codex', 'sessions')
 KIND = {300: 'five_hour', 10080: 'seven_day'}
 TAIL_BYTES = 512 * 1024
-START_SLACK_MS = 5000
 FINISHED_KEEP_S = 2 * 60 * 60
+LEDGER = os.path.join(HOME, '.claude', 'codex-budget', 'ledger.jsonl')
+LEDGER_KEY = '__ledger__'
+RESERVATION_MARK = b'Budget reservation: '
+RESERVATION_LINE = re.compile('^' + re.escape(RESERVATION_MARK.decode()) + r'([^\s]+)(?:\r?\n|$)')
+RUNNING = 'running'
+DONE = 'done'
+STOPPED = 'stopped'
+UNKNOWN = 'unknown'
 
 def iso(seconds):
     return datetime.datetime.fromtimestamp(seconds, datetime.timezone.utc).isoformat()
@@ -760,6 +790,11 @@ EMPTY_RECORD = {
     'last_rate': None,
     'rate_count': 0,
     'steps': 0,
+    'reservation': None,
+    'has_turn': False,
+    'turn_id': None,
+    'turn_started': None,
+    'aborted': False,
 }
 
 
@@ -767,18 +802,35 @@ EMPTY_RECORD = {
 # the setting its last turn started with, its totals, the limits at its first
 # and newest step and how many steps reported them, how many steps reported
 # their totals, when it finished.
+# Codex puts its own instructions in user messages before the brief, so the
+# reservation is looked for in each user message until one names it.
 def scan_record(path, kept):
+    if kept is not None and 'reservation' not in kept:
+        kept = None
     record = start_place(path, kept, EMPTY_RECORD)
 
     for raw in new_lines(path, record):
-        if b'"turn_context"' in raw[:120]:
-            payload = json.loads(raw)['payload']
+        is_user = record['reservation'] is None and RESERVATION_MARK in raw and b'"user"' in raw
+        is_event = b'"event_msg"' in raw and any(marker in raw for marker in (
+            b'"token_count"', b'"task_started"', b'"task_complete"', b'"turn_aborted"'))
 
+        if not (is_user or is_event or b'"turn_context"' in raw):
+            continue
+        entry = json.loads(raw)
+        payload = entry.get('payload') or {}
+        kind = entry.get('type')
+
+        if (is_user and kind == 'response_item'
+                and payload.get('type') == 'message' and payload.get('role') == 'user'):
+            text = next((part.get('text', '') for part in payload.get('content', [])
+                         if part.get('type') == 'input_text'), '')
+            match = RESERVATION_LINE.match(text)
+
+            record['reservation'] = match.group(1) if match else None
+        elif kind == 'turn_context':
             record['model'] = payload.get('model') or record['model']
-            record['effort'] = payload.get('effort') or record['effort']
-        elif b'"token_count"' in raw:
-            payload = json.loads(raw)['payload']
-
+            record['effort'] = payload.get('effort')
+        elif kind == 'event_msg' and payload.get('type') == 'token_count':
             if payload.get('info'):
                 record['total'] = payload['info'].get('total_token_usage') or record['total']
                 record['steps'] += 1
@@ -788,8 +840,22 @@ def scan_record(path, kept):
                 record['first_rate'] = found if record['rate_count'] == 0 else record['first_rate']
                 record['last_rate'] = found
                 record['rate_count'] += 1
-        elif b'"task_complete"' in raw:
-            record['finished'] = ms(json.loads(raw)['timestamp'])
+        elif kind == 'event_msg':
+            turn_id = ((payload.get('turn_attribution') or {}).get('turn_id')
+                       or payload.get('turn_id') or entry.get('turn_id'))
+
+            if payload.get('type') == 'task_started':
+                record['has_turn'] = True
+                record['turn_id'] = turn_id
+                record['turn_started'] = ms(entry['timestamp'])
+                record['finished'] = None
+                record['aborted'] = False
+            elif record['has_turn'] and turn_id == record['turn_id']:
+                if payload.get('type') == 'turn_aborted':
+                    record['aborted'] = True
+                    record['finished'] = None
+                elif payload.get('type') == 'task_complete' and not record['aborted']:
+                    record['finished'] = ms(entry['timestamp'])
     return record
 
 
@@ -817,58 +883,82 @@ def totals(path, record):
     return found
 
 
-def last_run(files, read_record):
-    for path in files:
-        if is_exec(path):
-            record = read_record(path)
+# A ledger line's reservation and the session that made it, or None.
+def ledger_owner(raw):
+    try:
+        entry = json.loads(raw)
+    except ValueError:
+        return None
+    if (entry.get('event') == 'reserve' and isinstance(entry.get('identifier'), str)
+            and isinstance(entry.get('session'), str)):
+        return entry['identifier'], entry['session']
+    else:
+        return None
 
-            if record['finished'] and record['total']:
-                return {'finishedAt': record['finished'], **totals(path, record)}
-    return None
 
-# The runs that finished within the keep, each by when it started, so a
-# session finds the runs it started; the files come newest first.
-def finished_runs(files, read_record):
-    found = []
-    since = time.time() - FINISHED_KEEP_S
+def reservation_owners(kept):
+    try:
+        stat = os.stat(LEDGER)
+        signature = [stat.st_size, stat.st_mtime_ns]
 
-    for path in files:
-        if os.path.getmtime(path) < since:
-            break
-        if is_exec(path):
-            record = read_record(path)
+        if kept and kept.get('signature') == signature:
+            return kept
+        else:
+            with open(LEDGER, encoding='utf-8') as file:
+                owners = dict(owner for owner in map(ledger_owner, file) if owner)
+            return {'signature': signature, 'owners': owners}
+    except OSError:
+        return {'owners': {}}
 
-            if record['finished'] and record['total']:
-                began = ms(first(path)['timestamp'])
 
-                found.append({'startedAt': began, 'finishedAt': record['finished'], 'steps': record['steps'], **totals(path, record)})
-    return found
+def open_records(command):
+    try:
+        ran = subprocess.run(command, capture_output=True, text=True, timeout=10)
 
-# When each codex exec at work started, from the process list.
-def exec_starts():
-    lines = subprocess.run(['/bin/ps', '-axo', 'lstart=,command='], capture_output=True, text=True, env={'LC_ALL': 'C'}).stdout.splitlines()
-    starts = []
-    for words in (l.split() for l in lines):
-        if len(words) > 6 and words[5].endswith('codex') and words[6] == 'exec':
-            starts.append(int(time.mktime(time.strptime(' '.join(words[:5]), '%a %b %d %H:%M:%S %Y')) * 1000))
-    return starts
+        if ran.returncode == 1 and not ran.stdout.strip() and not ran.stderr.strip():
+            return {}, False
+        elif ran.returncode != 0:
+            return {}, True
+        else:
+            found = {}
+            process = None
 
-# A run at work is the one whose record began when a codex exec process
-# started; a record left unfinished by a run that was stopped has no process.
-# Only such a record is read, the others are passed by their first line.
-def working(files, starts, read_record):
-    found = []
+            for line in ran.stdout.splitlines():
+                if line.startswith('p'):
+                    process = line[1:]
+                elif line.startswith('n' + ROOT + os.sep) and process:
+                    path = line[1:]
 
-    for path in files:
-        if is_exec(path):
-            began = ms(first(path)['timestamp'])
+                    if os.path.basename(path).startswith('rollout-') and path.endswith('.jsonl'):
+                        found.setdefault(path, set()).add(process)
+            return found, False
+    except (OSError, subprocess.SubprocessError):
+        return {}, True
 
-            if any(abs(began - s) <= START_SLACK_MS for s in starts):
-                record = read_record(path)
 
-                if not record['finished']:
-                    found.append({'startedAt': began, 'steps': record['steps'], **totals(path, record)})
-    return found
+def run_record(path, record, owners, opened, failed):
+    if failed:
+        state = UNKNOWN
+    elif path in opened:
+        state = RUNNING
+    elif record['finished'] is not None and not record['aborted']:
+        state = DONE
+    else:
+        state = STOPPED
+    run = {
+        **totals(path, record),
+        'recordId': os.path.basename(path),
+        'startedAt': ms(first(path)['timestamp']),
+        'steps': record['steps'],
+        'reservation': record['reservation'],
+        'ownerSessionId': owners.get(record['reservation'], UNKNOWN),
+        'state': state,
+        'turnId': record['turn_id'],
+        'turnStartedAt': record.get('turn_started'),
+        'finishedAt': record['finished'] if state == DONE else None,
+    }
+
+    return present(run)
 
 
 def present(values):
@@ -885,22 +975,51 @@ def read_codex(arguments, kept):
         return present({'limits': limits, 'configured': configured, 'error': error}), {}
     else:
         records = {}
+        command = arguments[1:] or ['/usr/sbin/lsof', '-nP', '-w', '-Fpn', '-c', 'codex']
+        opened, failed = open_records(command)
+        ledger = reservation_owners(kept.get(LEDGER_KEY))
+        now = time.time() * 1000
+        since = now - FINISHED_KEEP_S * 1000
+        retained = {path for path, scan in kept.items()
+                    if path != LEDGER_KEY and scan.get('state') in (RUNNING, UNKNOWN) and os.path.isfile(path)}
+        closed = {path for path, scan in kept.items()
+                  if path != LEDGER_KEY and scan.get('closed_at', 0) >= since and os.path.isfile(path)}
+        files = sorted(set(recent()) | set(opened) | retained | closed, key=os.path.getmtime, reverse=True)
+        runs = []
+        processes = set()
 
-        def read_record(path):
-            if path not in records:
-                records[path] = scan_record(path, kept.get(path))
-            return records[path]
+        for path in files:
+            if not is_exec(path):
+                continue
+            # A closed record that grew since its scan was resumed: read it again.
+            is_grown = path in kept and os.path.getsize(path) != kept[path].get('offset')
+            is_recent = ms(first(path)['timestamp']) >= since or os.path.getmtime(path) * 1000 >= since
+            needs_scan = path in opened or path in retained or is_grown or is_recent
 
-        files = recent()
-        starts = exec_starts()
+            if needs_scan or path in closed:
+                record = scan_record(path, kept.get(path)) if needs_scan else dict(kept[path])
+                run = run_record(path, record, ledger['owners'], opened, failed)
+
+                if run['state'] in (DONE, STOPPED):
+                    record['closed_at'] = record.get('closed_at', now)
+                else:
+                    record.pop('closed_at', None)
+                record['state'] = run['state']
+                records[path] = record
+                runs.append(run)
+                processes.update(opened.get(path, set()))
+        done = sorted((run for run in runs if run['state'] == DONE), key=lambda run: run['finishedAt'], reverse=True)
         found = {
             'snapshot': snapshot(files),
-            'last': last_run(files, read_record),
-            'working': working(files, starts, read_record),
-            'finished': finished_runs(files, read_record),
-            'running': len(starts),
+            'last': done[0] if done else None,
+            'working': [run for run in runs if run['state'] == RUNNING],
+            'finished': [run for run in done if run['finishedAt'] >= (time.time() - FINISHED_KEEP_S) * 1000],
+            'records': runs,
+            'running': len(processes),
+            'isProcessReadFailed': failed,
         }
 
+        records[LEDGER_KEY] = ledger
         return present(found), records
 
 run_shared(read_codex)
@@ -1103,7 +1222,9 @@ function mergeCodexLocal(before: Codex, output: CodexLocalOutput): Codex {
     last: output.last ?? before.last,
     working: output.working,
     finished: output.finished ?? before.finished,
-    running: output.running,
+    running: output.isProcessReadFailed ? before.running : output.running,
+    records: output.records,
+    isProcessReadFailed: output.isProcessReadFailed,
   }
 }
 
@@ -1151,7 +1272,7 @@ function settingText(setting: CodexSetting): string {
 }
 
 // The setting a run's record names; none before its first turn starts.
-function runSetting(run: CodexTotals): CodexSetting | undefined {
+function runSetting(run: Pick<CodexTotals, 'model' | 'effort'>): CodexSetting | undefined {
   if (run.model) {
     return { model: run.model, effort: run.effort }
   }
@@ -1400,9 +1521,23 @@ async function startPacedTimers(
 
 // A failed read of the run records shows on the Codex line until a read
 // succeeds. Noting it is a help: one that fails leaves the line as it was.
-async function recordCodexReadFailure($: EngineInterface): Promise<void> {
+async function recordCodexReadFailure($: EngineInterface, rememberWorks: WorkObserver): Promise<Codex | undefined> {
   try {
-    await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED }))
+    const now = await $.clock.now()
+    // A run seen running may have ended since; one seen ended stays ended.
+    const markRecordUnknown = (record: CodexRecord): CodexRecord =>
+      record.state === 'running' ? { ...record, state: 'unknown', finishedAt: undefined } : record
+    const markFailed = (before: Codex): Codex => ({
+      ...before,
+      error: CODEX_READ_FAILED,
+      isProcessReadFailed: true,
+      records: before.records?.map(markRecordUnknown),
+    })
+    const state = await update($, codex, markFailed)
+    const markUnknown = (work: Work): Work => isCodexWorkOpen(work, now) ? unknownCodexWork(work) : work
+
+    await writeWorks($, rememberWorks, list => list.map(markUnknown))
+    return state
   } catch {
     // The next read notes it again.
   }
@@ -1410,11 +1545,11 @@ async function recordCodexReadFailure($: EngineInterface): Promise<void> {
 
 // A failed server read shows as one that failed, and the server is asked
 // again once its next reading is due.
-async function recordCodexServerFailure($: EngineInterface): Promise<void> {
+async function recordCodexServerFailure($: EngineInterface): Promise<Codex | undefined> {
   try {
     const now = await $.clock.now()
 
-    await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED, serverAt: now }))
+    return await update($, codex, before => ({ ...before, error: CODEX_READ_FAILED, serverAt: now }))
   } catch {
     // The next read notes it again.
   }
@@ -1867,14 +2002,16 @@ function isWholeNumber(value: unknown): value is number {
 
 // The estimate tool's input comes from the model, so each field is checked.
 function checkEstimateInput(e: Record<string, unknown>): EstimateCheck {
-  const { maker, minutes, steps } = e
+  const { maker, minutes, steps, reservation } = e
 
   if (!isWorkMaker(maker)) {
     return { error: 'maker는 "claude"나 "codex"여야 해요.' }
   } else if (typeof minutes !== 'number' || !(minutes >= 1 && minutes <= ESTIMATE_MAX_MINUTES)) {
     return { error: `minutes는 1에서 ${ESTIMATE_MAX_MINUTES} 사이의 숫자여야 해요.` }
+  } else if (reservation !== undefined && (typeof reservation !== 'string' || reservation.trim().length === 0)) {
+    return { error: '예약 번호(reservation)는 비어 있지 않은 문자열이어야 해요.' }
   } else if (maker === 'codex') {
-    return { input: { maker, minutes } }
+    return { input: { maker, minutes, reservation: typeof reservation === 'string' ? reservation : undefined } }
   } else if (isWholeNumber(steps)) {
     return { input: { maker, minutes, steps } }
   } else {
@@ -1922,8 +2059,17 @@ function isWork(value: unknown): value is Work {
     isOptionalNumber(work.finishedAt) &&
     isOptionalNumber(work.startContext) &&
     isOptionalNumber(work.rise) &&
+    isOptionalNumber(work.recordStartedAt) &&
+    isOptionalNumber(work.commandStartedAt) &&
+    [work.recordId, work.reservation, work.turnId, work.model, work.effort, work.commandId]
+      .every(field => field === undefined || typeof field === 'string') &&
+    [work.state, work.previousState]
+      .every(state => state === undefined || CODEX_WORK_STATES.some(known => known === state)) &&
+    [work.isGuessed, work.canMatchRecord].every(field => field === undefined || typeof field === 'boolean') &&
     (work.estimate === undefined || isEstimate(work.estimate)) &&
     (work.firstEstimate === undefined || isEstimate(work.firstEstimate)) &&
+    (work.commandEstimate === undefined || isEstimate(work.commandEstimate)) &&
+    (work.commandFirstEstimate === undefined || isEstimate(work.commandFirstEstimate)) &&
     (work.expected === undefined || isLoad(work.expected))
   )
 }
@@ -2053,105 +2199,270 @@ function latestWork(list: readonly Work[], maker: WorkMaker): Work | undefined {
   return [...list].reverse().find(w => w.maker === maker)
 }
 
+function shownCodexWork(list: readonly Work[], now: number): Work | undefined {
+  const codexWorks = list.filter(w => w.maker === 'codex')
+  const open = codexWorks.filter(w => isCodexWorkOpen(w, now))
+  const active = open.filter(isCodexWorkActive)
+  const closed = codexWorks.filter(w => w.state !== 'unknown')
+  const byDue = (a: Work, b: Work): number => {
+    const aDue = a.estimate?.dueAt ?? Infinity
+    const bDue = b.estimate?.dueAt ?? Infinity
+
+    return aDue === bDue ? b.startedAt - a.startedAt : aDue > bDue ? -1 : 1
+  }
+
+  return active.sort(byDue)[0] ?? open.find(w => w.state === 'unknown') ??
+    codexWorks.find(w => w.state === 'stopped') ??
+    closed.sort((a, b) => (b.finishedAt ?? b.startedAt) - (a.finishedAt ?? a.startedAt))[0] ?? codexWorks.at(-1)
+}
+
 function runningClaudeWork(list: readonly Work[]): Work | undefined {
   return [...list].reverse().find(w => w.maker === 'claude' && w.finishedAt === undefined)
 }
 
-// The records the reader saw lately, at work and finished.
-function codexRecords(state: Codex): CodexRecord[] {
-  return [...state.working, ...(state.finished ?? [])]
+function codexWorkExpiresAt(work: Work): number {
+  const changedAt = Math.max(work.startedAt, work.finishedAt ?? 0, work.estimate?.setAt ?? 0)
+
+  return (work.state === 'starting' ? (work.commandStartedAt ?? work.startedAt) : changedAt) + CODEX_ESTIMATE_MS
 }
 
-// Whether the record began within the run's window: from just before its
-// command was seen until the approval wait after it, and not after it ended.
-function isInMatchWindow(record: CodexRecord, work: Work): boolean {
-  const isAfterStart = record.startedAt >= work.startedAt - CODEX_MATCH_MS
-  const isBeforeLimit = record.startedAt <= Math.min(work.startedAt + CODEX_APPROVAL_MS, work.finishedAt ?? Infinity)
-
-  return isAfterStart && isBeforeLimit
-}
-
-// The record this run took before, or else the free record closest to its
-// start within its window; a record another run took stays that run's.
-function matchCodexRecord(
-  work: Work,
-  records: readonly CodexRecord[],
-  claimed: ReadonlySet<number>,
-): CodexRecord | undefined {
-  const distance = (r: CodexRecord): number => Math.abs(r.startedAt - work.startedAt)
-
-  if (work.recordStartedAt !== undefined) {
-    return records.find(r => r.startedAt === work.recordStartedAt)
+function isCodexWorkOpen(work: Work, now: number): boolean {
+  if (!work.recordId && now >= codexWorkExpiresAt(work)) {
+    return false
+  } else if (work.state) {
+    return work.maker === 'codex' && (isCodexWorkActive(work) || work.state === 'unknown')
   } else {
-    const free = records.filter(r => !claimed.has(r.startedAt) && isInMatchWindow(r, work))
-
-    return free.sort((a, b) => distance(a) - distance(b))[0]
+    return work.maker === 'codex' && (work.finishedAt === undefined || now - work.finishedAt < CODEX_SETTLE_MS)
   }
 }
 
-// A run started here takes its record's totals and its true start; a
-// finished record ends it at the record's end.
-function settleCodexWork(work: Work, records: readonly CodexRecord[], claimed: ReadonlySet<number>): Work {
-  const record = matchCodexRecord(work, records, claimed)
+function unknownCodexWork(work: Work): Work {
+  return {
+    ...work,
+    state: 'unknown',
+    previousState: work.state === 'unknown' ? work.previousState : work.state,
+    expected: undefined,
+  }
+}
 
-  if (record) {
-    return {
-      ...work,
-      startedAt: record.startedAt,
-      recordStartedAt: record.startedAt,
-      steps: record.steps,
-      tokens: codexTokens(record),
-      weight: codexWeight(record),
-      finishedAt: record.finishedAt ?? work.finishedAt,
-      rise: record.finishedAt === undefined ? undefined : (record.rise ?? 0),
-    }
+function recordWork(record: CodexRecord, work: Work, pace: WorkPace): Work {
+  const state = record.state ?? 'unknown'
+  const settled: Work = {
+    ...work,
+    id: record.recordId ?? work.id,
+    recordId: record.recordId,
+    recordStartedAt: record.startedAt,
+    reservation: record.reservation,
+    startedAt: record.startedAt,
+    finishedAt: state === 'done' ? record.finishedAt : state === 'unknown' ? work.finishedAt : undefined,
+    state,
+    previousState: state === 'unknown' ? (work.state === 'unknown' ? work.previousState : work.state) : undefined,
+    turnId: record.turnId,
+    model: record.model,
+    effort: record.effort,
+    steps: record.steps,
+    tokens: codexTokens(record),
+    weight: codexWeight(record),
+    rise: state === 'done' ? record.rise : undefined,
+    expected: undefined,
+    isGuessed: record.ownerSessionId === UNKNOWN_OWNER,
+  }
+
+  return { ...settled, expected: state === 'done' ? expectedLoad(settled, pace) : undefined }
+}
+
+// The command a record's run came from: a placeholder whose command came just
+// before the run started (its first turn, or the turn a resume began), or a
+// command already resolved whose first run started together with this one.
+function matchingCommand(
+  record: CodexRecord,
+  list: readonly Work[],
+  usedCommands: ReadonlySet<string>,
+  runStartedAt: number,
+): Work | undefined {
+  const isEligible = (work: Work): boolean => {
+    const startedAt = work.commandStartedAt
+    // An owned record can resolve an expired placeholder; an unowned one only
+    // within the approval wait.
+    const latest = work.recordId
+      ? (work.recordStartedAt ?? work.startedAt) + CODEX_MATCH_MS
+      : (startedAt ?? 0) + (record.ownerSessionId === UNKNOWN_OWNER ? CODEX_APPROVAL_MS : Infinity)
+
+    return work.maker === 'codex' && work.canMatchRecord === true && startedAt !== undefined &&
+      runStartedAt >= startedAt - CODEX_MATCH_MS && runStartedAt <= latest
+  }
+  const distance = (work: Work): number => Math.abs(runStartedAt - (work.commandStartedAt ?? work.startedAt))
+  const used = (work: Work): number => Number(usedCommands.has(work.commandId ?? ''))
+
+  return list.filter(isEligible).sort((a, b) => distance(a) - distance(b) || used(a) - used(b))[0]
+}
+
+// Old timestamps are only migration evidence, never an identity for new work.
+function relinkCodexWork(work: Work, records: readonly CodexRecord[], now: number): Work {
+  const matches = records.filter(r => r.ownerSessionId === work.sessionId && r.startedAt === work.recordStartedAt)
+
+  if (work.maker !== 'codex' || work.recordId || work.commandId) {
+    return work
+  } else if (matches.length === 1 && matches[0]?.recordId) {
+    return { ...work, recordId: matches[0].recordId }
+  } else if (work.finishedAt === undefined || now - work.finishedAt < CODEX_SETTLE_MS || work.state === 'unknown') {
+    return unknownCodexWork(work)
   } else {
     return work
   }
 }
 
-// Every open run of this session settles against the records, one record per
-// run: a record a run took is no other run's. A run whose record never showed
-// ends once no codex exec works; a finished run keeps its estimate's cost.
-function settleCodexWorks(list: readonly Work[], state: Codex, pace: WorkPace, now: number): Work[] {
-  const records = codexRecords(state)
-  const claimed = new Set(list.flatMap(w => (w.recordStartedAt === undefined ? [] : [w.recordStartedAt])))
+function settleCodexWorks(
+  list: readonly Work[],
+  state: Codex,
+  pace: WorkPace,
+  now: number,
+  sessionId: string,
+  pending: WorkEstimate | null,
+  reservations: Readonly<CodexReservations>,
+): SettledCodexWorks {
+  const records = (state.records ?? []).filter(r => r.recordId !== undefined)
+  const migrated = list.map(w => relinkCodexWork(w, records, now))
+  const found: Work[] = []
+  const usedCommands = new Set<string>()
+  const usedReservations: string[] = []
+  let usedPending = false
 
-  const settle = (w: Work): Work => endUnseenCodexWork(settleCodexWork(w, records, claimed), state, now)
+  for (const record of records) {
+    const existing = migrated.find(w => w.maker === 'codex' && w.recordId === record.recordId)
+    const isResumed = existing !== undefined && existing.turnId !== undefined && existing.turnId !== record.turnId
+    const resumedCommand = isResumed
+      ? matchingCommand(record, migrated, usedCommands, record.turnStartedAt ?? record.startedAt)
+      : undefined
+    const command = existing
+      ? (resumedCommand ?? (existing.commandId ? existing : undefined))
+      : matchingCommand(record, migrated, usedCommands, record.startedAt)
+    const isOwned = record.ownerSessionId === sessionId
+    const isGuess = record.ownerSessionId === UNKNOWN_OWNER && (existing?.isGuessed === true || command !== undefined)
 
-  return list.map(w => {
-    const settled = isCodexWorkOpen(w, now) ? settle(w) : w
-    const isNewlyEnded = settled !== w && settled.finishedAt !== undefined
+    if (isOwned || isGuess) {
+      const pendingEstimate = !usedPending && pending && now - pending.setAt <= CODEX_ESTIMATE_MS
+        ? pending
+        : undefined
+      const reserved = record.reservation ? reservations[record.reservation] : undefined
+      const group = command?.commandId ? found.find(w => w.commandId === command.commandId) : undefined
+      // A run takes its command's estimate, or a sibling's from that command.
+      const inherited = command?.commandEstimate ?? group?.commandEstimate
+      const inheritedFirst = command?.commandFirstEstimate ?? group?.commandFirstEstimate
+      const commandPending = command ? pendingEstimate : undefined
+      const resumedEstimate = resumedCommand ? (inherited ?? pendingEstimate) : undefined
+      const resumed: Work | undefined = existing && resumedCommand
+        ? {
+          ...existing,
+          commandId: resumedCommand.commandId,
+          commandStartedAt: resumedCommand.commandStartedAt,
+          commandEstimate: resumedEstimate,
+          commandFirstEstimate: resumedEstimate,
+          estimate: resumedEstimate,
+          firstEstimate: resumedEstimate,
+        }
+        : undefined
+      const base: Work = resumed ?? existing ?? {
+        maker: 'codex',
+        id: record.recordId ?? '',
+        sessionId,
+        startedAt: record.startedAt,
+        steps: 0,
+        tokens: 0,
+        weight: 0,
+        commandId: command?.commandId,
+        commandStartedAt: command?.commandStartedAt,
+        canMatchRecord: command?.canMatchRecord,
+        commandEstimate: inherited ?? commandPending,
+        commandFirstEstimate: inheritedFirst ?? commandPending,
+        estimate: inherited ?? pendingEstimate,
+        firstEstimate: inheritedFirst ?? pendingEstimate,
+      }
+      const estimated = reserved ? addEstimate(base, reserved) : base
 
-    if (settled.recordStartedAt !== undefined) {
-      claimed.add(settled.recordStartedAt)
+      found.push(recordWork(record, estimated, pace))
+      if (reserved && record.reservation) {
+        usedReservations.push(record.reservation)
+      }
+      if ((!existing || resumedCommand) && !inherited && pendingEstimate) {
+        usedPending = true
+      }
+      if (command?.commandId) {
+        usedCommands.add(command.commandId)
+      }
     }
-    return isNewlyEnded ? { ...settled, expected: expectedLoad(settled, pace) } : settled
-  })
+  }
+  const seen: SeenCodexRecords = {
+    records,
+    foundIds: new Set(found.map(w => w.recordId)),
+    usedCommands,
+    sessionId,
+    isReadFailed: state.isProcessReadFailed === true,
+  }
+  const kept = migrated.flatMap(w => keptCodexWork(w, seen, now))
+
+  return { works: [...kept, ...found], usedPending, usedReservations }
 }
 
-// A run in the background whose record never showed ends when no codex exec
-// works any more.
-function endUnseenCodexWork(work: Work, state: Codex, now: number): Work {
-  const isUnseenEnd = work.finishedAt === undefined && state.running === 0 && now - work.startedAt > CODEX_MATCH_MS
+// What becomes of a work the records did not settle this time. One a record
+// now stands for, or another session owns, goes. A recordless one goes, or
+// closes, once its wait ends. An open run whose record the reader no longer
+// lists is unknown while reads fail and stopped once a read succeeds; a run
+// already closed stays as it was, whatever the read.
+function keptCodexWork(work: Work, seen: SeenCodexRecords, now: number): Work[] {
+  const hasRecord = work.recordId !== undefined
+  const record = hasRecord ? seen.records.find(r => r.recordId === work.recordId) : undefined
+  const isOtherOwner = record?.ownerSessionId !== undefined && record.ownerSessionId !== seen.sessionId &&
+    record.ownerSessionId !== UNKNOWN_OWNER
+  const isResolved = !hasRecord && work.commandId !== undefined && seen.usedCommands.has(work.commandId)
+  const isReplaced = hasRecord && seen.foundIds.has(work.recordId)
+  const isRecordlessDue = !hasRecord && (work.state !== undefined || work.finishedAt === undefined) &&
+    now >= codexWorkExpiresAt(work)
 
-  return isUnseenEnd ? { ...work, finishedAt: now } : work
+  if (work.maker !== 'codex') {
+    return [work]
+  } else if (isReplaced || isOtherOwner || isResolved) {
+    return []
+  } else if (isRecordlessDue) {
+    return work.state === 'starting' || work.commandId !== undefined ? [] : [unknownCodexWork(work)]
+  } else if (hasRecord && isCodexWorkOpen(work, now)) {
+    return seen.isReadFailed
+      ? [unknownCodexWork(work)]
+      : [{ ...work, state: 'stopped', previousState: work.state, finishedAt: undefined, expected: undefined }]
+  } else {
+    return [work]
+  }
 }
 
-function isCodexWorkOpen(work: Work, now: number): boolean {
-  const isWaiting = work.finishedAt === undefined || now - work.finishedAt < CODEX_SETTLE_MS
-
-  return work.maker === 'codex' && work.rise === undefined && isWaiting
-}
-
-// A reply still running, or a Codex run still waiting for its record.
 function hasOpenWork(list: readonly Work[], now: number): boolean {
-  return list.some(w => w.finishedAt === undefined || isCodexWorkOpen(w, now))
+  return list.some(w => w.maker === 'codex' ? isCodexWorkOpen(w, now) : w.finishedAt === undefined)
 }
 
-// The work bookkeeping never stands in the way of the turn or the command it
-// rides on: a failure leaves that work unrecorded.
-async function startClaudeWork($: EngineInterface, turnId: string, now: number): Promise<void> {
+function keepOwnWorks(list: readonly Work[], now: number): Work[] {
+  const closed = list.filter(w => !hasOpenWork([w], now)).slice(-KEEP_OWN_WORKS)
+  const kept = new Set(closed)
+
+  return list.filter(w => kept.has(w) || hasOpenWork([w], now))
+}
+
+// Remember only the committed value, so a failed write cannot change which
+// timers remain awake. The host still owns the value across reloads.
+async function writeWorks(
+  $: EngineInterface,
+  rememberWorks: WorkObserver,
+  change: (list: Work[]) => Work[],
+): Promise<void> {
+  const saved = await update($, works, change)
+
+  rememberWorks(saved)
+}
+
+async function startClaudeWork(
+  $: EngineInterface,
+  turnId: string,
+  now: number,
+  rememberWorks: WorkObserver,
+): Promise<void> {
   try {
     const work: Work = {
       maker: 'claude',
@@ -2164,7 +2475,7 @@ async function startClaudeWork($: EngineInterface, turnId: string, now: number):
       weight: 0,
     }
 
-    await update($, works, list => [...list, work].slice(-KEEP_OWN_WORKS))
+    await writeWorks($, rememberWorks, list => keepOwnWorks([...list, work], now))
   } catch {
     // This turn goes unrecorded.
   }
@@ -2180,9 +2491,16 @@ function addStep(work: Work, usage: Usage): Work {
 }
 
 // Each step of the turn adds to its work: one more step, its tokens and weight.
-async function addClaudeStep($: EngineInterface, turnId: string, usage: Usage): Promise<void> {
+async function addClaudeStep(
+  $: EngineInterface,
+  turnId: string,
+  usage: Usage,
+  rememberWorks: WorkObserver,
+): Promise<void> {
   try {
-    await update($, works, list => list.map(w => (w.maker === 'claude' && w.id === turnId ? addStep(w, usage) : w)))
+    const add = (work: Work): Work => work.maker === 'claude' && work.id === turnId ? addStep(work, usage) : work
+
+    await writeWorks($, rememberWorks, list => list.map(add))
   } catch {
     // The turn's end reports its totals.
   }
@@ -2196,6 +2514,7 @@ async function finishClaudeWork(
   now: number,
   finished: Turn | undefined,
   isAborted: boolean,
+  rememberWorks: WorkObserver,
 ): Promise<void> {
   try {
     const pace = workPace(await read($, workHistory), await read($, limitHistory), 'claude')
@@ -2208,7 +2527,7 @@ async function finishClaudeWork(
       return { ...ended, expected: expectedLoad(ended, pace) }
     }
 
-    await update($, works, list =>
+    await writeWorks($, rememberWorks, list =>
       list.map(w => (w.maker === 'claude' && w.id === turnId && w.finishedAt === undefined ? end(w) : w)),
     )
   } catch {
@@ -2230,8 +2549,12 @@ function withTurnTotals(work: Work, finished: Turn | undefined): Work {
   }
 }
 
-function runningCodexWork(list: readonly Work[]): Work | undefined {
-  return [...list].reverse().find(w => w.maker === 'codex' && w.finishedAt === undefined)
+function estimateCodexWork(list: readonly Work[], reservation: string | undefined): Work | undefined {
+  const candidates = list.filter(w => w.maker === 'codex' && (reservation
+    ? w.reservation === reservation
+    : isCodexWorkActive(w) && !w.estimate && w.canMatchRecord !== false))
+
+  return candidates.length === 1 ? candidates[0] : undefined
 }
 
 function isWorkOf(work: Work, maker: WorkMaker, id: string): boolean {
@@ -2241,7 +2564,11 @@ function isWorkOf(work: Work, maker: WorkMaker, id: string): boolean {
 // Records the estimate the tool was given: Claude's on the turn at work, with
 // the conversation's length now; Codex's on the run at work, or else until
 // the next codex exec starts.
-async function recordEstimate($: EngineInterface, input: EstimateInput): Promise<string | undefined> {
+async function recordEstimate(
+  $: EngineInterface,
+  input: EstimateInput,
+  rememberWorks: WorkObserver,
+): Promise<string | undefined> {
   const now = await $.clock.now()
   const estimate: WorkEstimate = {
     minutes: input.minutes,
@@ -2251,12 +2578,19 @@ async function recordEstimate($: EngineInterface, input: EstimateInput): Promise
     contextTokens: input.maker === 'claude' ? (await read($, live)).contextTokens : undefined,
   }
   const list = await read($, works)
-  const target = input.maker === 'claude' ? runningClaudeWork(list) : runningCodexWork(list)
+  const target = input.maker === 'claude' ? runningClaudeWork(list) : estimateCodexWork(list, input.reservation)
   const due = local(estimate.dueAt, await read($, tzOffset)).hm
 
   if (target) {
-    await update($, works, all => all.map(w => (isWorkOf(w, target.maker, target.id) ? addEstimate(w, estimate) : w)))
+    const attach = (work: Work): Work => isWorkOf(work, target.maker, target.id) ? addEstimate(work, estimate) : work
+
+    await writeWorks($, rememberWorks, all => all.map(attach))
     return `${WORK_NAME[target.maker]} 작업을 ${due} 끝 예정으로 기록했어요.`
+  } else if (input.maker === 'codex' && input.reservation) {
+    const reservation = input.reservation
+
+    await update($, reservedCodexEstimates, all => ({ ...all, [reservation]: estimate }))
+    return `예약 ${reservation}의 Codex 작업을 ${due} 끝 예정으로 기록했어요.`
   } else if (input.maker === 'codex') {
     await update($, pendingCodexEstimate, () => estimate)
     return `다음 Codex 작업을 ${due} 끝 예정으로 기록했어요.`
@@ -2266,30 +2600,54 @@ async function recordEstimate($: EngineInterface, input: EstimateInput): Promise
 }
 
 function addEstimate(work: Work, estimate: WorkEstimate): Work {
-  return { ...work, estimate, firstEstimate: work.firstEstimate ?? estimate }
+  return {
+    ...work,
+    estimate,
+    firstEstimate: work.firstEstimate ?? estimate,
+    commandEstimate: work.state === 'starting' ? estimate : work.commandEstimate,
+    commandFirstEstimate: work.state === 'starting'
+      ? (work.commandFirstEstimate ?? estimate)
+      : work.commandFirstEstimate,
+  }
 }
 
 // A codex exec run starts with the Codex estimate given within the last ten
 // minutes, which it uses up. Says whether it had one; a failure counts as one,
 // so the session is not told of an estimate the mod lost.
-async function startCodexWork($: EngineInterface, toolUseId: string, now: number): Promise<boolean> {
+async function startCodexWork(
+  $: EngineInterface,
+  toolUseId: string,
+  now: number,
+  rememberWorks: WorkObserver,
+): Promise<boolean> {
   try {
     const pending = await read($, pendingCodexEstimate)
     const estimate = pending && now - pending.setAt <= CODEX_ESTIMATE_MS ? pending : undefined
+    const commandEstimate = estimate
+      ? { ...estimate, setAt: now, dueAt: now + estimate.minutes * MINUTE_MS }
+      : undefined
     const work: Work = {
       maker: 'codex',
       id: toolUseId,
       sessionId: await $.session.id(),
       startedAt: now,
-      estimate: estimate ? { ...estimate, setAt: now, dueAt: now + estimate.minutes * MINUTE_MS } : undefined,
+      state: 'starting',
+      commandId: toolUseId,
+      commandStartedAt: now,
+      canMatchRecord: true,
+      estimate: commandEstimate,
       firstEstimate: estimate,
+      commandEstimate,
+      commandFirstEstimate: estimate,
       steps: 0,
       tokens: 0,
       weight: 0,
     }
 
-    await update($, pendingCodexEstimate, () => null)
-    await update($, works, list => [...list, work].slice(-KEEP_OWN_WORKS))
+    if (estimate) {
+      await update($, pendingCodexEstimate, current => current?.setAt === estimate.setAt ? null : current)
+    }
+    await writeWorks($, rememberWorks, list => keepOwnWorks([...list, work], now))
     return estimate !== undefined
   } catch {
     return true
@@ -2298,14 +2656,16 @@ async function startCodexWork($: EngineInterface, toolUseId: string, now: number
 
 // Whether the reply at work has no estimate and was not told so yet; marks it
 // told, so a reload keeps it told. A failure tells nothing.
-async function markEstimateTold($: EngineInterface): Promise<boolean> {
+async function markEstimateTold($: EngineInterface, rememberWorks: WorkObserver): Promise<boolean> {
   try {
     const running = runningClaudeWork(await read($, works))
     const id = running?.id ?? ''
     const isDue = running !== undefined && running.estimate === undefined && running.isTold !== true
 
     if (isDue) {
-      await update($, works, list => list.map(w => (isWorkOf(w, 'claude', id) ? { ...w, isTold: true } : w)))
+      const markTold = (work: Work): Work => isWorkOf(work, 'claude', id) ? { ...work, isTold: true } : work
+
+      await writeWorks($, rememberWorks, list => list.map(markTold))
     }
     return isDue
   } catch {
@@ -2315,28 +2675,16 @@ async function markEstimateTold($: EngineInterface): Promise<boolean> {
 
 // A command that was refused never ran: its work goes, and the estimate it
 // took waits for the next run again.
-async function dropCodexWork($: EngineInterface, toolUseId: string): Promise<void> {
+async function dropCodexWork($: EngineInterface, toolUseId: string, rememberWorks: WorkObserver): Promise<void> {
   try {
     const dropped = (await read($, works)).find(w => isWorkOf(w, 'codex', toolUseId))
 
-    await update($, works, list => list.filter(w => !isWorkOf(w, 'codex', toolUseId)))
+    await writeWorks($, rememberWorks, list => list.filter(w => !isWorkOf(w, 'codex', toolUseId)))
     if (dropped?.firstEstimate) {
       await update($, pendingCodexEstimate, () => dropped.firstEstimate ?? null)
     }
   } catch {
-    // The run shows as ended once no codex exec works.
-  }
-}
-
-async function endForegroundCodexWork($: EngineInterface, toolUseId: string): Promise<void> {
-  try {
-    const now = await $.clock.now()
-    const isOpenRun = (w: Work): boolean => isWorkOf(w, 'codex', toolUseId) && w.finishedAt === undefined
-    const end = (w: Work): Work => (isOpenRun(w) ? { ...w, finishedAt: now } : w)
-
-    await update($, works, list => list.map(end))
-  } catch {
-    // The run shows as ended once no codex exec works.
+    // An unresolved placeholder is removed when its waiting period ends.
   }
 }
 
@@ -2380,7 +2728,11 @@ function timeParts(work: Work, now: number, offset: number): WorkPart[] {
   const estimate = work.estimate
   const end = work.finishedAt
 
-  if (end !== undefined) {
+  if (isCodexWorkUncertain(work)) {
+    return [{ key: 'state', text: work.state === 'stopped' ? '멈춤' : '확인 불가' }]
+  } else if (work.state === 'starting' && !estimate) {
+    return [{ key: 'state', text: '시작 중' }]
+  } else if (end !== undefined) {
     return [{ key: 'end', text: `${local(end, offset).hm} 끝`, isBold: true }, ...endGapPart(work, end)]
   } else if (estimate && estimate.dueAt >= now) {
     return [{ key: 'due', text: `${local(estimate.dueAt, offset).hm}까지 ${minutesText(estimate.dueAt - now)}` }]
@@ -2416,7 +2768,7 @@ function endGapPart(work: Work, end: number): WorkPart[] {
 // The tokens so far against the estimate's, the steps while it runs, and how
 // far past its tokens a finished work went.
 function tokenParts(work: Work, actual: WorkLoad, expected: WorkLoad | undefined): WorkPart[] {
-  const isDone = work.finishedAt !== undefined
+  const isDone = work.maker === 'codex' ? work.state === 'done' : work.finishedAt !== undefined
   const total: WorkPart = { key: 'tokens', text: tokens(actual.tokens) }
   const estimate: WorkPart[] = expected
     ? [{ key: 'expected', text: `/예상 ${tokens(expected.tokens)}`, isDim: true }]
@@ -2451,7 +2803,7 @@ function percentParts(actual: WorkLoad, expected: WorkLoad | undefined): WorkPar
 // A work's pieces as its usage line draws them, each after its own mark.
 function workPieces(work: Work, pace: WorkPace, now: number, offset: number): WorkPieces {
   const actual = actualLoad(work, pace)
-  const expected = work.expected ?? expectedLoad(work, pace)
+  const expected = isCodexWorkUncertain(work) ? undefined : work.expected ?? expectedLoad(work, pace)
 
   return {
     time: timeParts(work, now, offset),
@@ -2520,6 +2872,13 @@ export const register: Register = on => {
   let ownWorksSaver: (() => Promise<void>) | undefined
   let cacheReader: (() => Promise<void>) | undefined
   let timerOwner: TimerOwner | undefined
+  let settleCodex: (() => Promise<void>) | undefined
+  let ownWorks: readonly Work[] = []
+  let worksVersion = 0
+  const rememberWorks: WorkObserver = (list): void => {
+    ownWorks = list
+    worksVersion += 1
+  }
 
   on('session.start', async ($, e, next) => {
     const isReload = await read($, loaded)
@@ -2623,21 +2982,48 @@ export const register: Register = on => {
     // reading it took was made, none when it took none. Until this copy of the
     // mod took a reading of the records, every tick asks for one.
     let hasLocalReading = false
+    let localReadingAt: number | undefined
+    let readingVersion = 0
+    let localRecords: readonly CodexRecord[] = []
+    let codexState: Codex | undefined
+    let localRecordKey = '[]'
+    let codexSessionId: string | undefined
     const readCodexLocal = async (since: number): Promise<number | undefined> => {
       try {
         const request = { name: SHARED_NAME.codexLocal, key: SHARED_ANY_FOLDER, since, arguments: [CODEX_MODE.local] }
         const shared = await readShared($, request)
 
         if (shared) {
-          const merged = mergeCodexLocal(await read($, codex), shared.output)
+          const before = codexState ?? await read($, codex)
+          const merged = mergeCodexLocal(before, shared.output)
 
           hasLocalReading = true
-          await update($, codex, () => merged)
+          codexState = await update($, codex, () => merged)
+          if (shared.at !== localReadingAt || before.isProcessReadFailed !== merged.isProcessReadFailed) {
+            localReadingAt = shared.at
+            localRecords = merged.records ?? []
+            if (localRecords.length > 0) {
+              codexSessionId = codexSessionId ?? await $.session.id()
+            }
+            const isGuessable = (record: CodexRecord): boolean => record.ownerSessionId === UNKNOWN_OWNER &&
+              matchingCommand(record, ownWorks, new Set(), record.turnStartedAt ?? record.startedAt) !== undefined
+            const relevant = localRecords.filter(record => record.ownerSessionId === codexSessionId ||
+              ownWorks.some(work => work.recordId === record.recordId) || isGuessable(record))
+            const key = JSON.stringify(relevant)
+
+            const isFailureChanged = relevant.length > 0 && before.isProcessReadFailed !== merged.isProcessReadFailed
+
+            if (key !== localRecordKey || isFailureChanged) {
+              localRecordKey = key
+              readingVersion += 1
+              await settleCodex?.()
+            }
+          }
           await alertLimits($, merged.limits, CODEX_NAME)
         }
         return shared?.at
       } catch {
-        await recordCodexReadFailure($)
+        codexState = await recordCodexReadFailure($, rememberWorks)
       }
     }
     // The folder is read at each call: a session's folder can change.
@@ -2648,17 +3034,17 @@ export const register: Register = on => {
         const shared = await readShared($, request)
 
         if (shared) {
-          const merged = mergeCodexServer(await read($, codex), shared)
+          const merged = mergeCodexServer(codexState ?? await read($, codex), shared)
 
-          await update($, codex, () => merged)
+          codexState = await update($, codex, () => merged)
           await alertLimits($, merged.limits, CODEX_NAME)
         }
       } catch {
-        await recordCodexServerFailure($)
+        codexState = await recordCodexServerFailure($)
       }
     }
     // A Codex run started here: read since now, and ask the server too once
-    // a run in the foreground has ended.
+    // a foreground command returns; that return says nothing about its runs.
     const readCodex = async (isServerRead: boolean): Promise<void> => {
       try {
         const now = await $.clock.now()
@@ -2668,7 +3054,7 @@ export const register: Register = on => {
           await readCodexServer(now)
         }
       } catch {
-        await recordCodexReadFailure($)
+        codexState = await recordCodexReadFailure($, rememberWorks)
       }
     }
     // The records are read every tick while a run works, and when one was
@@ -2688,7 +3074,8 @@ export const register: Register = on => {
         const configAt = await codexConfigAt($, home)
         const isRecordWritten = recordAt > seenRecordAt
         const isConfigSaved = configAt !== seenConfigAt
-        const isLocalDue = before.running > 0 || isRecordWritten || !hasLocalReading
+        const isLocalDue = before.running > 0 || before.isProcessReadFailed === true || isRecordWritten ||
+          !hasLocalReading || ownWorks.some(w => isCodexWorkOpen(w, now))
 
         seenRecordAt = recordAt
         seenConfigAt = configAt
@@ -2701,7 +3088,7 @@ export const register: Register = on => {
           await readCodexServer(Math.max(now - CODEX_SERVER_EVERY_MS, endedAt ?? 0, savedAt ?? 0))
         }
       } catch {
-        await recordCodexReadFailure($)
+        codexState = await recordCodexReadFailure($, rememberWorks)
       }
     }
     const codexTicks = runOneAtATime(tickCodex)
@@ -2714,7 +3101,7 @@ export const register: Register = on => {
         await readCodexLocal(now - CODEX_TICK_MS)
         await readCodexServer(now - CODEX_SERVER_EVERY_MS)
       } catch {
-        await recordCodexReadFailure($)
+        codexState = await recordCodexReadFailure($, rememberWorks)
       }
     }
     codexReader = readCodex
@@ -2728,9 +3115,11 @@ export const register: Register = on => {
     // left open: that turn never ended.
     await registerEstimateTool($)
     if (!isReload) {
-      await update($, works, list => list.filter(w => w.maker !== 'claude' || w.finishedAt !== undefined))
+      await writeWorks($, rememberWorks, list => list.filter(w => w.maker !== 'claude' || w.finishedAt !== undefined))
       await update($, turns, list => list.map(t => (t.isRunning ? { ...t, isRunning: false } : t)))
     }
+    ownWorks = await read($, works)
+    worksVersion += 1
     const ownWorksSave = runOneAtATime(() => saveOwnWorks($))
     ownWorksSaver = ownWorksSave.refresh
     const refreshWorkHistory = async (): Promise<void> => {
@@ -2749,27 +3138,84 @@ export const register: Register = on => {
     const workHistoryRead = runOneAtATime(refreshWorkHistory)
     await workHistoryRead.tick()
 
-    // A Codex run started here takes its record as the reader finds it, at
-    // each reading of the records.
+    // State writes and new readings make settlement due. An unchanged timer
+    // does no host calls; recordless work gets one deadline of its own.
+    let settledWorksVersion = -1
+    let settledReadingVersion = -1
+    let expiryTimer: Timer | undefined
+    let isExpiryDue = false
     const settleOpenCodexWorks = async (): Promise<void> => {
       try {
-        const state = await read($, codex)
-        const now = await $.clock.now()
-        const isAnyOpen = (await read($, works)).some(w => isCodexWorkOpen(w, now))
-        const pace = workPace(await read($, workHistory), await read($, limitHistory), 'codex')
+        const isChanged = worksVersion !== settledWorksVersion ||
+          readingVersion !== settledReadingVersion || isExpiryDue
 
-        if (isAnyOpen) {
-          await update($, works, list => settleCodexWorks(list, state, pace, now))
-          await ownWorksSave.refresh()
+        if (isChanged) {
+          settledWorksVersion = worksVersion
+          settledReadingVersion = readingVersion
+          isExpiryDue = false
+          expiryTimer?.cancel()
+          if (localRecords.length > 0 || ownWorks.some(w => w.maker === 'codex')) {
+            const state = codexState ?? await read($, codex)
+            const now = await $.clock.now()
+            const pace = workPace(await read($, workHistory), await read($, limitHistory), 'codex')
+            const owner = codexSessionId ?? await $.session.id()
+            const pending = await read($, pendingCodexEstimate)
+            const reservations = await read($, reservedCodexEstimates)
+            let settled = settleCodexWorks(ownWorks, state, pace, now, owner, pending, reservations)
+            const kept = keepOwnWorks(settled.works, now)
+            const isWorkChanged = JSON.stringify(ownWorks) !== JSON.stringify(kept)
+
+            const settleList = (list: Work[]): Work[] => {
+              settled = settleCodexWorks(list, state, pace, now, owner, pending, reservations)
+              return keepOwnWorks(settled.works, now)
+            }
+
+            codexSessionId = owner
+            if (isWorkChanged) {
+              await writeWorks($, rememberWorks, settleList)
+              await ownWorksSave.refresh()
+            }
+            if (settled.usedPending) {
+              await update($, pendingCodexEstimate, current => current?.setAt === pending?.setAt ? null : current)
+            }
+            if (settled.usedReservations.length > 0) {
+              const used = settled.usedReservations
+              const isUnused = ([id, estimate]: [string, WorkEstimate]): boolean =>
+                !used.includes(id) || estimate.setAt !== reservations[id]?.setAt
+              const keepUnused = (current: CodexReservations): CodexReservations =>
+                Object.fromEntries(Object.entries(current).filter(isUnused))
+
+              await update($, reservedCodexEstimates, keepUnused)
+            }
+            const expiresAt = Math.min(...ownWorks.filter(w => w.maker === 'codex' && !w.recordId)
+              .map(codexWorkExpiresAt).filter(at => at > now))
+
+            if (Number.isFinite(expiresAt)) {
+              expiryTimer = $.clock.after(expiresAt - now, () => void expireCodexWork())
+            }
+          }
         }
       } catch {
+        settledWorksVersion = -1
         // The next reading settles them.
       }
     }
     const codexWorkSettle = runOneAtATime(settleOpenCodexWorks)
+    const expireCodexWork = async (): Promise<void> => {
+      try {
+        isExpiryDue = true
+        await codexWorkSettle.refresh()
+        await update($, workTick, n => n + 1)
+      } catch {
+        // A later work change or reading retries settlement.
+      }
+    }
+
+    settleCodex = codexWorkSettle.refresh
+    await settleCodex()
     const tickWork = async (): Promise<void> => {
       try {
-        if (hasOpenWork(await read($, works), await $.clock.now())) {
+        if (hasOpenWork(ownWorks, await $.clock.now())) {
           await update($, workTick, n => n + 1)
         }
       } catch {
@@ -2843,7 +3289,7 @@ export const register: Register = on => {
       const isTurnRunning = (await read($, turns)).some(t => t.isRunning)
       const isHelperBusy = (await read($, helpers)).length > 0
 
-      return isTurnRunning || isHelperBusy || hasOpenWork(await read($, works), now)
+      return isTurnRunning || isHelperBusy || hasOpenWork(ownWorks, now)
     }
     // The timers left out while idle redraw or read what only changes while
     // the session works: its reply, helpers, folder and own runs.
@@ -2978,19 +3424,21 @@ export const register: Register = on => {
       claude: workPace(pastWorks, pastSteps, 'claude'),
       codex: workPace(pastWorks, pastSteps, 'codex'),
     }
-    const workBox = (maker: WorkMaker, work: Work) => {
+    const workBox = (maker: WorkMaker, work: Work, isAllDone?: boolean) => {
       const pieces = workPieces(work, paces[maker], now, offset)
       const hasShare = pieces.percent.length > 0
+      const isDone = isAllDone ?? work.finishedAt !== undefined
+      const isWorking = isCodexWorkActive(work) || (maker === 'claude' && work.finishedAt === undefined)
 
       return (
         <Box key={`work-${maker}`} flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
-          {work.finishedAt === undefined ? (
+          {isWorking ? (
             spinner()
-          ) : (
+          ) : isDone ? (
             <Text size="caption" color={LEVEL_KEY.ok}>
               ✓
             </Text>
-          )}
+          ) : null}
           {pieceMark(STOPWATCH_SVG, 'ends')}
           {pieceText(pieces.time)}
           {pieceMark(TOKENS_SVG, 'tokens')}
@@ -3178,15 +3626,34 @@ export const register: Register = on => {
       })
     }
 
-    const codexWork = codexState.working[0]
+    // The run due last stands for the others, which the line only counts.
+    const shown = shownCodexWork(ownWorks, now)
+    const openCodexWorks = ownWorks.filter(w => isCodexWorkOpen(w, now))
+    const activeCodexWorks = openCodexWorks.filter(isCodexWorkActive)
+    const isAllCodexDone = openCodexWorks.length === 0 && shown?.state !== 'stopped' && shown?.state !== 'unknown'
     // At the end of the line, as the app puts the model under the prompt: the
     // setting of the run at work, or with none at work, the setting the next
     // run takes, greyed with its time once old.
-    const workSetting = codexWork ? runSetting(codexWork) : undefined
-    const codexSetting = workSetting ?? codexState.configured
+    const workSetting = shown ? runSetting(shown) : undefined
+    const codexSetting = shown ? workSetting : codexState.configured
     const isCodexSettingOld = workSetting === undefined && isReadingOld(codexState.configuredAt, now)
     const codexSettingAsOf = codexState.configuredAt === undefined ? '' : local(codexState.configuredAt, offset).hm
-    const codexWorkItem = workItem('codex')
+    const codexWorkItem = shown ? (
+      <Box key="codex-summary" flexDirection="row" flexWrap="wrap" alignItems="center" gap="xs">
+        {workBox('codex', shown, isAllCodexDone)}
+        {activeCodexWorks.length > 1 ? (
+          <Text size="caption">{` 외 ${activeCodexWorks.length - 1}개`}</Text>
+        ) : null}
+        {shown.state !== 'unknown' && openCodexWorks.some(w => w.state === 'unknown') ? (
+          <Text size="caption"> · 확인 불가 포함</Text>
+        ) : null}
+        {ownWorks.some(w => w.maker === 'codex' && w.state === 'stopped') && shown.state !== 'stopped' ? (
+          <Text size="caption"> · 멈춤 포함</Text>
+        ) : null}
+        {openCodexWorks.some(w => !w.estimate) ? <Text size="caption"> · 예정 모름 포함</Text> : null}
+        {shown.isGuessed ? <Text size="caption" dimColor> · 추정</Text> : null}
+      </Box>
+    ) : null
     const codexSettingItem = codexSetting ? (
       <Box key="codex-setting" flexDirection="row" alignItems="center" alignSelf="center" gap="xs">
         <Text size="caption" dimColor={isCodexSettingOld}>
@@ -3262,7 +3729,7 @@ export const register: Register = on => {
       }
       await update($, turns, list => [...list, turn].slice(-KEEP_TURNS))
       await update($, note, () => null)
-      await startClaudeWork($, e.turnId, now)
+      await startClaudeWork($, e.turnId, now, rememberWorks)
     }
 
     return next(e)
@@ -3276,7 +3743,7 @@ export const register: Register = on => {
     const u = step?.usage
     if (e.agentId === undefined && u) {
       await update($, cache, state => ({ ...state, requestAt }))
-      await addClaudeStep($, e.turnId, u)
+      await addClaudeStep($, e.turnId, u, rememberWorks)
       await update($, turns, list =>
         list.map(t =>
           t.id !== e.turnId
@@ -3314,39 +3781,35 @@ export const register: Register = on => {
     return ran
   })
 
-  // A Codex run started here is read at once: a background one starts the
-  // half-minute reads, a finished one asks the server for the new limits.
-  // The run is this session's work from the moment its command starts; one
-  // in the foreground ends when the command returns. A run without an
-  // estimate tells the session so, after its result.
-  // A command that only names codex exec still asks for a reading, as before;
-  // only one that runs it is work, and a refused one never ran.
+  // Only unquoted invocations leave a placeholder. Other mentions just wake
+  // the reader and cannot borrow records or consume an estimate.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const isCodexRun = e.tool === 'Bash' && CODEX_RUN.test(e.command)
-    const isCodexWork = e.tool === 'Bash' && CODEX_INVOCATION.test(e.command)
+    const unquoted = e.tool === 'Bash' ? e.command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, '""') : ''
+    const isCodexWork = isCodexRun && CODEX_INVOCATION.test(unquoted)
     const isForeground = e.tool === 'Bash' && e.run_in_background !== true
 
     // A run this session starts is work: the band wakes for it.
     if (isCodexWork) {
       await timerOwner?.markActive()
     }
-    const hasEstimate = isCodexWork ? await startCodexWork($, e.tool_use_id, await $.clock.now()) : true
+    const hasEstimate = isCodexWork
+      ? await startCodexWork($, e.tool_use_id, await $.clock.now(), rememberWorks)
+      : true
     const ran = await next(e)
 
     if (isCodexWork && ran.deny !== undefined) {
-      await dropCodexWork($, e.tool_use_id)
-    } else if (isCodexWork && isForeground) {
-      await endForegroundCodexWork($, e.tool_use_id)
+      await dropCodexWork($, e.tool_use_id, rememberWorks)
     }
     if (isCodexRun) {
       void codexReader?.(isForeground)
     }
-    return hasEstimate ? ran : withContext(ran, NO_CODEX_ESTIMATE)
+    return hasEstimate || !isCodexWork ? ran : withContext(ran, NO_CODEX_ESTIMATE)
   })
 
   on('tool.call', { tool: ESTIMATE_TOOL_NAME }, async ($, e) => {
     const checked = checkEstimateInput(e)
-    const recorded = checked.input ? await recordEstimate($, checked.input) : undefined
+    const recorded = checked.input ? await recordEstimate($, checked.input, rememberWorks) : undefined
 
     if (checked.error !== undefined) {
       return { deny: checked.error }
@@ -3361,7 +3824,7 @@ export const register: Register = on => {
   // session hears so once for the turn.
   on('tool.call', { tool: PLAN_TOOL_NAME }, async ($, e, next) => {
     const ran = await next(e)
-    const isTelling = Array.isArray(e.items) && (await markEstimateTold($))
+    const isTelling = Array.isArray(e.items) && (await markEstimateTold($, rememberWorks))
 
     return isTelling ? withContext(ran, NO_CLAUDE_ESTIMATE) : ran
   })
@@ -3421,7 +3884,7 @@ export const register: Register = on => {
           return finished
         }),
       )
-      await finishClaudeWork($, e.turnId, now, finished, e.isAborted)
+      await finishClaudeWork($, e.turnId, now, finished, e.isAborted, rememberWorks)
       await ownWorksSaver?.()
       if (finished && finished.level !== 'ok') {
         const { delta, ratio } = turnLevel(finished, before)
@@ -3744,7 +4207,7 @@ export const register: Register = on => {
           const since = `${local(work.startedAt, offset).hm}부터`
 
           return (
-            <Box key={`codex-work-${work.startedAt}`} flexDirection="column" marginTop={1}>
+            <Box key={`codex-work-${work.recordId ?? work.startedAt}`} flexDirection="column" marginTop={1}>
               <Text size="footnote">
                 <Text bold>실행 중</Text>{' '}
                 <Text dimColor>{setting ? `${since} · ${settingText(setting)}` : since}</Text>

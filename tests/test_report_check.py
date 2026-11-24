@@ -15,7 +15,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIRECTORY = REPOSITORY_ROOT / "scripts"
 HOOK_SCRIPT = SCRIPTS_DIRECTORY / "report-check-hook.py"
 CHECK_SCRIPT = SCRIPTS_DIRECTORY / "report_check.py"
-NOTES = "/Users/someone/Library/Application Support/Claude/side-session-notes"
+HOME = "/Users/someone"
+NOTES = f"{HOME}/Library/Application Support/Claude/side-session-notes"
+PROJECT_NOTES = f"{HOME}/Documents/session-notes"
 
 
 def load_module(name: str, path: Path) -> ModuleType:
@@ -147,6 +149,30 @@ class ReportCheckTest(unittest.TestCase):
         self.assertFalse(report_check.is_notes_report(f"{NOTES}/bulletin.md"))
         self.assertFalse(report_check.is_notes_report(f"{NOTES}/local_1/script.py"))
         self.assertFalse(report_check.is_notes_report("/a/README.md"))
+
+    def test_project_notes_folders_hold_notes_reports_but_their_copies_do_not(self) -> None:
+        self.assertTrue(report_check.is_notes_report(f"{PROJECT_NOTES}/ai-config/report.md"))
+        self.assertTrue(report_check.is_notes_report(f"{PROJECT_NOTES}/ai-config/reviews/review.md"))
+        self.assertFalse(report_check.is_notes_report(f"{PROJECT_NOTES}/top-level.md"))
+        self.assertFalse(report_check.is_notes_report(f"{PROJECT_NOTES}-backup/app-notes/local_1/report.md"))
+        self.assertFalse(report_check.is_notes_report(f"{PROJECT_NOTES}/ai-config/data.json"))
+
+    def test_app_session_folder_files_are_only_inside_session_named_folders(self) -> None:
+        home = Path(HOME)
+
+        self.assertTrue(report_check.is_app_session_folder_file(f"{NOTES}/local_1/report.md", home))
+        self.assertTrue(report_check.is_app_session_folder_file(f"{NOTES}/local_1/sub/data.json", home))
+        self.assertTrue(report_check.is_app_session_folder_file(f"{HOME}/x/../{NOTES[len(HOME) + 1:]}/local_1/r.md", home))
+        self.assertFalse(report_check.is_app_session_folder_file(f"{NOTES}/bulletin.md", home))
+        self.assertFalse(report_check.is_app_session_folder_file(f"{NOTES}/.obsidian/workspace.json", home))
+        self.assertFalse(report_check.is_app_session_folder_file(f"{PROJECT_NOTES}/ai-config/report.md", home))
+        self.assertFalse(
+            report_check.is_app_session_folder_file(
+                f"{PROJECT_NOTES}-backup/2026-11-23/side-session-notes/local_1/report.md",
+                home,
+            ),
+        )
+        self.assertFalse(report_check.is_app_session_folder_file(f"/Users/other/{NOTES[len(HOME) + 1:]}/local_1/r.md", home))
 
     def test_command_line_reports_and_sets_its_exit_code(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

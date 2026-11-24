@@ -1,12 +1,17 @@
 ---
 name: integration-testing
-description: Integration/runtime test workflow. Apply when running tests against a live or simulated environment — any setup with external dependencies (servers, simulators, databases, message brokers, hardware emulators).
+description: Integration/runtime test workflow and safe application startup. Apply when running tests against a live or simulated environment — any setup with external dependencies (servers, simulators, databases, message brokers, hardware emulators) — and before starting or restarting an application, server, simulator, or daemon.
 user-invocable: false
 ---
 
 # Integration Testing Rules
 
-Apply these rules when running integration/runtime tests against a live or simulated environment.
+Apply these rules when running integration/runtime tests against a live or simulated environment, and the startup rules below whenever you start or restart an application, server, simulator, or daemon.
+
+## Starting Applications
+
+- **Startup failure**: When a process fails to start, comes up partially (some endpoints listening, others not), or behaves inconsistently after a startup attempt, find which component failed and why (env, config, port collision, dependency, code) and fix it before retrying or moving to later steps, never by blind restarts or retry loops. This applies to test environments, dev servers, simulators, daemons, and any multi-process startup.
+- **Production, staging, or live mode**: Never start an application in these modes on a development machine without the user's explicit approval, whatever selects the mode (an environment variable, a command-line option, or a production-only script). Even after approval, first (1) inspect the config and secrets the mode will load and report whether endpoints point at real production infrastructure, and (2) if so, evaluate which active connections it forms on boot (API writes, databases, message brokers, hardware controllers, subscriptions) and re-confirm, since even a few seconds of startup can affect production. Verify in simulation, sandbox, or test modes instead; production-mode startup belongs only on the production host.
 
 ## 1. Verify Infrastructure First (Hard Prereq)
 

@@ -3,7 +3,7 @@ name: git-commit
 description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
-<!-- Adapted from skills/git-commit/SKILL.md at 60f6a12fc769e45a7996bffca3931b42ecc1945e, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 0ff1a1295d1bc681ac5e5139a29282def37bef94 -->
+<!-- Adapted from skills/git-commit/SKILL.md at 6f7608e6c9a30b7950813a45912fae3462f94c4f, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 0ff1a1295d1bc681ac5e5139a29282def37bef94 -->
 
 # Commit Workflow
 
@@ -30,7 +30,7 @@ Name a local tracking branch exactly as its remote branch (`git checkout -b feat
 
 1. Inspect the current branch, `git status`, recent commits, and the full intended diff. For a base branch, follow the user's requested branch policy or use an appropriate working branch for implementation work. Do not require an extra branch for an explicitly approved configuration update.
 2. Check logic, error handling, concurrent state, secrets, test-only changes, and source/generated-output consistency. Run relevant checks with the installed toolchain. Resolve findings within scope before proceeding.
-3. Stage only exact intended paths or hunks. Preserve unrelated staged and unstaged work. Inspect `git diff --cached` and its file list; do not unstage, stash, restore, or overwrite user changes merely to make the tree look clean.
+3. Stage only exact intended paths or hunks. Preserve unrelated staged and unstaged work. Inspect `git diff --cached` and its file list; do not unstage, stash, restore, or overwrite user changes merely to make the tree look clean. In a shared checkout, if another session is editing a file, commit only your own changes in it.
 4. Group commits into independently coherent, buildable, revertible topics. Source definitions and their first consumers generally belong together. A version's release manifest, lockfile, changelog, and release documentation form one release commit; unrelated cleanup remains separate.
 
 ## Commit Message
@@ -53,4 +53,4 @@ Before amending, inspect recent history and determine whether the previous commi
 
 Push once per task, after its last commit, as a command of its own, without asking: the current branch to its own remote (user decision, 2026-11-09). Ask first before a force push, deleting a remote branch or tag, a mirror or tag push, a push to another remote or ref, or any push in a repository that sets `shellGuard.askBeforePush`. In a direct repository whose pushes start deploying, ask before pushing. In a pull-request repository, never push the base branch. Verify the remote result. Update the associated plan and status records with the actual commit hash and completed scope; do not mark unverified work complete.
 
-Never commit credentials, real `.env` files, unrelated configuration, or temporary test patches. Do not automatically include Claude settings or permission changes.
+Never commit credentials, real `.env` or other credential files, unrelated configuration, or temporary test patches. Do not automatically include Claude settings or permission changes.
