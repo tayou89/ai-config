@@ -110,13 +110,24 @@ export type CodexTotals = {
 export type CodexRun = CodexTotals & { finishedAt: number }
 
 // A `codex exec` run still at work, its totals up to its newest step.
-export type CodexWork = CodexTotals & { startedAt: number; steps: number }
+export type CodexWork = CodexTotals & {
+  startedAt: number
+  steps: number
+  recordId?: string
+  reservation?: string
+  ownerSessionId?: string
+  state?: CodexRunState
+  turnId?: string
+  // When its latest turn started: a resumed run starts a later turn.
+  turnStartedAt?: number
+}
 
-// A `codex exec` run that finished lately, by when it started, so a session
-// finds the runs it started among every run on this Mac.
+// A `codex exec` run whose latest turn finished and whose record is closed.
 export type CodexEnded = CodexWork & { finishedAt: number }
 
 // A run's record as the reader found it lately, at work or finished.
+export type CodexRunState = 'running' | 'done' | 'stopped' | 'unknown'
+export type CodexWorkState = CodexRunState | 'starting'
 export type CodexRecord = CodexWork & { finishedAt?: number }
 
 // The model and reasoning effort a Codex run works with, as Codex spells them.
@@ -131,8 +142,10 @@ export type CodexLocalOutput = {
   working: CodexWork[]
   // The runs that finished within the last two hours, the newest first.
   finished?: CodexEnded[]
-  // Every `codex exec` at work, with or without a record.
+  // Processes holding exec records open; invalid when isProcessReadFailed.
   running: number
+  records?: CodexRecord[]
+  isProcessReadFailed?: boolean
 }
 
 // What the reader script asks Codex's server, for one folder.
@@ -161,6 +174,8 @@ export type Codex = {
   configured?: CodexSetting
   configuredAt?: number
   running: number
+  records?: CodexRecord[]
+  isProcessReadFailed?: boolean
   error?: string
 }
 
@@ -230,6 +245,8 @@ export type WorkMaker = 'claude' | 'codex'
 // conversation's length then, which each Claude step reads again. Steps only
 // for Claude: a session cannot foresee a Codex run's steps.
 export type WorkEstimate = { minutes: number; steps?: number; setAt: number; dueAt: number; contextTokens?: number }
+// Codex estimates given for a run by its budget reservation, before its record shows.
+export type CodexReservations = Record<string, WorkEstimate>
 
 // One piece of work: a reply of this session, or a codex exec run it started.
 // `rise` is how far its tool's tighter window rose meanwhile, other sessions'
@@ -253,8 +270,21 @@ export type Work = {
   isAborted?: boolean
   // Set once the session heard it gave no estimate for this work.
   isTold?: boolean
-  // When the Codex record this run took began, so no other run takes it.
+  // Only for relinking legacy work; new runs are identified by recordId.
   recordStartedAt?: number
+  recordId?: string
+  reservation?: string
+  state?: CodexWorkState
+  previousState?: CodexWorkState
+  turnId?: string
+  model?: string
+  effort?: string
+  isGuessed?: boolean
+  commandId?: string
+  commandStartedAt?: number
+  commandEstimate?: WorkEstimate
+  commandFirstEstimate?: WorkEstimate
+  canMatchRecord?: boolean
 }
 
 // A tool's weekly limit as a session saw it change: when, to what, and when
@@ -304,6 +334,7 @@ declare module 'claude-code' {
       limitSteps: Shaped<LimitStep[]>
       limitHistory: Shaped<LimitStep[]>
       pendingCodexEstimate: Shaped<WorkEstimate | null>
+      reservedCodexEstimates: Shaped<CodexReservations>
       workTick: Shaped<number>
     }
   }

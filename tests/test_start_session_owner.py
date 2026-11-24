@@ -22,7 +22,7 @@ HOOK_SCRIPT = SCRIPTS_DIRECTORY / "start-session-hook.py"
 START = {
     "initiation": "user_asked",
     "title": "시험 고치기",
-    "prompt": "brief\nCodex: 하지 않음",
+    "prompt": "brief",
     "model": "claude-opus-5-5",
     "effort": "high",
     "context": "fresh",
