@@ -6,7 +6,11 @@ session started without them inherits the starting session's level instead
 of the work-type table's. When a session would start now while the computer
 is overloaded, it lets the start through without asking the user and adds the
 load to the session's context, using the load threshold the batch(1) command
-uses: a 1-minute load average above 1.5 times the CPU count.
+uses: a 1-minute load average above 1.5 times the CPU count. When memory is
+also short (the system's memory pressure level is critical, or it warns while
+the load is above that threshold), it asks the user before the start instead,
+since starting more sessions then can freeze the computer (user decision,
+2026-11-23). An unreadable pressure level keeps the load notice alone.
 
 A session started to share a folder (`use_worktree: false`, or a `cwd`
 without its own worktree) works where that folder is. When the folder is a
@@ -21,6 +25,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -44,6 +49,11 @@ _DECISION_KEY = "permissionDecision"
 _DECISION_REASON_KEY = "permissionDecisionReason"
 _CONTEXT_KEY = "additionalContext"
 _DECISION_DENY = "deny"
+_DECISION_ASK = "ask"
+_PRESSURE_COMMAND = ("sysctl", "-n", "kern.memorystatus_vm_pressure_level")
+_PRESSURE_TIMEOUT_SECONDS = 2
+_PRESSURE_WARN = 2
+_PRESSURE_CRITICAL = 4
 _PROPOSAL_KEY = "proposal_id"
 _TITLE_KEY = "title"
 _INITIATION_KEY = "initiation"
@@ -71,12 +81,17 @@ _LOAD_NOTICE = (
     "The 1-minute load average is {load:.0f}, above {limit:.0f} (1.5 times {cpus} CPUs). "
     "The session starts without asking the user."
 )
+_MEMORY_REASON = (
+    "Memory is short: the system reports memory pressure level {pressure} and the 1-minute load average is {load:.0f} "
+    "(limit {limit:.0f}). Another session now may freeze this computer, so the user decides. "
+    "If the user declines, keep the start queued and try again after a running session finishes."
+)
 
 
 def main() -> None:
     try:
         hook_input = json.load(sys.stdin)
-        output = make_output(hook_input, _read_load())
+        output = make_output(hook_input, _read_load(), _read_pressure())
 
         if output:
             print(json.dumps(output))
@@ -91,7 +106,26 @@ def _read_load() -> tuple[float, int] | None:
         return None
 
 
-def make_output(hook_input: dict[str, Any], load: tuple[float, int] | None) -> dict[str, Any] | None:
+def _read_pressure() -> int | None:
+    try:
+        completed = subprocess.run(
+            _PRESSURE_COMMAND,
+            capture_output=True,
+            text=True,
+            timeout=_PRESSURE_TIMEOUT_SECONDS,
+            check=True,
+        )
+
+        return int(completed.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def make_output(
+    hook_input: dict[str, Any],
+    load: tuple[float, int] | None,
+    pressure: int | None = None,
+) -> dict[str, Any] | None:
     tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
     specific_output = None
 
@@ -103,6 +137,7 @@ def make_output(hook_input: dict[str, Any], load: tuple[float, int] | None) -> d
             load,
             cwd if isinstance(cwd, str) else None,
             session_id if isinstance(session_id, str) else None,
+            pressure,
         )
     if specific_output:
         return {_HOOK_OUTPUT_KEY: {"hookEventName": _PRE_TOOL_USE, **specific_output}}
@@ -115,6 +150,7 @@ def decide(
     load: tuple[float, int] | None,
     cwd: str | None = None,
     session_id: str | None = None,
+    pressure: int | None = None,
 ) -> dict[str, str] | None:
     missing = _list_missing_levels(tool_input)
 
@@ -124,16 +160,28 @@ def decide(
             _DECISION_REASON_KEY: _LEVEL_REASON.format(missing=" and ".join(f"`{key}`" for key in missing)),
         }
     else:
-        return _decide_folder_and_load(tool_input, load, _judge_shared_folder(tool_input, cwd, session_id))
+        return _decide_folder_and_load(tool_input, load, pressure, _judge_shared_folder(tool_input, cwd, session_id))
 
 
 def _decide_folder_and_load(
-    tool_input: dict[str, Any], load: tuple[float, int] | None, access: FolderAccess | None
+    tool_input: dict[str, Any],
+    load: tuple[float, int] | None,
+    pressure: int | None,
+    access: FolderAccess | None,
 ) -> dict[str, str] | None:
-    """Tell the starter where the new session can only read, and the load, when either applies."""
-    notices = [*_list_folder_notices(access), *_list_load_notices(tool_input, load)]
+    """Ask the user before a start while memory is short; otherwise pass on the folder and load notices."""
+    folder_notices = _list_folder_notices(access)
+    notices = [*folder_notices, *_list_load_notices(tool_input, load)]
 
-    if notices:
+    if load is not None and pressure is not None and _is_starting_now(tool_input) and _is_memory_short(pressure, *load):
+        current, cpus = load
+
+        return {
+            _DECISION_KEY: _DECISION_ASK,
+            _DECISION_REASON_KEY: _MEMORY_REASON.format(pressure=pressure, load=current, limit=_LOAD_FACTOR * cpus),
+            _CONTEXT_KEY: "\n".join(folder_notices),
+        }
+    elif notices:
         return {_CONTEXT_KEY: "\n".join(notices)}
     else:
         return None
@@ -202,6 +250,10 @@ def _is_starting_now(tool_input: dict[str, Any]) -> bool:
 
 def _is_overloaded(load: float, cpus: int) -> bool:
     return load > _LOAD_FACTOR * cpus
+
+
+def _is_memory_short(pressure: int, load: float, cpus: int) -> bool:
+    return pressure >= _PRESSURE_CRITICAL or (pressure >= _PRESSURE_WARN and _is_overloaded(load, cpus))
 
 
 if __name__ == "__main__":
