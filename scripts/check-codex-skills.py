@@ -12,11 +12,19 @@ permissions and tools differ, so they cannot be generated (user decision,
 front matter, the git blob of every Claude source file it was adapted from:
 the skill's SKILL.md and each file under its references/ folder. When a
 Claude source changes, the commit check stops until the same change decides
-what the Codex copy needs and records the new blobs with --accept.
+what the Codex copy needs, records in the copy what it leaves out or
+changes on purpose and why, and records the new blobs with --accept. The
+check verifies the recorded sources and that every copy is listed, not that
+the adaptation or its record of differences is complete. A Codex skill that
+shares a Claude skill's name or carries an `Adapted from` comment, and is
+neither one scripts/sync-shared-rules.py generates nor a third-party copy
+with its own license file, is adapted by hand, and the check fails until it
+is listed here, so a new copy cannot drift unchecked.
 
 Exit codes:
     0  every copy names its current sources, or --show or --accept finished
-    1  a Claude source changed after its copy was adapted
+    1  a Claude source changed after its copy was adapted, or a copy adapted
+       by hand is not listed here
     2  a copy has no usable adaptation comment, or a source cannot be read
 """
 
@@ -25,6 +33,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import hashlib
+import importlib.util
 import re
 import subprocess
 import sys
@@ -47,6 +56,11 @@ ADAPTED_SKILLS = (
     "typescript",
 )
 _ROOT = Path(__file__).resolve().parent.parent
+_CLAUDE_SKILLS_DIRECTORY = _ROOT / "skills"
+_CODEX_SKILLS_DIRECTORY = _ROOT / "codex" / "skills"
+_SYNC_SCRIPT = _ROOT / "scripts" / "sync-shared-rules.py"
+_SYNC_MODULE_NAME = "sync_shared_rules"
+_LICENSE_PREFIX = "LICENSE"
 _SKILL_FILE = "SKILL.md"
 _REFERENCES_DIRECTORY = "references"
 _MARKER_PATTERN = re.compile(r"^<!-- Adapted from (?P<sources>.+) -->$", re.MULTILINE)
@@ -60,7 +74,11 @@ _FRONT_MATTER_SEARCH_START = len(_FRONT_MATTER_START) - 1
 _ENCODING = "utf-8"
 _STALE_MESSAGE = (
     "{copy} was adapted from an older {path}: run `python3 scripts/check-codex-skills.py --show {name}`,"
-    " port what applies to Codex, then run it with `--accept {name}`"
+    " port what applies to Codex, record in the copy what it leaves out or changes on purpose and why, then run it with `--accept {name}`"
+)
+_UNLISTED_MESSAGE = (
+    "{copy} is adapted by hand from a Claude skill but missing from ADAPTED_SKILLS in"
+    " scripts/check-codex-skills.py: add it there, then run it with `--accept`"
 )
 _PASSED_MESSAGE = "OK: every adapted Codex skill names its current Claude sources"
 _CURRENT_MESSAGE = "{copy} already names its current Claude sources"
@@ -104,6 +122,7 @@ def _check_all() -> int:
         for name in ADAPTED_SKILLS
         for path in _find_stale_paths(name)
     ]
+    failures += [_UNLISTED_MESSAGE.format(copy=_describe_copy(name)) for name in _find_unlisted_copies()]
 
     if failures:
         print("Codex skill check failed:\n" + "\n".join(f"  - {failure}" for failure in failures), file=sys.stderr)
@@ -180,8 +199,44 @@ def _parse_source(entry: str, copy: Path) -> tuple[str, str]:
         raise UnusableCopyError(f"{copy.relative_to(_ROOT)} has an unreadable adaptation entry: {entry}")
 
 
+def _find_unlisted_copies() -> list[str]:
+    folders = sorted(path for path in _CODEX_SKILLS_DIRECTORY.iterdir() if path.is_dir())
+    generated = _list_generated_skills()
+
+    return [
+        folder.name
+        for folder in folders
+        if folder.name not in ADAPTED_SKILLS and folder.name not in generated and _is_adapted_by_hand(folder)
+    ]
+
+
+# The sync script's own register decides what it generates, not a notice a copy may carry over.
+def _list_generated_skills() -> frozenset[str]:
+    specification = importlib.util.spec_from_file_location(_SYNC_MODULE_NAME, _SYNC_SCRIPT)
+
+    if specification is not None and specification.loader is not None:
+        module = importlib.util.module_from_spec(specification)
+
+        specification.loader.exec_module(module)
+        return frozenset(name for name, _ in module.SKILL_RULES.values())
+    else:
+        raise UnusableCopyError(f"{_SYNC_SCRIPT.relative_to(_ROOT)} cannot be loaded to list the generated skills")
+
+
+def _is_adapted_by_hand(folder: Path) -> bool:
+    copy = folder / _SKILL_FILE
+    has_source = (_CLAUDE_SKILLS_DIRECTORY / folder.name).is_dir() or _has_marker(copy)
+    is_licensed = any(entry.is_file() and entry.name.startswith(_LICENSE_PREFIX) for entry in folder.iterdir())
+
+    return has_source and not is_licensed
+
+
+def _has_marker(copy: Path) -> bool:
+    return copy.is_file() and _MARKER_PATTERN.search(copy.read_text(encoding=_ENCODING)) is not None
+
+
 def _list_current_sources(name: str) -> dict[str, str]:
-    skill = _ROOT / "skills" / name
+    skill = _CLAUDE_SKILLS_DIRECTORY / name
     references = skill / _REFERENCES_DIRECTORY
     files = [path for path in [skill / _SKILL_FILE, *sorted(references.rglob("*"))] if path.is_file()]
 
@@ -216,7 +271,7 @@ def _read_file_lines(path: Path) -> list[str]:
 
 
 def _find_copy(name: str) -> Path:
-    return _ROOT / "codex" / "skills" / name / _SKILL_FILE
+    return _CODEX_SKILLS_DIRECTORY / name / _SKILL_FILE
 
 
 def _describe_copy(name: str) -> str:
