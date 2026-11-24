@@ -18,6 +18,7 @@ from pathlib import Path
 
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 CHECK_SCRIPT = REPOSITORY_ROOT / "scripts" / "check-codex-skills.py"
+SYNC_SCRIPT = REPOSITORY_ROOT / "scripts" / "sync-shared-rules.py"
 CHECK_SPECIFICATION = importlib.util.spec_from_file_location("check_codex_skills", CHECK_SCRIPT)
 assert CHECK_SPECIFICATION is not None and CHECK_SPECIFICATION.loader is not None
 check_codex_skills = importlib.util.module_from_spec(CHECK_SPECIFICATION)
@@ -30,6 +31,8 @@ CLAUDE_SKILL_PATH = f"skills/{CHANGED_SKILL}/SKILL.md"
 CLAUDE_REFERENCE_PATH = f"skills/{CHANGED_SKILL}/references/examples.md"
 CODEX_SKILL_PATH = f"codex/skills/{CHANGED_SKILL}/SKILL.md"
 CHANGED_LINE = "- A rule the Claude copy gained.\n"
+GENERATED_NOTICE = "<!-- Generated from shared-rules/rule-writing.md by scripts/sync-shared-rules.py -->\n\n"
+UNLISTED_MESSAGE = "is adapted by hand"
 REFERENCE_LINE = "- An example the Claude copy keeps apart.\n"
 GIT_PREFIX = "GIT_"
 GIT_SETTINGS = {
@@ -55,6 +58,7 @@ class CodexSkillFixture:
     def create(self) -> None:
         (self.repository / "scripts").mkdir(parents=True)
         shutil.copy2(CHECK_SCRIPT, self.repository / "scripts" / CHECK_SCRIPT.name)
+        shutil.copy2(SYNC_SCRIPT, self.repository / "scripts" / SYNC_SCRIPT.name)
         for name in check_codex_skills.ADAPTED_SKILLS:
             self.write(f"skills/{name}/SKILL.md", f"---\nname: {name}\n---\n\n# {name}\n\n- A shared rule.\n")
             self.write(f"codex/skills/{name}/SKILL.md", f"---\nname: {name}\n---\n\n# {name}\n\n- A Codex rule.\n")
@@ -160,6 +164,43 @@ class CheckCodexSkillsTest(unittest.TestCase):
         self.assertEqual(result.returncode, EXIT_UNUSABLE)
         self.assertEqual(self.fixture.read(CODEX_SKILL_PATH), "# python\n")
 
+    def test_copy_adapted_by_hand_must_be_listed(self) -> None:
+        self.accept_all()
+        self.fixture.write("skills/new-copy/SKILL.md", "# new-copy\n")
+        self.fixture.write("codex/skills/new-copy/SKILL.md", "# new-copy\n")
+        result = self.fixture.run()
+
+        self.assertEqual(result.returncode, EXIT_STALE)
+        self.assertIn(f"codex/skills/new-copy/SKILL.md {UNLISTED_MESSAGE}", result.stderr)
+
+    def test_generated_and_licensed_copies_need_no_listing(self) -> None:
+        self.accept_all()
+        self.fixture.write("skills/rule-writing/SKILL.md", f"{GENERATED_NOTICE}# rule-writing\n")
+        self.fixture.write("codex/skills/rule-writing/SKILL.md", f"{GENERATED_NOTICE}# rule-writing\n")
+        self.fixture.write("skills/vendor/SKILL.md", "# vendor\n")
+        self.fixture.write("codex/skills/vendor/SKILL.md", "# vendor\n")
+        self.fixture.write("codex/skills/vendor/LICENSE.txt", "MIT\n")
+        self.fixture.write("codex/skills/codex-only/SKILL.md", "# codex-only\n")
+        result = self.fixture.run()
+
+        self.assertEqual(result.returncode, EXIT_PASSED, result.stderr)
+
+    def test_carried_over_notice_licence_folder_or_renamed_source_still_need_listing(self) -> None:
+        self.accept_all()
+        self.fixture.write("skills/copied/SKILL.md", "# copied\n")
+        self.fixture.write("codex/skills/copied/SKILL.md", f"{GENERATED_NOTICE}# copied\n")
+        self.fixture.write("skills/data-copy/SKILL.md", "# data-copy\n")
+        self.fixture.write("codex/skills/data-copy/SKILL.md", "# data-copy\n")
+        self.fixture.write("codex/skills/data-copy/LICENSE-data/notes.txt", "data\n")
+        self.fixture.write(
+            "codex/skills/renamed/SKILL.md", f"<!-- Adapted from skills/python/SKILL.md at {'0' * 40} -->\n"
+        )
+        result = self.fixture.run()
+
+        self.assertEqual(result.returncode, EXIT_STALE)
+        for name in ("copied", "data-copy", "renamed"):
+            self.assertIn(f"codex/skills/{name}/SKILL.md {UNLISTED_MESSAGE}", result.stderr)
+
     def test_changed_claude_source_fails_until_accepted(self) -> None:
         self.accept_all()
         self.fixture.append(CLAUDE_SKILL_PATH, CHANGED_LINE)
@@ -169,6 +210,7 @@ class CheckCodexSkillsTest(unittest.TestCase):
 
         self.assertEqual(stale.returncode, EXIT_STALE)
         self.assertIn(f"{CODEX_SKILL_PATH} was adapted from an older {CLAUDE_SKILL_PATH}", stale.stderr)
+        self.assertIn("record in the copy what it leaves out or changes on purpose", stale.stderr)
         self.assertEqual(accept.returncode, EXIT_PASSED, accept.stderr)
         self.assertEqual(accepted.returncode, EXIT_PASSED, accepted.stderr)
 
