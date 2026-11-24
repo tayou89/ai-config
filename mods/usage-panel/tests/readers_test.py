@@ -54,6 +54,15 @@ def _script(source: str, name: str) -> str:
         return found.group(1)
 
 
+def _shared_name(source: str, key: str) -> str:
+    found = re.search(rf"^  {key}: '([^']+)',$", source, re.M)
+
+    if found is None:
+        raise LookupError(f"SHARED_NAME.{key} is not in register.tsx")
+    else:
+        return found.group(1)
+
+
 def _busy_code(source: str) -> int:
     found = re.search(r"^const SHARED_BUSY = (\d+)$", source, re.M)
 
@@ -68,6 +77,9 @@ SHARED_READER = _script(SOURCE, "SHARED_READER")
 HISTORY = f"{SHARED_READER}\n\n{_script(SOURCE, 'HISTORY_READER')}"
 CODEX = f"{SHARED_READER}\n\n{_script(SOURCE, 'CODEX_READER')}"
 BUSY = _busy_code(SOURCE)
+CODEX_LOCAL_NAME = _shared_name(SOURCE, "codexLocal")
+# The name the band read Codex under before older bands had to be kept apart.
+OLDER_CODEX_LOCAL_NAME = "codex-local"
 
 
 def _stamp(minutes_ago: int) -> str:
@@ -190,7 +202,7 @@ class SharedReaderTest(unittest.TestCase):
             file.write(text)
 
     def _read_codex(self) -> dict[str, Any]:
-        ran = self._run_reader(CODEX, "codex-local", NOW_ONLY, LOCAL)
+        ran = self._run_reader(CODEX, CODEX_LOCAL_NAME, NOW_ONLY, LOCAL)
 
         self.assertEqual(ran.returncode, 0, ran.stderr)
         output: dict[str, Any] = json.loads(ran.stdout)["output"]
@@ -283,7 +295,7 @@ class SharedReaderTest(unittest.TestCase):
             file.write(_codex_line("event_msg", {"type": "task_complete"}))
         read_on = self._read_codex()
 
-        os.remove(os.path.join(self._shared, "codex-local.scan.json"))
+        os.remove(os.path.join(self._shared, f"{CODEX_LOCAL_NAME}.scan.json"))
         from_start = self._read_codex()
 
         self.assertEqual(read_on["last"]["read"], 5000)
@@ -373,6 +385,40 @@ class SharedReaderTest(unittest.TestCase):
 
         self.assertEqual(runs[name]["state"], "stopped")
 
+    def test_the_band_reads_codex_under_a_name_older_bands_do_not_use(self) -> None:
+        self.assertNotEqual(CODEX_LOCAL_NAME, OLDER_CODEX_LOCAL_NAME)
+
+    def test_a_scan_an_older_band_left_without_the_reservation_stays_under_its_own_name(self) -> None:
+        path = self._record("mixed", "reservation-a")
+        scan_path = os.path.join(self._shared, f"{OLDER_CODEX_LOCAL_NAME}.scan.json")
+
+        self._ledger(**{"reservation-a": "session-a"})
+        self._set_open(path)
+        older = self._run_reader(CODEX, OLDER_CODEX_LOCAL_NAME, NOW_ONLY, LOCAL)
+
+        self.assertEqual(older.returncode, 0, older.stderr)
+        with open(scan_path, encoding="utf-8") as file:
+            scans = json.load(file)
+        # An older band carries the newer fields over, reservation unread, and moves the place to the end.
+        scans[path] = {**scans[path], "reservation": None, "offset": os.path.getsize(path)}
+        with open(scan_path, "w", encoding="utf-8") as file:
+            json.dump(scans, file)
+        poisoned = self._run_reader(CODEX, OLDER_CODEX_LOCAL_NAME, NOW_ONLY, LOCAL)
+        owner = json.loads(poisoned.stdout)["output"]["records"][0]["ownerSessionId"]
+
+        self.assertEqual(owner, "unknown")
+        self.assertEqual(self._read_codex()["records"][0]["ownerSessionId"], "session-a")
+
+    def test_a_lock_on_the_older_name_does_not_hold_up_the_newer_one(self) -> None:
+        self._record("locked")
+        self._set_open()
+        os.makedirs(self._shared, exist_ok=True)
+        with open(os.path.join(self._shared, f"{OLDER_CODEX_LOCAL_NAME}.json.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            ran = self._run_reader(CODEX, CODEX_LOCAL_NAME, NOW_ONLY, LOCAL)
+
+        self.assertEqual(ran.returncode, 0, ran.stderr)
+
     def test_the_reservation_after_codex_own_instructions_names_the_owner(self) -> None:
         path = self._record("instructed", "reservation-a")
 
@@ -430,7 +476,7 @@ class SharedReaderTest(unittest.TestCase):
             self.assertEqual(output["finished"], [])
         self._set_open(code=1)
         self.assertFalse(self._read_codex()["isProcessReadFailed"])
-        missing = self._run_reader(CODEX, "codex-local", NOW_ONLY, (*LOCAL, "/missing-test-lsof"))
+        missing = self._run_reader(CODEX, CODEX_LOCAL_NAME, NOW_ONLY, (*LOCAL, "/missing-test-lsof"))
         failed = json.loads(missing.stdout)["output"]
 
         self.assertTrue(failed["isProcessReadFailed"])
@@ -462,7 +508,7 @@ class SharedReaderTest(unittest.TestCase):
         self._set_open(path)
         read_on = self._read_codex()
 
-        os.remove(os.path.join(self._shared, "codex-local.scan.json"))
+        os.remove(os.path.join(self._shared, f"{CODEX_LOCAL_NAME}.scan.json"))
         self.assertEqual(read_on, self._read_codex())
 
     def test_old_closed_records_are_not_scanned_but_open_and_kept_unknown_records_are(self) -> None:
