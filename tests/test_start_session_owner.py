@@ -16,9 +16,9 @@ from pathlib import Path
 from typing import Any
 
 from owner_world import OTHER, OWNER, PASS, OwnerWorld, Session
-from workflow_world import ENCODING, SCRIPTS_DIRECTORY
+from workflow_world import ENCODING
 
-HOOK_SCRIPT = SCRIPTS_DIRECTORY / "start-session-hook.py"
+CALM_HOOK_RUNNER = Path(__file__).resolve().parent / "calm_start_session_hook.py"
 START = {
     "initiation": "user_asked",
     "title": "시험 고치기",
@@ -82,7 +82,7 @@ class StartSessionOwnerTest(unittest.TestCase):
             "cwd": str(cwd),
         }
         result = subprocess.run(
-            [sys.executable, str(HOOK_SCRIPT)],
+            [sys.executable, str(CALM_HOOK_RUNNER)],
             input=json.dumps(payload),
             env=self.world.environment(session),
             capture_output=True,

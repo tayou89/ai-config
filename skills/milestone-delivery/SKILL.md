@@ -31,7 +31,7 @@ Apply only after a project's rules explicitly adopt milestone delivery (user dec
 
 ## Planning report
 
-Each time the user approves the project's planning scope (the first scope or a changed one), write a planning report from the vault template in the project's report folder: the approved scope with a commit-pinned link, the user's approval words and date, the decisions made without asking, the open decisions, and lessons for the vault in the same form as the milestone report's.
+Each time the user approves the project's planning scope (the first scope or a changed one), write a planning report from the vault template in the project's report folder: the approved scope with its evidence cited as `knowledge-vault` describes, the user's approval words and date, the decisions made without asking, the open decisions, and lessons for the vault in the same form as the milestone report's.
 
 ## Milestone report
 

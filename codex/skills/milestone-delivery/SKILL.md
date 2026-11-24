@@ -3,7 +3,7 @@ name: milestone-delivery
 description: Milestone workflow for a project whose rules explicitly adopt milestone delivery: a planning report at each planning-scope approval, approved designs and milestone plan with a versioned feature list, automatic checks between demos, an always-ask list, and a milestone-end report. Do not apply it in other projects.
 ---
 
-<!-- Adapted from skills/milestone-delivery/SKILL.md at 567b017b7f9ea914b8a4e9a190a37e27f719e701 -->
+<!-- Adapted from skills/milestone-delivery/SKILL.md at 24775fd15b65c0fc820f614a6550ab2fe250afff -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - "Approvals" says an approved milestone plan counts as the file-change approval the Codex global instructions ask for, since Codex asks before creating or modifying files.
 - "Milestone report" keeps the report in the project's report folder and points at knowledge-vault "Read only": Codex only reads the vault (user decision, 2026-11-13).
@@ -37,7 +37,7 @@ Apply only after a project's rules explicitly adopt milestone delivery (user dec
 
 ## Planning report
 
-Each time the user approves the project's planning scope (the first scope or a changed one), write a planning report from the vault template in the project's report folder: the approved scope with a commit-pinned link, the user's approval words and date, the decisions made without asking, the open decisions, and lessons for the vault in the same form as the milestone report's.
+Each time the user approves the project's planning scope (the first scope or a changed one), write a planning report from the vault template in the project's report folder: the approved scope with its evidence cited as `knowledge-vault` describes, the user's approval words and date, the decisions made without asking, the open decisions, and lessons for the vault in the same form as the milestone report's.
 
 ## Milestone report
 
