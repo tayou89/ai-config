@@ -43,10 +43,6 @@ When a plan adopts a new language, framework, or external service, or enters a s
 
 When a plan gives an application a production, staging, or live mode, select that mode only on the command line that starts it: a mode or environment option (`--mode live`, `--env production`) or an environment variable set on the command itself (`APP_MODE=live <command>`), with the safe mode as the default. Never let a config-file or `.env` value alone turn it on, and do not use a separate confirmation flag as the switch. Command guards (the shell guard hook, which the production mode principle in `work-principles` relies on) see only the command line and recognize mode words such as `production`, `staging`, and `live` in mode and environment options and variables; tested 2026-11-09, the guard asked before `--mode live` and `<NAME>_MODE=live` but let `--confirm-live` and a config-file `mode = "live"` run without asking.
 
-## 3d. Codex Work
-
-While the `agent-usage` budget verdict is `delegate`, mark each step's actual work for Codex with its model, estimated share, and the files or sources it may touch, unless an exception in `agent-usage` section 14 keeps it with Claude, which the step names (user decision, 2026-11-18).
-
 ## 4. Pattern Alignment Check
 
 For structural decisions (new file layout, where a new type lives, module split, naming), grep 2-3 analogous cases in the same codebase. Match the dominant local pattern, or justify the deviation in the plan. Skill rules don't override local conventions. If no precedent exists, flag it.
@@ -59,10 +55,11 @@ Before drafting any plan, perform all of the following. Skipping any is the root
 2. **3+ alternatives required**: Never propose the first working design. Evaluate at least three: (a) the dominant local pattern, (b) an industry-standard pattern for this concern (Observer, Strategy, etc.), (c) any cross-cutting-concern separation form. Compare them on the shared decision axes, naming the lifetime assumptions, failure conditions, and evidence that tell them apart. Present the best, not the first found.
 3. **Cross-cutting policy fields vs metadata**: Behavior-controlling flags (cancel policy, retry policy, timeout policy) belong as top-level fields on the entity, at the same level as other policy fields, not crammed into `metadata`/generic data containers. `metadata` is for identifiers and payload, not for policy.
 4. **Shared resources**: For a quota, port, lock, or other resource that several sessions or processes use at once, name its single owner and how concurrent users reserve and release it, and check the rules that already gate that resource for conflicts, since a read-only check cannot stop two users from taking the same share (user decision, 2026-11-17).
+5. **Earlier repairs**: For a plan that fixes a failure, state the failed expectation and record `Earlier repairs:` with each earlier repair of it found in the commits, plans, and notes, searched by behavior and mechanism rather than only by file name or commit type, with what each was meant to prevent and whether it was in place when the failure recurred, or `none found` with where you searched. When there are any, say what they left in place and why this plan reaches it, as `work-principles` 4 describes (user decisions, 2026-11-18 and 2026-11-20).
 
 ## 4b. Plan Revision Minimization
 
-v2+ plan revisions are failure signals — the design thinking that led to v(N+1) should have happened at v1. Acceptable revisions: user requirement change, externally-discovered constraint. Unacceptable: design omissions that section 4a should have caught (missed duplication, missed owner, missed alternative).
+v2+ plan revisions are failure signals — the design thinking that led to v(N+1) should have happened at v1. Acceptable revisions: user requirement change, externally-discovered constraint. Unacceptable: design omissions that section 4a should have caught (missed duplication, missed owner, missed alternative). When evidence shows the design is wrong, revise at once, however large the change, rather than finishing on it: the omission is the failure, not the revision (user decision, 2026-11-18).
 
 When a revision happens, in the new version's "Changes from v(N-1)" section, briefly state what v(N-1) missed and why. Then check whether the miss should become a permanent rule and, if so, record it at once as `collaboration-core` "Decisions and corrections" describes; one correction is enough.
 
@@ -115,15 +112,17 @@ Module relationships, data flow, inheritance in ASCII diagrams. Skip for simple 
 When the plan changes generic signatures, interface contracts, callback signatures, or types used across multiple consumers/providers, perform a mock feasibility check **before requesting approval**:
 
 1. **Extract sample code's key signatures** — interface definitions, function signatures, generic declarations, call-site examples.
-2. **Stub consumers and providers** in a minimal scratch environment (or TypeScript playground for `.ts`).
-3. **Run the language's type checker** — `tsc --noEmit` for TypeScript, `mypy` for Python with type hints, `cargo check` for Rust, etc. Verify it passes against the stubbed environment.
+2. **Prepare a scratch copy of the project** (a temporary worktree or copy of the current commit, with its own configuration and dependencies), stubbing only consumers and providers that do not exist yet (or a TypeScript playground for `.ts` when the project has no code yet).
+3. **Run the language's type checker and the project's full test suite** — `tsc --noEmit` for TypeScript, `mypy` for Python with type hints, `cargo check` for Rust, etc. — on the unchanged copy for a baseline, then apply the change and run the same commands again. Existing tests exercise signatures and behavior, also through subprocesses and fixtures that never name the changed code, so a search cannot pick the tests that matter: running only the new tests once missed three broken existing tests (2026-11-16). Focused runs may come first for quick feedback but never replace the full run; follow a narrower set only where the project's rules name one, and when the full run cannot finish, record the check as incomplete, not passed.
 4. **Map variance positions** of every generic parameter in the plan (covariant / contravariant / invariant). Confirm the variance is what the plan assumes — sibling-generic assignability often fails silently when a callback puts `T` in argument position. See `typescript` skill "Generic Variance — Plan-Time Check" for details.
 5. **Trace internal call chains**. If method A calls method B, and B's signature changes, A must still compile. Map A→B→C... chains explicitly.
-6. **Record result in the plan body** — `Mock feasibility: passed` (with brief notes on what was stubbed) or `Mock feasibility: failed (reason)`.
+6. **Record result in the plan body** — `Mock feasibility: passed` only when every required check finished with no new failures (with what was stubbed and the baseline and trial results: counts and the names of failures and skips), `Mock feasibility: failed (reason)`, or `Mock feasibility: incomplete (what did not run and why)`.
 
 Failure → revise the plan before requesting approval. Don't defer this to implementation — implementation surprises ("the plan compiled in isolation but the whole project doesn't") almost always trace back to skipping this step.
 
 **Skip allowed only when**: the plan adds optional fields without changing existing signatures, generics, or call chains. Even then, briefly note `Mock feasibility: skipped (additive-only change)` in the plan body for traceability.
+
+Run the same baseline and full-suite steps whenever a plan's code is tried in the project as evidence for approval, whether or not it changes signatures; an isolated experiment shows only the property it tests.
 
 ## 6a. Style Compliance Check (mandatory before approval)
 
@@ -147,7 +146,7 @@ Plans are written at a point in time and may omit applicable rules. When executi
 **Design changes** (logic, API, architecture): write new version (v{N+1}), mark previous as SUPERSEDED, get approval.
 In a `milestone-delivery` project, a child-plan revision that stays inside the approved milestone scope and approved designs is recorded as a new version without a new approval; changing an approved design still needs approval.
 **Minor fixes** (params, typos, user-directed): inline edit in current version, no separate approval needed.
-**Plan-implementation gap**: If implementation surfaces 3+ unanticipated changes (cast additions, signature mismatches, narrowing requirements, type errors not predicted by plan) beyond plan scope, halt and re-evaluate the plan's feasibility assumptions before proceeding. Don't accumulate workarounds — each unplanned cast is a signal that the plan-time feasibility check missed something. Update the plan or switch alternatives based on actual implementation findings.
+**Plan-implementation gap**: If implementation surfaces 3+ unanticipated changes (cast additions, signature mismatches, narrowing requirements, type errors not predicted by plan) beyond plan scope, halt and re-evaluate the plan's feasibility assumptions before proceeding. Don't accumulate workarounds — each unplanned cast is a signal that the plan-time feasibility check missed something. Update the plan or switch alternatives based on actual implementation findings. Halt at once when one finding already shows the design is wrong; the count is for changes whose cause is not yet clear.
 
 ## 10. Commit Granularity
 

@@ -7,9 +7,6 @@ of the work-type table's. When a session would start now while the computer
 is overloaded, it lets the start through without asking the user and adds the
 load to the session's context, using the load threshold the batch(1) command
 uses: a 1-minute load average above 1.5 times the CPU count.
-It also denies a brief without a line starting with `Codex:`, since the agent-usage
-rules hand the actual work to Codex while it has spare share and the split is
-decided where the brief is written.
 
 A session started to share a folder (`use_worktree: false`, or a `cwd`
 without its own worktree) works where that folder is. When the folder is a
@@ -24,7 +21,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -50,20 +46,14 @@ _CONTEXT_KEY = "additionalContext"
 _DECISION_DENY = "deny"
 _PROPOSAL_KEY = "proposal_id"
 _TITLE_KEY = "title"
-_PROMPT_KEY = "prompt"
 _INITIATION_KEY = "initiation"
 _LEVEL_KEYS = ("model", "effort")
 _CARD_ONLY_INITIATION = "own_initiative"
 _LOAD_FACTOR = 1.5
-_CODEX_LINE = re.compile(r"^\s*(?:[-*]\s*)?\**Codex\**\s*:", re.MULTILINE)
 _LEVEL_REASON = (
     "Set {missing} from the work-type table in the decisions-and-collaboration skill "
     "(\"Model and effort for runs you start\"), using the highest row any part of the work needs. "
     "A session started without them inherits this session's level."
-)
-_CODEX_REASON = (
-    "Add a line starting with `Codex:` to the brief: the part of the work Codex does, the exception in "
-    "agent-usage section 14 that keeps it with Claude, or that the budget verdict is not `delegate`."
 )
 _USE_WORKTREE_KEY = "use_worktree"
 _CWD_KEY = "cwd"
@@ -133,8 +123,6 @@ def decide(
             _DECISION_KEY: _DECISION_DENY,
             _DECISION_REASON_KEY: _LEVEL_REASON.format(missing=" and ".join(f"`{key}`" for key in missing)),
         }
-    elif _is_missing_codex_line(tool_input):
-        return {_DECISION_KEY: _DECISION_DENY, _DECISION_REASON_KEY: _CODEX_REASON}
     else:
         return _decide_folder_and_load(tool_input, load, _judge_shared_folder(tool_input, cwd, session_id))
 
@@ -202,12 +190,6 @@ def _list_missing_levels(tool_input: dict[str, Any]) -> list[str]:
         return []
     else:
         return [key for key in _LEVEL_KEYS if not tool_input.get(key)]
-
-
-def _is_missing_codex_line(tool_input: dict[str, Any]) -> bool:
-    prompt = str(tool_input.get(_PROMPT_KEY) or "")
-
-    return bool(prompt) and not _CODEX_LINE.search(prompt)
 
 
 def _is_proposal_start(tool_input: dict[str, Any]) -> bool:

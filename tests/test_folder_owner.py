@@ -256,8 +256,8 @@ class FolderOwnerTest(unittest.TestCase):
             folder_owner.read_owner(self.worktree)
 
     def test_gaps_are_kept_until_settled(self) -> None:
-        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: ValueError: broken")
-        folder_owner.add_gap(self.worktree, None, "Edit: OSError: gone")
+        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: ValueError: broken", None)
+        folder_owner.add_gap(self.worktree, None, "Edit: OSError: gone", None)
         gaps = folder_owner.read_gaps(self.worktree)
 
         self.assertEqual([gap.what for gap in gaps], ["Bash: ValueError: broken", "Edit: OSError: gone"])
@@ -266,16 +266,26 @@ class FolderOwnerTest(unittest.TestCase):
         self.assertEqual(folder_owner.read_gaps(self.worktree), [])
 
     def test_a_gap_added_after_the_commit_read_them_stays(self) -> None:
-        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: ValueError: seen")
+        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: ValueError: seen", None)
         shown = folder_owner.read_gaps(self.worktree)
 
-        folder_owner.add_gap(self.worktree, identity(THIRD), "Bash: ValueError: later")
+        folder_owner.add_gap(self.worktree, identity(THIRD), "Bash: ValueError: later", None)
         folder_owner.settle_gaps(self.worktree, shown)
         left = folder_owner.read_gaps(self.worktree)
         settled = (self.worktree.git_directory / "claude-owner-gaps-settled.jsonl").read_text(encoding=ENCODING)
 
         self.assertEqual([gap.what for gap in left], ["Bash: ValueError: later"])
         self.assertIn("seen", settled)
+
+    def test_one_call_is_one_gap_however_often_the_guard_fails_on_it(self) -> None:
+        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: OSError: before the call", "toolu_a")
+        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: OSError: after the call", "toolu_a")
+        folder_owner.add_gap(self.worktree, identity(OTHER), "Bash: OSError: another call", "toolu_b")
+        folder_owner.add_gap(self.worktree, None, "Bash: OSError: no call id", None)
+        folder_owner.add_gap(self.worktree, None, "Bash: OSError: no call id again", None)
+        gaps = folder_owner.read_gaps(self.worktree)
+
+        self.assertEqual([gap.call_id for gap in gaps], ["toolu_a", "toolu_b", None, None])
 
     def test_an_unreadable_gap_record_still_counts_as_a_gap(self) -> None:
         self.worktree.gaps_file.write_bytes(b"\xff\xfe not text")

@@ -28,6 +28,11 @@ RUNNER = "scripts/check-commit.py"
 TESTS_CHECK_LINE = '    ("tests",'
 ADDED_CHECK_NAME = "a check only the edited runner lists"
 ADDED_CHECK_LINE = f'    ("{ADDED_CHECK_NAME}", ["scripts/added-check.py"]),\n'
+SIZE_SCRIPT = "scripts/check-rule-size.py"
+SIZE_RECORD = "always-loaded-sizes.json"
+SIZE_RULE_FILES = {"CLAUDE.md": 1_000, "rules/core.md": 1_000, "codex/AGENTS.md": 1_000}
+SIZE_SETTINGS = '{"config": {"project_doc_max_bytes": 65536}}\n'
+CODEX_HOME_VARIABLE = "CODEX_HOME"
 SAMPLE_TEST = '''import os
 import unittest
 from pathlib import Path
@@ -49,6 +54,7 @@ class CheckCommitFixture:
         self.private_index = self.root / "private-index"
         self.git_config = self.root / "gitconfig"
         self.temporary = self.root / "tmp"
+        self.codex_home = self.root / "codex-home"
 
     def create(self) -> None:
         self.git_config.write_text("[user]\n\tname = Check Test\n\temail = check@example.com\n")
@@ -69,10 +75,14 @@ class CheckCommitFixture:
 
     def environment(self, index: Path | None = None) -> dict[str, str]:
         environment = {name: value for name, value in os.environ.items() if not name.startswith("GIT_")}
+        isolation = {
+            "GIT_CONFIG_GLOBAL": str(self.git_config),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "TMPDIR": str(self.temporary),
+            CODEX_HOME_VARIABLE: str(self.codex_home),
+        }
 
-        environment.update(
-            {"GIT_CONFIG_GLOBAL": str(self.git_config), "GIT_CONFIG_NOSYSTEM": "1", "TMPDIR": str(self.temporary)},
-        )
+        environment.update(isolation)
         if index is not None:
             environment[PRIVATE_INDEX_VARIABLE] = str(index)
         return environment
@@ -93,7 +103,20 @@ class CheckCommitFixture:
         )
 
     def write(self, path: str, text: str) -> None:
-        (self.repository / path).write_text(text)
+        target = self.repository / path
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text)
+
+    def add_real_size_check(self) -> None:
+        shutil.copy2(REPOSITORY_ROOT / SIZE_SCRIPT, self.repository / SIZE_SCRIPT)
+        for path, size in SIZE_RULE_FILES.items():
+            self.write(path, "x" * size)
+        self.write("codex/settings.json", SIZE_SETTINGS)
+        self.write(SIZE_RECORD, '{"claude": 2000, "codex_global": 1000}\n')
+        (self.codex_home / "sessions").mkdir(parents=True)
+        self.run_git("add", ".")
+        self.run_git("commit", "-q", "-m", "Chore: add the real size check")
 
     def read_head(self) -> str:
         return self.run_git("rev-parse", "HEAD").stdout.strip()
@@ -186,6 +209,20 @@ class CheckCommitTest(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("size budgets", result.stderr)
+
+    def test_size_record_is_read_from_the_index(self) -> None:
+        self.fixture.add_real_size_check()
+        self.fixture.write("CLAUDE.md", "x" * 1_100)
+        self.fixture.write(SIZE_RECORD, '{"claude": 2100, "codex_global": 1000}\n')
+        self.fixture.run_git("add", "CLAUDE.md")
+        rules_only = self.fixture.run_git("commit", "-q", "-m", "Feat: grow the rules", check=False)
+
+        self.fixture.run_git("add", SIZE_RECORD)
+        with_record = self.fixture.run_git("commit", "-q", "-m", "Feat: grow the rules", check=False)
+
+        self.assertNotEqual(rules_only.returncode, 0)
+        self.assertIn("grew to 2,100 bytes", rules_only.stderr)
+        self.assertEqual(with_record.returncode, 0, with_record.stderr)
 
     def test_added_token_stops_the_commit(self) -> None:
         base = self.fixture.read_head()

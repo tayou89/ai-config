@@ -706,8 +706,9 @@ def find_adoption_reasons(calls: list[CommandCall]) -> list[str]:
 
 def is_task_worktree_call(call: CommandCall) -> bool:
     """In a task worktree the commit wrapper reads the folder's owner, and the folder guard asks before a takeover,
-    so neither dialog about recorded lines applies there."""
-    return call.cwd is not None and find_linked_worktree(Path(call.cwd).resolve()) is not None
+    so neither dialog about recorded lines applies there. The folder comes from the command's `cd` words, so a link
+    loop resolves without raising (os.path.realpath)."""
+    return call.cwd is not None and find_linked_worktree(Path(os.path.realpath(call.cwd))) is not None
 
 
 def read_adoption_arguments(argv: list[str]) -> tuple[str, list[str]] | None:

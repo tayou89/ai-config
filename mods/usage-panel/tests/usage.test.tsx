@@ -1,7 +1,15 @@
 import { expect, mock, test } from 'claude-code/testing'
 import type { On, SessionMeasureInput, TurnCompleteInput } from 'claude-code'
-import type { Engine } from 'claude-code/testing'
-import type { CacheOutput, ListedSession, SessionState, SessionStates } from '../types'
+import type { Engine, MockClock } from 'claude-code/testing'
+import type {
+  CacheOutput,
+  CodexLocalOutput,
+  CodexRecord,
+  ListedSession,
+  SessionState,
+  SessionStates,
+  Work,
+} from '../types'
 
 type SessionRow = ListedSession & { isArchived: boolean }
 // The band timers a test counts, each by a call only its tick makes.
@@ -17,7 +25,12 @@ interface CountedCall {
 // types had not registered it yet.
 declare module 'claude-code' {
   interface McpToolInputs {
-    'mcp__usage-panel__work_estimate': { maker: 'claude' | 'codex'; minutes: number; steps?: number }
+    'mcp__usage-panel__work_estimate': {
+      maker: 'claude' | 'codex'
+      minutes: number
+      steps?: number
+      reservation?: string
+    }
   }
 }
 
@@ -77,7 +90,7 @@ const SHARED = '/Users/t/Library/Caches/usage-panel/'
 const SESSION_STATES_FILE = '/session-states.json'
 const sharedFiles: Record<string, string> = {}
 const sharedReader = { isBusy: false, hold: undefined as Promise<void> | undefined, calls: 0 }
-const LOCAL_KEYS = ['snapshot', 'last', 'working', 'finished', 'running']
+const LOCAL_KEYS = ['snapshot', 'last', 'working', 'finished', 'running', 'records', 'isProcessReadFailed']
 const SERVER_KEYS = ['limits', 'configured', 'error']
 // What the mod did at start: the 7-day counts it ran and the panes it closed.
 const started = { recounts: 0, closed: [] as string[] }
@@ -105,9 +118,45 @@ const app = {
   isAgentListFailing: false,
   tools: [] as string[],
   workFiles: {} as Record<string, string>,
+  currentWorks: [] as Work[],
   countedCalls: [] as CountedCall[],
+  workReads: [] as number[],
+  sessionIds: [] as number[],
 }
 const WORK_FOLDER = '/Users/t/Library/Application Support/usage-panel/work'
+
+function codexRecord(name: string, startedAt: number, fields: Partial<CodexRecord> = {}): CodexRecord {
+  return {
+    recordId: `rollout-${name}.jsonl`,
+    reservation: `reservation-${name}`,
+    ownerSessionId: 'cli-1',
+    state: 'running',
+    startedAt,
+    steps: 3,
+    read: 1000,
+    cached: 0,
+    write: 0,
+    model: `model-${name}`,
+    effort: 'high',
+    folder: '/',
+    ...fields,
+  }
+}
+
+function ownCodexWorks(): Work[] {
+  return app.currentWorks.filter(w => w.maker === 'codex')
+}
+
+async function publishCodex(output: CodexLocalOutput, records: CodexRecord[], clock: MockClock): Promise<void> {
+  output.records = records
+  output.working = records.filter(r => r.state === 'running')
+  output.finished = records.flatMap(r => r.state === 'done' && r.finishedAt !== undefined
+    ? [{ ...r, finishedAt: r.finishedAt }]
+    : [])
+  output.running = output.working.length
+  codexDisk.recordAt = clock.now()
+  await clock.advance(10_001)
+}
 
 const claudeReading = (fiveHour: number): SessionMeasureInput => ({
   context: { tokens: 1, window: 1_000_000, percent: 15 },
@@ -162,7 +211,7 @@ const readShared = async (
 const sharedOutput = (mode: string | undefined, codexOutput: object, now: number) => {
   if (mode === 'local') {
     codexReads.push(mode)
-    return { working: [], running: 0, ...pick(codexOutput, LOCAL_KEYS) }
+    return { working: [], records: [], running: 0, ...pick(codexOutput, LOCAL_KEYS) }
   } else if (mode === 'server') {
     codexReads.push(mode)
     return pick(codexOutput, SERVER_KEYS)
@@ -184,6 +233,8 @@ const engine = (
   // The engine's clock reads fractions of a millisecond.
   const clock = mock.clock(on, { now: Date.parse('2026-11-04T07:00:00Z') + 0.25 })
   mock.store(on)
+  codexDisk.recordAt = 0
+  codexDisk.configAt = 0
   claudeShared.text = undefined
   for (const path of Object.keys(sharedFiles)) {
     delete sharedFiles[path]
@@ -206,7 +257,22 @@ const engine = (
   app.isAgentListFailing = false
   app.tools = []
   app.workFiles = {}
+  app.currentWorks = []
   app.countedCalls = []
+  app.workReads = []
+  app.sessionIds = []
+  on('state.get', { plugin: 'usage-panel', key: 'works' }, (_, e, next) => {
+    app.workReads.push(clock.now())
+    return next(e)
+  })
+  on('state.set', async (_, e, next) => {
+    const result = await next(e)
+
+    if (e.plugin === 'usage-panel' && e.key === 'works' && result.value?.isSet) {
+      app.currentWorks = e.value.value.map(work => ({ ...work }))
+    }
+    return result
+  })
   on('command.register', () => ({ value: { command: 'usage-panel' } }))
   on('tool.register', (_, e) => (app.tools.push(e.name), { value: { tool: `mcp__usage-panel__${e.name}` } }))
   on('mcp.call', (_, e) => {
@@ -222,7 +288,10 @@ const engine = (
       return { value: { content, isError: e.tool !== 'list_sessions' } }
     }
   })
-  on('session.id', () => ({ value: 'cli-1' }))
+  on('session.id', () => {
+    app.sessionIds.push(clock.now())
+    return { value: 'cli-1' }
+  })
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('ui.close', (_, e) => (started.closed.push(e.id), { value: undefined }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -754,7 +823,7 @@ test("a Codex run another session started shows in the details, not on this sess
   expect(await ui.find({ key: 'work-codex' })).toBeUndefined()
   expect(await ui.find({ type: 'Text', text: /^In 5.9M/ })).toBeUndefined()
   expect(spinners).toHaveLength(0)
-  expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-sol high')
+  expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
   await ui.unmount()
 
   const pane = await $.ui.mount({ ...PANE, surface: 'desktop' })
@@ -879,6 +948,8 @@ test('a reload neither recounts nor asks the Codex server again, and keeps the d
 })
 
 const FOLDER = '/Users/t/Desktop/project/또갈래'
+// The shared Codex reading of this band; older bands keep the name before it.
+const CODEX_LOCAL_SHARED = 'codex-local-2'
 const seedShared = (name: string, key: string, at: number, output: object) => {
   sharedFiles[`${SHARED}${name}.json`] = JSON.stringify({ entries: { [key]: { at, output } } })
 }
@@ -886,7 +957,7 @@ const seedShared = (name: string, key: string, at: number, output: object) => {
 test('a Codex reading another session made since is taken without reading again', async ($, on) => {
   codexReads.length = 0
   const clock = engine(on)
-  seedShared('codex-local', '', clock.now() - 1_000, { ...pick(CODEX, LOCAL_KEYS), working: [] })
+  seedShared(CODEX_LOCAL_SHARED, '', clock.now() - 1_000, { ...pick(CODEX, LOCAL_KEYS), working: [] })
   seedShared('codex-server', FOLDER, clock.now() - 60_000, pick(CODEX, SERVER_KEYS))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -897,6 +968,22 @@ test('a Codex reading another session made since is taken without reading again'
   expect((await ui.find({ type: 'Text', text: /^5h 52%$/ }))?.text).toBe('5h 52%')
   expect((await ui.find({ type: 'Text', text: /^Week 18%$/ }))?.text).toBe('Week 18%')
   expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6-astra xhigh')
+  await ui.unmount()
+})
+
+test("an older band's newer Codex reading under the old name is neither taken nor read", async ($, on) => {
+  codexReads.length = 0
+  const clock = engine(on, [], undefined, [], true, [], CODEX)
+  const oldReading = { ...pick(CODEX, LOCAL_KEYS), working: [], running: 3, error: 'old band' }
+
+  seedShared('codex-local', '', clock.now() - 1_000, oldReading)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(codexReads).toContain('local')
+  expect(await ui.find({ type: 'Text', text: /old band/ })).toBeUndefined()
+  expect(sharedFiles[`${SHARED}codex-local.json`]).toContain('old band')
   await ui.unmount()
 })
 
@@ -921,7 +1008,7 @@ test('while another session reads Codex, this one keeps its line and takes that 
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
-  seedShared('codex-local', '', clock.now(), { ...pick(CODEX, LOCAL_KEYS), working: [], running: 1 })
+  seedShared(CODEX_LOCAL_SHARED, '', clock.now(), { ...pick(CODEX, LOCAL_KEYS), working: [], running: 1 })
   seedShared('codex-server', FOLDER, clock.now(), pick(CODEX, SERVER_KEYS))
   sharedReader.isBusy = false
   await clock.advance(10_000)
@@ -1426,11 +1513,15 @@ test('a Codex run in the background takes its estimate and ends with its record'
 
   await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 15 })
   const ran = await $.tool.call({ tool: 'Bash', command: 'codex exec "review"', run_in_background: true })
-  const record = { startedAt: startedAt + 2_000, steps: 30, read: 1_000_000, cached: 800_000, write: 20_000, folder: '/' }
+  const record: CodexRecord = {
+    recordId: 'rollout-background.jsonl', ownerSessionId: 'cli-1', state: 'running',
+    startedAt: startedAt + 2_000, steps: 30, read: 1_000_000, cached: 800_000, write: 20_000, folder: '/',
+  }
 
   expect(ran.context ?? []).not.toContain('No Codex estimate was recorded for this run.')
   output.running = 1
   output.working = [record]
+  output.records = [record]
   await clock.advance(10_000)
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
@@ -1443,9 +1534,11 @@ test('a Codex run in the background takes its estimate and ends with its record'
   output.running = 0
   output.working = []
   output.finished = [{ ...record, finishedAt: startedAt + 12 * 60_000, rise: 1 }]
+  output.records = [{ ...record, state: 'done', finishedAt: startedAt + 12 * 60_000, rise: 1 }]
   codexDisk.recordAt = clock.now()
   await clock.advance(10_000)
   await clock.advance(10_000)
+  expect(ownCodexWorks()[0]?.state).toBe('done')
   const done = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
   expect(await textOf(done, /^16:12 끝/)).toBe('16:12 끝 3분 빠름')
@@ -1498,16 +1591,28 @@ test('the details list the week of work with its estimates and the median miss',
   expect(Object.keys(app.workFiles)).toContain(`${WORK_FOLDER}/cli-1.json`)
 })
 
-test('a command that only names codex exec is no work, and a refused run gives its estimate back', async ($, on) => {
+test('quoted and search commands create no placeholder, and a denied invocation restores its estimate', async ($, on) => {
   const clock = engine(on)
   const answered = { result: { text: 'OK', isError: false } }
   on('tool.call', (_, e) => (e.tool === 'Bash' && e.command.includes('refused') ? { deny: '거절됨' } : answered))
 
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
   await clock.advance(1)
-  await $.tool.call({ tool: 'Bash', command: 'git commit -m "codex exec 결과 반영"' })
-  await $.tool.call({ tool: 'Bash', command: 'grep -n "codex exec" notes.md' })
-  await $.tool.call({ tool: 'Bash', command: 'codex exec --help' })
+  const commands = [
+    'git commit -m "codex exec 결과 반영"',
+    'grep -n "codex exec" notes.md',
+    'grep -n "exec" codex-implementation.md',
+    'ps | grep -E "x|codex exec"',
+    'echo "codex exec"',
+    'codex exec --help',
+  ]
+
+  for (const command of commands) {
+    const result = await $.tool.call({ tool: 'Bash', command })
+
+    expect(result.context ?? []).not.toContain('No Codex estimate was recorded for this run.')
+    expect(ownCodexWorks()).toHaveLength(0)
+  }
   const none = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
   expect(await none.find({ key: 'work-codex' })).toBeUndefined()
@@ -1518,7 +1623,7 @@ test('a command that only names codex exec is no work, and a refused run gives i
   await $.tool.call({ tool: 'Bash', command: 'cd /tmp && codex exec "review"', run_in_background: true })
   const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
 
-  expect(await textOf(ui, /까지/)).toBe('16:10까지 10분')
+  expect((ownCodexWorks()).filter(w => w.estimate?.minutes === 10)).toHaveLength(1)
   expect(await textOf(ui, /^0 ×0$/)).toBe('0 ×0')
   await ui.unmount()
 })
@@ -1563,19 +1668,25 @@ test('two runs started close together each take their own record', async ($, on)
   await $.tool.call({ tool: 'Bash', command: 'codex exec "one"', run_in_background: true })
   await clock.advance(5_000)
   await $.tool.call({ tool: 'Bash', command: 'codex exec "two"', run_in_background: true })
-  const one = { startedAt: first + 2_000, steps: 3, read: 1_000_000, cached: 0, write: 0, folder: '/' }
-  const two = { startedAt: first + 7_000, steps: 4, read: 2_000_000, cached: 0, write: 0, folder: '/' }
+  const one = codexRecord('one', first + 2_000, { steps: 3, read: 1_000_000 })
+  const two = codexRecord('two', first + 7_000, { steps: 4, read: 2_000_000 })
 
   output.running = 2
   output.working = [one]
+  output.records = [one]
   await clock.advance(10_000)
   output.working = [one, two]
+  output.records = [one, two]
   await clock.advance(10_000)
   output.running = 0
   output.working = []
   output.finished = [
     { ...two, finishedAt: first + 3 * 60_000 },
     { ...one, finishedAt: first + 2 * 60_000 },
+  ]
+  output.records = [
+    { ...two, state: 'done', finishedAt: first + 3 * 60_000 },
+    { ...one, state: 'done', finishedAt: first + 2 * 60_000 },
   ]
   codexDisk.recordAt = clock.now()
   await clock.advance(10_000)
@@ -1586,6 +1697,533 @@ test('two runs started close together each take their own record', async ($, on)
   expect(rows).toEqual(['시간 3분 · 단계 4 · 토큰 2M', '시간 2분 · 단계 3 · 토큰 1M'])
   await pane.unmount()
   codexDisk.recordAt = 0
+})
+
+test('a foreground nohup command owns two equal-start runs until both records finish', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'returned immediately', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: 'Bash', command: 'nohup codex --search exec "one" & nohup codex exec "two" &' })
+  const first = codexRecord('first', clock.now())
+  const second = codexRecord('second', clock.now())
+
+  await publishCodex(output, [first, second], clock)
+  expect((ownCodexWorks()).map(w => w.state)).toEqual(['running', 'running'])
+  for (const surface of ['desktop', 'terminal'] as const) {
+    const ui = await $.ui.mount({ ...ABOVE, surface })
+
+    expect((await ui.find({ key: 'codex' }))?.text).not.toContain('✓')
+    expect((await ui.find({ key: 'codex' }))?.text).toContain('외 1개')
+    await ui.unmount()
+  }
+  await publishCodex(output, [{ ...first, state: 'done', finishedAt: START + 60_000 }, second], clock)
+  const partial = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await partial.find({ key: 'codex' }))?.text).not.toContain('✓')
+  await partial.unmount()
+  const bothDone: CodexRecord[] = [
+    { ...first, state: 'done', finishedAt: START + 60_000 },
+    { ...second, state: 'done', finishedAt: START + 120_000 },
+  ]
+
+  await publishCodex(output, bothDone, clock)
+  const done = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await done.find({ key: 'codex' }))?.text).toContain('✓')
+  expect((await done.find({ key: 'codex' }))?.text).toContain('16:02 끝')
+  expect(ownCodexWorks()).toHaveLength(2)
+  await done.unmount()
+})
+
+test('neither foreground nor background Bash returns end a Codex run', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  for (const runInBackground of [false, true]) {
+    await $.tool.call({ tool: 'Bash', command: 'codex -c k=v exec "work"', run_in_background: runInBackground })
+  }
+  expect((ownCodexWorks()).map(w => w.state)).toEqual(['starting', 'starting'])
+  expect((ownCodexWorks()).every(w => w.finishedAt === undefined)).toBe(true)
+  const first = codexRecord('live', clock.now())
+  const second = codexRecord('live-too', clock.now())
+
+  await publishCodex(output, [first], clock)
+  await clock.advance(20_000)
+  expect((ownCodexWorks()).find(w => w.recordId)?.state).toBe('running')
+  await publishCodex(output, [first, second], clock)
+  expect(ownCodexWorks().map(w => w.state)).toEqual(['running', 'running'])
+})
+
+test('another session reservation cannot be claimed even in the same second', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: 'Bash', command: '/path/codex e "work"' })
+  const sameSecond = [
+    codexRecord('other', clock.now(), { ownerSessionId: 'other-session', read: 9_000_000 }),
+    codexRecord('mine', clock.now()),
+  ]
+
+  await publishCodex(output, sameSecond, clock)
+  const own = ownCodexWorks()
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(own.map(w => w.recordId)).toEqual(['rollout-mine.jsonl'])
+  expect((await ui.find({ key: 'codex' }))?.text).not.toContain('model-other')
+  expect((await ui.find({ key: 'codex' }))?.text).not.toContain('9M')
+  await ui.unmount()
+})
+
+test('an owned run started inside run-review appears without Codex in the Bash text', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(61_000)
+  await $.tool.call({ tool: 'Bash', command: 'python3 skills/outside-review/run-review.py' })
+  output.records = [codexRecord('script', clock.now())]
+  output.working = output.records
+  output.running = 1
+  codexDisk.recordAt = clock.now()
+  await clock.advance(60_000)
+  expect((ownCodexWorks()).map(w => w.recordId)).toEqual(['rollout-script.jsonl'])
+})
+
+test('a real invocation with no record loses its placeholder at the estimate deadline', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "delayed"' })
+  await clock.advance(10 * 60_000 - 1)
+  expect(ownCodexWorks().map(w => w.state)).toEqual(['starting'])
+  await clock.advance(1)
+  expect(ownCodexWorks()).toHaveLength(0)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(await ui.find({ key: 'work-codex' })).toBeUndefined()
+  await ui.unmount()
+  await publishCodex(output, [codexRecord('late-owned', clock.now())], clock)
+  expect(ownCodexWorks().filter(w => w.state === 'unknown')).toHaveLength(0)
+  expect(ownCodexWorks().find(w => w.state === 'running')?.recordId).toBe('rollout-late-owned.jsonl')
+})
+
+test('late estimates stay on the running run and reservation and command estimates reach their runs', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const first = codexRecord('late', clock.now())
+
+  await publishCodex(output, [first], clock)
+  expect(ownCodexWorks().map(w => w.state)).toEqual(['running'])
+  const late = await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 25 })
+
+  expect(late.deny).toBeUndefined()
+  expect((ownCodexWorks())[0]?.estimate?.minutes).toBe(25)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 7, reservation: first.reservation })
+  expect((ownCodexWorks())[0]?.estimate?.minutes).toBe(7)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 11, reservation: 'reservation-reserved' })
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 13, reservation: 'reservation-reserved-too' })
+  const reserved = [first, codexRecord('reserved', clock.now()), codexRecord('reserved-too', clock.now())]
+
+  await publishCodex(output, reserved, clock)
+  expect((ownCodexWorks()).map(w => w.estimate?.minutes)).toEqual([7, 11, 13])
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 20 })
+  await $.tool.call({ tool: 'Bash', command: 'nohup codex exec "one" & nohup codex exec "two" &' })
+  const one = codexRecord('group-one', clock.now())
+  const two = codexRecord('group-two', clock.now())
+  const old = output.records ?? []
+
+  await publishCodex(output, [...old, one], clock)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 30, reservation: one.reservation })
+  await publishCodex(output, [...old, one, two], clock)
+  const group = (ownCodexWorks()).filter(w => w.commandId)
+
+  expect(group.map(w => w.estimate?.minutes)).toEqual([30, 20])
+  expect(group[0]?.commandId).toBe(group[1]?.commandId)
+})
+
+test('stopped and unknown runs have no check or expected cost and do not train estimates', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+  const heavyWork = (state: string, index: number) => ({
+    ...pastWork('codex', index),
+    id: `${state}-${index}`,
+    state,
+    tokens: 100_000_000,
+    weight: 100_000_000,
+  })
+  const excluded = ['stopped', 'unknown'].flatMap(state => [0, 1, 2].map(index => heavyWork(state, index)))
+
+  seedPastWork(excluded)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const record = codexRecord('state', clock.now())
+
+  await publishCodex(output, [record], clock)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10 })
+  const running = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await running.find({ key: 'codex' }))?.text).toContain('/예상 1M')
+  expect((await running.find({ key: 'codex' }))?.text).toContain('1%')
+  await running.unmount()
+  for (const state of ['stopped', 'unknown'] as const) {
+    await publishCodex(output, [{ ...record, state }], clock)
+    const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+    const text = (await ui.find({ key: 'codex' }))?.text
+
+    expect(text).toContain(state === 'stopped' ? '멈춤' : '확인 불가')
+    expect(text).not.toContain('✓')
+    expect(text).not.toContain('/예상')
+    expect((ownCodexWorks())[0]?.expected).toBeUndefined()
+    await ui.unmount()
+  }
+})
+
+test('the shown run supplies both its model and effort regardless of the account first run', async ($, on) => {
+  const mine = codexRecord('mine', START, { model: 'gpt-6.1-sol', effort: 'medium' })
+  const other = codexRecord('other', START, { ownerSessionId: 'another', model: 'gpt-6-astra', effort: 'xhigh' })
+  const output: CodexLocalOutput = { working: [other, mine], records: [other, mine], running: 2 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'codex-setting' }))?.text).toBe('gpt-6.1-sol medium')
+  await ui.unmount()
+})
+
+test('a failed open-file reading keeps the prior state as unknown and recovers without a false end', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const record = codexRecord('uncertain', clock.now() - 20 * 60_000)
+
+  await publishCodex(output, [record], clock)
+  output.isProcessReadFailed = true
+  await publishCodex(output, [{ ...record, state: 'unknown' }], clock)
+  expect(ownCodexWorks()[0]?.state).toBe('unknown')
+  expect(ownCodexWorks()[0]?.previousState).toBe('running')
+  expect(ownCodexWorks()[0]?.finishedAt).toBeUndefined()
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'codex' }))?.text).toContain('확인 불가')
+  expect((await ui.find({ key: 'codex' }))?.text).not.toContain('✓')
+  await ui.unmount()
+  output.isProcessReadFailed = false
+  await publishCodex(output, [record], clock)
+  expect(ownCodexWorks()[0]?.state).toBe('running')
+  expect(ownCodexWorks()[0]?.previousState).toBeUndefined()
+})
+
+test('an unreserved record can be guessed once and is removed if the ledger assigns another owner', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: 'Bash', command: 'codex e "work"' })
+  const record = codexRecord('guessed', clock.now(), { ownerSessionId: 'unknown', reservation: undefined })
+
+  await publishCodex(output, [record], clock)
+  expect(ownCodexWorks()).toHaveLength(1)
+  expect(ownCodexWorks()[0]?.isGuessed).toBe(true)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await ui.find({ key: 'codex' }))?.text).toContain('추정')
+  await ui.unmount()
+  await publishCodex(output, [{ ...record, ownerSessionId: 'another-session' }], clock)
+  expect(ownCodexWorks()).toEqual([])
+})
+
+test('a resumed record replaces its prior completion without adding another run', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const record = codexRecord('resumed', clock.now(), { turnId: 'one' })
+
+  await publishCodex(output, [{ ...record, state: 'done', finishedAt: START + 1_000 }], clock)
+  const done = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await done.find({ key: 'codex' }))?.text).toContain('✓')
+  await done.unmount()
+  await publishCodex(output, [{ ...record, state: 'running', turnId: 'two' }], clock)
+  const running = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(ownCodexWorks()).toHaveLength(1)
+  expect(ownCodexWorks()[0]?.finishedAt).toBeUndefined()
+  expect(ownCodexWorks()[0]?.turnId).toBe('two')
+  expect((await running.find({ key: 'codex' }))?.text).not.toContain('✓')
+  await running.unmount()
+})
+
+test('a failed reading never reopens a run that already ended', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const ended = codexRecord('ended', clock.now(), { state: 'done', finishedAt: clock.now() + 1_000 })
+  const recent = codexRecord('recent', clock.now() + 2_000)
+
+  await publishCodex(output, [ended, recent], clock)
+  output.isProcessReadFailed = true
+  await publishCodex(output, [{ ...recent, state: 'unknown' }], clock)
+  expect(ownCodexWorks().find(w => w.recordId === ended.recordId)?.state).toBe('done')
+  output.isProcessReadFailed = false
+  await publishCodex(output, [{ ...recent, state: 'done', finishedAt: clock.now() }], clock)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect(ownCodexWorks().map(w => w.state)).toEqual(['done', 'done'])
+  expect((await ui.find({ key: 'codex' }))?.text).toContain('✓')
+  await ui.unmount()
+})
+
+test('a resume command joins the record it resumes and gives it the new estimate', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const record = codexRecord('again', clock.now(), { turnId: 'one', state: 'done', finishedAt: clock.now() + 1_000 })
+
+  await publishCodex(output, [record], clock)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 7 })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec resume --last "more"' })
+  const resumed: CodexRecord = { ...record, state: 'running', turnId: 'two', turnStartedAt: clock.now() + 1_000 }
+
+  delete resumed.finishedAt
+  await publishCodex(output, [resumed], clock)
+  expect(ownCodexWorks().map(w => w.state)).toEqual(['running'])
+  expect(ownCodexWorks()[0]?.estimate?.minutes).toBe(7)
+})
+
+test('a run a script starts later takes the estimate given for it, not the last command one', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  on('tool.call', () => ({ result: { text: 'OK', isError: false } }))
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 20 })
+  await $.tool.call({ tool: 'Bash', command: 'codex exec "first"' })
+  const first = codexRecord('first', clock.now())
+
+  await publishCodex(output, [first], clock)
+  await clock.advance(3 * 60_000)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 7 })
+  await $.tool.call({ tool: 'Bash', command: 'python3 skills/outside-review/run-review.py' })
+  await publishCodex(output, [first, codexRecord('second', clock.now())], clock)
+  const minutes = Object.fromEntries(ownCodexWorks().map(w => [w.recordId, w.estimate?.minutes]))
+
+  expect(minutes).toEqual({ 'rollout-first.jsonl': 20, 'rollout-second.jsonl': 7 })
+})
+
+test('the line still shows a run at work beside an unknown one', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const busy = codexRecord('busy', clock.now())
+  const unsure = codexRecord('unsure', clock.now(), { state: 'unknown' })
+
+  await publishCodex(output, [busy, unsure], clock)
+  const ui = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+  const text = (await ui.find({ key: 'codex' }))?.text ?? ''
+
+  expect(text).toContain('진행')
+  expect(text).toContain('확인 불가 포함')
+  expect(text).not.toContain('✓')
+  await ui.unmount()
+})
+
+test('the line shows the run due last and counts the others in every run state', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const first = codexRecord('a', clock.now(), { read: 1000 })
+  const second = codexRecord('b', clock.now(), { read: 2000 })
+
+  await publishCodex(output, [first, second], clock)
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 10, reservation: first.reservation })
+  await $.tool.call({ tool: ESTIMATE, maker: 'codex', minutes: 20, reservation: second.reservation })
+  const scenarios: { name: string; records: CodexRecord[]; expected: string; isDone: boolean }[] = [
+    { name: 'running', records: [first, second], expected: '외 1개', isDone: false },
+    {
+      name: 'partly done',
+      records: [{ ...first, state: 'done', finishedAt: START + 60_000 }, second],
+      expected: 'model-b',
+      isDone: false,
+    },
+    {
+      name: 'all done',
+      records: [
+        { ...first, state: 'done', finishedAt: START + 60_000 },
+        { ...second, state: 'done', finishedAt: START + 120_000 },
+      ],
+      expected: '16:02 끝',
+      isDone: true,
+    },
+    {
+      name: 'no estimate',
+      records: [first, second, codexRecord('unestimated', clock.now())],
+      expected: '예정 모름 포함',
+      isDone: false,
+    },
+    {
+      name: 'stopped',
+      records: [
+        { ...first, state: 'stopped' },
+        { ...second, state: 'stopped' },
+        codexRecord('unestimated', clock.now(), { state: 'stopped' }),
+      ],
+      expected: '멈춤',
+      isDone: false,
+    },
+    {
+      name: 'unknown',
+      records: [
+        { ...first, state: 'unknown' },
+        { ...second, state: 'unknown' },
+        codexRecord('unestimated', clock.now(), { state: 'unknown' }),
+      ],
+      expected: '확인 불가',
+      isDone: false,
+    },
+  ]
+
+  for (const scenario of scenarios) {
+    await publishCodex(output, scenario.records, clock)
+    for (const surface of ['desktop', 'terminal'] as const) {
+      const props = { ...ABOVE.props, bodyColumns: 44 }
+      const ui = await $.ui.mount({ ...ABOVE, props, surface })
+      const line = (await ui.find({ key: 'codex' }))?.text ?? ''
+
+      expect(line).toContain(scenario.expected)
+      expect(line.includes('✓')).toBe(scenario.isDone)
+      if (scenario.name === 'running') {
+        expect(line).toContain('model-b high')
+        expect(line).toContain('2K')
+      }
+      await ui.unmount()
+    }
+  }
+})
+
+test('recent old stored runs relink by unique owned start or become unknown while old history stays', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+  const legacy: Work = {
+    maker: 'codex',
+    id: 'old',
+    sessionId: 'cli-1',
+    startedAt: START - 60_000,
+    recordStartedAt: START - 60_000,
+    finishedAt: START - 59_000,
+    steps: 4,
+    tokens: 500,
+    weight: 500,
+  }
+
+  on('state.get', { plugin: 'usage-panel', key: 'works' }, async (_, e, next) => {
+    const current = await next(e)
+    const value = { shape: 'works-1', value: [
+      legacy,
+      { ...legacy, id: 'missing', recordStartedAt: START - 120_000 },
+      { ...legacy, id: 'ambiguous', recordStartedAt: START - 180_000 },
+      { ...legacy, id: 'open', finishedAt: undefined, recordStartedAt: START - 240_000 },
+      { ...legacy, id: 'history', finishedAt: START - HOUR, recordStartedAt: START - 2 * HOUR },
+    ] }
+
+    return current.value?.value === undefined ? { value: { value, version: 0 } } : current
+  })
+  output.records = [
+    codexRecord('relinked', START - 60_000),
+    codexRecord('same-one', START - 180_000),
+    codexRecord('same-two', START - 180_000),
+    codexRecord('foreign', START - 120_000, { ownerSessionId: 'another' }),
+  ]
+  output.working = output.records
+  output.running = 4
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const own = ownCodexWorks()
+
+  expect(own.find(w => w.recordId === 'rollout-relinked.jsonl')?.state).toBe('running')
+  expect(own.find(w => w.recordId === 'rollout-relinked.jsonl')?.finishedAt).toBeUndefined()
+  expect(own.find(w => w.id === 'missing')?.state).toBe('unknown')
+  expect(own.find(w => w.id === 'ambiguous')?.state).toBe('unknown')
+  expect(own.find(w => w.id === 'open')?.state).toBe('unknown')
+  expect(own.find(w => w.id === 'history')?.finishedAt).toBe(START - HOUR)
+  expect(own.find(w => w.id === 'history')?.state).toBeUndefined()
+  expect(own.filter(w => w.recordId === 'rollout-relinked.jsonl')).toHaveLength(1)
+})
+
+test('unlinkable legacy and recordless unknown work expire after their last change and allow a check', async ($, on) => {
+  const output: CodexLocalOutput = { working: [], running: 0 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+  const legacy: Work = {
+    maker: 'codex',
+    id: 'unlinked',
+    sessionId: 'cli-1',
+    startedAt: clock.now() - 20 * 60_000,
+    finishedAt: clock.now() - (10 * 60_000 - 20_000),
+    steps: 1,
+    tokens: 100,
+    weight: 100,
+  }
+
+  on('state.get', { plugin: 'usage-panel', key: 'works' }, async (_, e, next) => {
+    const current = await next(e)
+    const value = { shape: 'works-1', value: [legacy, { ...legacy, id: 'unknown', state: 'unknown' as const }] }
+
+    return current.value?.value === undefined ? { value: { value, version: 0 } } : current
+  })
+  output.records = [codexRecord('done', clock.now() - 60_000, { state: 'done', finishedAt: clock.now() - 1_000 })]
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const before = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await before.find({ key: 'codex' }))?.text).toContain('확인 불가')
+  expect((await before.find({ key: 'codex' }))?.text).not.toContain('✓')
+  await before.unmount()
+  await clock.advance(20_000)
+  expect(ownCodexWorks().find(w => w.id === 'unlinked')?.state).toBe('unknown')
+  expect(ownCodexWorks().find(w => w.id === 'unknown')?.state).toBe('unknown')
+  const after = await $.ui.mount({ ...ABOVE, surface: 'desktop' })
+
+  expect((await after.find({ key: 'codex' }))?.text).toContain('✓')
+  await after.unmount()
+  await clock.advance(2 * 60_000)
+  const idleAt = clock.now()
+
+  await clock.advance(60_000)
+  expect(ticksBetween(idleAt, clock.now())).toEqual(IDLE_TICKS)
 })
 
 // The band goes idle a minute after the last activity; a test looks a second
@@ -1651,6 +2289,30 @@ test('an idle session pauses its fast timers after a minute and slows the rest',
   const idleAt = clock.now()
 
   await clock.advance(IDLE_MS)
+  expect(ticksBetween(idleAt, clock.now())).toEqual(IDLE_TICKS)
+})
+
+test('unchanged Codex ticks read neither the session id nor the work list on an idle band', async ($, on) => {
+  const record = codexRecord('foreign', START, { ownerSessionId: 'another-session' })
+  const output: CodexLocalOutput = { records: [record], working: [record], running: 1 }
+  const clock = engine(on, [], undefined, [], true, [], output)
+
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await clock.advance(1)
+  const startedAt = clock.now()
+
+  await clock.advance(BEFORE_IDLE_MS - 1)
+  expect({
+    workReads: app.workReads.filter(at => at > startedAt).map(at => at - startedAt),
+    sessionIds: app.sessionIds.filter(at => at > startedAt).map(at => at - startedAt),
+  }).toEqual({ workReads: [], sessionIds: [] })
+  await clock.advance(2_000)
+  const idleAt = clock.now()
+
+  await clock.advance(IDLE_MS)
+  // The existing history reader reads works and the id once per minute; Codex adds none.
+  expect(app.workReads.filter(at => at > idleAt)).toHaveLength(1)
+  expect(app.sessionIds.filter(at => at > idleAt)).toHaveLength(1)
   expect(ticksBetween(idleAt, clock.now())).toEqual(IDLE_TICKS)
 })
 

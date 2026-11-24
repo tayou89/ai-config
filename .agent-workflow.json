@@ -2,5 +2,5 @@
   "mode": "pull-request",
   "base": "main",
   "requiredChecks": ["checks"],
-  "cleanupIgnored": [".mypy_cache", ".ruff_cache", "__pycache__", ".DS_Store"]
+  "cleanupIgnored": [".mypy_cache/", ".ruff_cache/", "**/__pycache__/", "**/.DS_Store"]
 }

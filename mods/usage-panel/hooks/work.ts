@@ -1,6 +1,7 @@
-import type { CodexTotals, Level, LimitStep, Work, WorkLoad, WorkMaker, WorkPace } from '../types'
+import type { CodexTotals, CodexWorkState, Level, LimitStep, Work, WorkLoad, WorkMaker, WorkPace } from '../types'
 
 export const MINUTE_MS = 60 * 1000
+export const CODEX_WORK_STATES: readonly CodexWorkState[] = ['running', 'starting', 'done', 'stopped', 'unknown']
 const DAY_MS = 24 * 60 * MINUTE_MS
 export const WORK_KEEP_MS = 7 * DAY_MS
 // Work shorter than a minute says little about a pace.
@@ -44,9 +45,24 @@ function lastingMs(work: Work): number {
 
 // A stopped reply says nothing of what its work would have cost.
 function isPaceSample(work: Work, maker: WorkMaker): boolean {
-  const isFinished = work.finishedAt !== undefined && work.isAborted !== true
+  const isFinished = work.finishedAt !== undefined && work.isAborted !== true && isCompletedWork(work)
 
   return work.maker === maker && isFinished && lastingMs(work) >= PACE_MIN_MS && work.weight > 0
+}
+
+// A Codex run at work, or one whose command has not shown its record yet.
+export function isCodexWorkActive(work: Work): boolean {
+  return work.state === 'running' || work.state === 'starting'
+}
+
+// A Codex run whose end is not known: stopped before its turn finished, or
+// not readable.
+export function isCodexWorkUncertain(work: Work): boolean {
+  return work.state === 'stopped' || work.state === 'unknown'
+}
+
+function isCompletedWork(work: Work): boolean {
+  return work.maker !== 'codex' || work.state === undefined || work.state === 'done'
 }
 
 // The newest finished work of one maker, oldest first, as the pace reads it.
@@ -89,7 +105,8 @@ function percentPerWeight(works: readonly Work[], steps: readonly LimitStep[], m
   if (first && last && last.percentUsed - first.percentUsed >= WEEK_RISE_MIN) {
     const isWithin = (w: Work): boolean =>
       w.finishedAt !== undefined && w.finishedAt > first.at && w.finishedAt <= last.at
-    const weight = works.filter(w => w.maker === maker && isWithin(w)).reduce((sum, w) => sum + w.weight, 0)
+    const weight = works.filter(w => w.maker === maker && isWithin(w) && isCompletedWork(w))
+      .reduce((sum, w) => sum + w.weight, 0)
 
     return weight > 0 ? (last.percentUsed - first.percentUsed) / weight : undefined
   } else {
@@ -138,7 +155,9 @@ export function expectedLoad(work: Work, pace: WorkPace): WorkLoad | undefined {
   const context = estimate?.contextTokens ?? work.startContext ?? 0
   const steps = estimate?.steps ?? 0
 
-  if (estimate && work.maker === 'claude' && pace.weightPerStepContext && pace.tokensPerStepContext) {
+  if (work.maker === 'codex' && isCodexWorkUncertain(work)) {
+    return undefined
+  } else if (estimate && work.maker === 'claude' && pace.weightPerStepContext && pace.tokensPerStepContext) {
     return steps > 0 && context > 0
       ? withPercent(steps * context * pace.tokensPerStepContext, steps * context * pace.weightPerStepContext, pace)
       : undefined
@@ -202,7 +221,7 @@ export function averageOver(
   measure: (work: Work) => MeasurePair | undefined,
 ): number | undefined {
   const shares = works.flatMap(w => {
-    const pair = w.isAborted === true ? undefined : measure(w)
+    const pair = w.isAborted === true || !isCompletedWork(w) ? undefined : measure(w)
 
     return pair ? [overShare(pair[0], pair[1])] : []
   })
