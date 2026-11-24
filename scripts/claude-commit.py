@@ -156,6 +156,7 @@ from folder_owner import (
     OwnerFileError,
     SessionIdentity,
     find_linked_worktree,
+    list_asked_gaps,
     list_unoffered_gaps,
     read_current_identity,
     read_gaps,
@@ -403,10 +404,37 @@ def stage_files(files: Sequence[str], approved: dict[str, ApprovedContent]) -> N
 
 
 def stage_file(path: str) -> None:
+    """Stage a listed file as it is now. A path HEAD holds that is gone from both the working tree and the index,
+    such as the old name of a `git mv` or a folder `git rm -r` removed, already has its removal staged, which
+    `git add` refuses to name."""
+    if is_removal_staged(path):
+        print(f"  - {path} (removal already staged)")
+    else:
+        stage_added_file(path)
+
+
+def stage_added_file(path: str) -> None:
     result = run_git(["add", "-A", "--", path])
+
     if result.returncode != 0:
         fail(f"FAIL: git add failed for {path}", EXIT_GIT_ERROR)
-    print(f"  + {path}")
+    else:
+        print(f"  + {path}")
+
+
+def is_removal_staged(path: str) -> bool:
+    return not os.path.lexists(path) and not is_in_index(path) and is_in_head(path)
+
+
+def is_in_index(path: str) -> bool:
+    return run_git(["ls-files", "--error-unmatch", "--", path], capture_output=True).returncode == 0
+
+
+def is_in_head(path: str) -> bool:
+    """Whether HEAD has an entry at the path, a folder included; false before the first commit."""
+    result = run_git(["ls-tree", HEAD_REVISION, "--", path], capture_output=True)
+
+    return result.returncode == 0 and bool(result.stdout.strip())
 
 
 def split_path_list(output: str) -> list[str]:
@@ -1267,7 +1295,7 @@ def find_task_worktree() -> LinkedWorktree | None:
 
 @functools.cache
 def read_task_gaps() -> tuple[GuardGap, ...]:
-    """The gaps this commit shows and, once committed, settles; a gap added while it runs stays for the next one."""
+    """The gaps this commit checks and then settles, read once; a gap added while it runs stays for the next one."""
     worktree = find_task_worktree()
 
     return tuple(read_gaps(worktree)) if worktree is not None else ()
@@ -1276,11 +1304,19 @@ def read_task_gaps() -> tuple[GuardGap, ...]:
 def check_folder_owner(accept_gaps: bool) -> None:
     """In a task worktree only its owner commits, and only once the user saw what the folder guard let through."""
     worktree = find_task_worktree()
+
+    check_task_owner()
+    if worktree is not None:
+        check_gaps_accepted(worktree, accept_gaps)
+
+
+def check_task_owner() -> None:
+    """Checked again under the commit lock, since a handover may change the owner meanwhile."""
+    worktree = find_task_worktree()
     identity = read_commit_identity()
 
     if worktree is not None and identity is not None:
         check_owner(worktree, read_folder_owner(worktree), identity)
-        check_gaps_accepted(worktree, accept_gaps)
 
 
 def read_folder_owner(worktree: LinkedWorktree) -> FolderOwner | None:
@@ -1308,8 +1344,8 @@ def check_owner(worktree: LinkedWorktree, owner: FolderOwner | None, identity: S
 def check_gaps_accepted(worktree: LinkedWorktree, accept_gaps: bool) -> None:
     """With --accept-gaps, every gap must be one the folder guard's dialog showed, so a call that runs the wrapper
     out of the guard's sight, or a gap added after the dialog, is refused again."""
-    gaps = read_task_gaps()
-    unseen = list_unoffered_gaps(worktree, gaps) if accept_gaps else list(gaps)
+    asked = list_asked_gaps(worktree, read_task_gaps())
+    unseen = list_unoffered_gaps(worktree, asked) if accept_gaps else asked
 
     if unseen:
         listing = "\n".join(f"  - {gap.session or UNKNOWN_NAME}: {gap.what}" for gap in unseen)
@@ -1318,12 +1354,14 @@ def check_gaps_accepted(worktree: LinkedWorktree, accept_gaps: bool) -> None:
         fail(message, EXIT_GUARD_GAPS)
 
 
-def settle_accepted_gaps(accept_gaps: bool) -> None:
-    """The commit is made, so a failure here leaves only the gaps unsettled, which the next commit asks about again."""
+def settle_seen_gaps() -> None:
+    """Settle the gaps as soon as the folder check passed: each asked gap was in the folder guard's dialog and the
+    rest are the owner's own, so a retry after any later failure, such as a refused message or staging, is not
+    asked again. A failure here leaves them for the next commit to ask about."""
     worktree = find_task_worktree()
     gaps = read_task_gaps()
 
-    if accept_gaps and worktree is not None and gaps:
+    if worktree is not None and gaps:
         try:
             settle_gaps(worktree, gaps)
         except (OwnerBusyError, OSError) as error:
@@ -1565,6 +1603,7 @@ def main(argv: list[str]) -> None:
     print_header()
     check_workflow_recorded()
     check_folder_owner(arguments.accept_gaps)
+    settle_seen_gaps()
     approved = read_approved_files(arguments)
     metrics = validate_message(arguments.message)
     check_private_index_environment(arguments.private_index)
@@ -1572,7 +1611,7 @@ def main(argv: list[str]) -> None:
     requested_head = resolve_expected_head(arguments.expected_head)
     starting_branch = read_head_branch()
     with hold_commit_lock():
-        check_folder_owner(arguments.accept_gaps)
+        check_task_owner()
         expected_head = requested_head if arguments.expected_head is not None else read_revision(HEAD_REVISION)
         base = find_commit_base(arguments, expected_head, starting_branch)
         check_amend_target(arguments.amend, base)
@@ -1580,7 +1619,6 @@ def main(argv: list[str]) -> None:
         run_git(["log", "--oneline", "-3"])
         with use_commit_index(arguments, base):
             made = stage_and_commit(arguments, base, approved, metrics)
-    settle_accepted_gaps(arguments.accept_gaps)
     print("=== Done ===")
     run_git(["log", "--oneline", "-1", made.commit])
 

@@ -87,6 +87,7 @@ _GAP_ID_KEY = "id"
 _GAP_TIME_KEY = "time"
 _GAP_SESSION_KEY = "session"
 _GAP_WHAT_KEY = "what"
+_GAP_CALL_KEY = "call"
 _GITDIR_PREFIX = "gitdir:"
 COMMONDIR_FILE = "commondir"
 _LOCK_WAIT_SECONDS = 2.0
@@ -176,6 +177,10 @@ class SessionIdentity:
         else:
             return bool(self.cli_session) and self.cli_session == other.cli_session
 
+    def _is_named(self, name: str | None) -> bool:
+        """Whether a recorded session name, which is the app id or else the Claude Code id, names this session."""
+        return name is not None and name in (self.app_session, self.cli_session)
+
 
 @dataclass(frozen=True)
 class FolderOwner:
@@ -229,13 +234,15 @@ class FolderAccess:
 class GuardGap:
     """A call the folder guard could not judge and let through, so a write it should have refused may have run.
 
-    `line` is the record's line as read, which settling matches, so a gap added after it was read stays.
+    `line` is the record's line as read, which settling matches, so a gap added after it was read stays;
+    `call_id` is the tool call's id, None for a record written before ids were kept.
     """
 
     time: float
     session: str | None
     what: str
     line: str
+    call_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -399,16 +406,19 @@ def has_uncommitted_changes(worktree: LinkedWorktree) -> bool:
         return result.returncode != 0 or bool(result.stdout.strip())
 
 
-def add_gap(worktree: LinkedWorktree, identity: SessionIdentity | None, what: str) -> None:
-    """Raises OwnerBusyError when a handover or a commit holds the folder's lock too long."""
+def add_gap(worktree: LinkedWorktree, identity: SessionIdentity | None, what: str, call_id: str | None) -> None:
+    """Note one call the guard could not judge. Its runs before and after the call note the same call once, by
+    `call_id`. Raises OwnerBusyError when a handover or a commit holds the folder's lock too long.
+    """
     gap = {
         _GAP_ID_KEY: uuid.uuid4().hex,
+        _GAP_CALL_KEY: call_id,
         _GAP_TIME_KEY: time.time(),
         _GAP_SESSION_KEY: identity.name if identity else None,
         _GAP_WHAT_KEY: what,
     }
 
-    _run_locked(worktree, lambda: _append_line(worktree.gaps_file, json.dumps(gap, ensure_ascii=False)))
+    _run_locked(worktree, lambda: _append_new_gap(worktree, gap))
 
 
 def read_gaps(worktree: LinkedWorktree) -> list[GuardGap]:
@@ -422,6 +432,15 @@ def read_gaps(worktree: LinkedWorktree) -> list[GuardGap]:
         return [GuardGap(0.0, None, f"the gap record cannot be read: {error}", "")]
     else:
         return [_parse_gap(line) for line in lines if line.strip()]
+
+
+def list_asked_gaps(worktree: LinkedWorktree, gaps: Sequence[GuardGap]) -> list[GuardGap]:
+    """The gaps the owner's commit asks about. The guard lets the owner write in its own folder anyway, so a gap its
+    own call left after it took the folder cannot hide another session's write; a gap of no known session, one from
+    before the owner took the folder, or any gap when the owner record cannot be read still asks."""
+    owner = _try_read_owner(worktree)
+
+    return [gap for gap in gaps if not _is_owner_gap(gap, owner)]
 
 
 def settle_gaps(worktree: LinkedWorktree, shown: Sequence[GuardGap]) -> None:
@@ -539,6 +558,25 @@ def _move_settled_gaps(worktree: LinkedWorktree, settled_lines: set[str]) -> Non
     _replace_lines(worktree.offered_gaps_file, offered)
 
 
+def _append_new_gap(worktree: LinkedWorktree, gap: dict[str, Any]) -> None:
+    call_id = gap[_GAP_CALL_KEY]
+    is_noted = call_id is not None and any(known.call_id == call_id for known in read_gaps(worktree))
+
+    if not is_noted:
+        _append_line(worktree.gaps_file, json.dumps(gap, ensure_ascii=False))
+
+
+def _is_owner_gap(gap: GuardGap, owner: FolderOwner | None) -> bool:
+    return owner is not None and owner.owner._is_named(gap.session) and gap.time >= owner.claimed_at
+
+
+def _try_read_owner(worktree: LinkedWorktree) -> FolderOwner | None:
+    try:
+        return read_owner(worktree)
+    except OwnerFileError:
+        return None
+
+
 def _read_offered_lines(worktree: LinkedWorktree) -> set[str]:
     try:
         return set(worktree.offered_gaps_file.read_text(encoding=_ENCODING).splitlines())
@@ -623,7 +661,13 @@ def _parse_gap(line: str) -> GuardGap:
     try:
         data = json.loads(line)
 
-        return GuardGap(float(data[_GAP_TIME_KEY]), data.get(_GAP_SESSION_KEY), str(data[_GAP_WHAT_KEY]), line)
+        return GuardGap(
+            float(data[_GAP_TIME_KEY]),
+            data.get(_GAP_SESSION_KEY),
+            str(data[_GAP_WHAT_KEY]),
+            line,
+            data.get(_GAP_CALL_KEY),
+        )
     except (ValueError, KeyError, TypeError, AttributeError):
         return GuardGap(0.0, None, line.strip(), line)
 

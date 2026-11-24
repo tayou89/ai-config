@@ -38,7 +38,9 @@ written only by folder_owner.py, never by a tool call.
 What a script file or a program does inside itself is not seen, as in the
 skill gate. Any failure lets the call through, since a wrong refusal stops
 every session's work; a failure in a task worktree is recorded there as a
-gap, and the commit wrapper asks the user once before committing over it.
+gap, one per call, and the commit wrapper asks the user once before
+committing over it. A gap the folder's owner left there after taking it is
+not asked about, since the owner's writes there pass anyway.
 """
 
 from __future__ import annotations
@@ -78,6 +80,7 @@ from folder_owner import (
     is_app_worktree,
     is_protected_file,
     judge_access,
+    list_asked_gaps,
     offer_gaps,
     parse_owner_command,
     read_current_identity,
@@ -359,7 +362,8 @@ _UNKNOWN_STATE_WORDS = "닫혔는지 알 수 없는"
 _GAPS_QUESTION = (
     "폴더 보호 장치가 이 작업 폴더에서 {count}번 판정하지 못하고 호출을 그대로 통과시켰습니다. "
     "그때 다른 세션이 이 폴더에 썼을 수도 있습니다: {root}\n{gaps}\n"
-    "이 커밋에 그때의 바뀜이 섞여도 되면 승인해 주세요. 거절하시면 커밋하지 않습니다."
+    "이 커밋에 그때의 바뀜이 섞여도 되면 승인해 주세요. 승인하신 호출은 이 커밋이 실패해도 다시 묻지 않습니다. "
+    "거절하시면 커밋하지 않습니다."
 )
 _GAP_LINE = "  - {session}: {what}"
 _MORE_GAPS_LINE = "  … 그 밖에 {count}건"
@@ -593,8 +597,8 @@ def _judge_gap_acceptance(call: CommandCall) -> _Verdict:
     the gaps the dialog shows are kept, so the wrapper takes in only those."""
     arguments = _read_commit_arguments(call)
     accepts = arguments is not None and arguments.accept_gaps
-    worktree = find_linked_worktree(Path(call.cwd).resolve()) if accepts and call.cwd else None
-    gaps = read_gaps(worktree) if worktree is not None else []
+    worktree = find_linked_worktree(_resolve(call.cwd)) if accepts and call.cwd else None
+    gaps = list_asked_gaps(worktree, read_gaps(worktree)) if worktree is not None else []
 
     if worktree is not None and gaps:
         offer_gaps(worktree, gaps)
@@ -664,12 +668,14 @@ def _take_after_call(uses: list[_FolderUse], identity: SessionIdentity) -> None:
         owner = take_folder(access, identity) if access.kind.is_taking else access.owner
 
         if owner is not None and not owner.owner.is_same(identity):
-            add_gap(use.worktree, identity, _LOST_AFTER_CALL_GAP.format(owner=owner.describe(), what=use.what))
+            lost = _LOST_AFTER_CALL_GAP.format(owner=owner.describe(), what=use.what)
+
+            add_gap(use.worktree, identity, lost, None)
 
 
 def _claim_app_worktree(payload: dict[str, Any]) -> None:
     cwd = payload.get(_CWD_KEY)
-    worktree = find_linked_worktree(Path(cwd).resolve()) if isinstance(cwd, str) and cwd else None
+    worktree = find_linked_worktree(_resolve(cwd)) if isinstance(cwd, str) and cwd else None
     identity = read_current_identity(payload.get(_SESSION_KEY) or None) if worktree is not None else None
     is_unclaimed_app_worktree = (
         worktree is not None
@@ -693,9 +699,12 @@ def _record_gap(payload: dict[str, Any], error: Exception) -> None:
         file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
         files = [_join(cwd, file_path)] if isinstance(file_path, str) and file_path else []
         identity = read_current_identity(payload.get(_SESSION_KEY) or None)
+        call_id = payload.get(_TOOL_USE_KEY)
 
         for worktree in _find_worktrees([*_optional_path(cwd), *paths, *files]):
-            add_gap(worktree, identity, f"{tool_name}: {type(error).__name__}: {error}")
+            what = f"{tool_name}: {type(error).__name__}: {error}"
+
+            add_gap(worktree, identity, what, call_id if isinstance(call_id, str) else None)
     except Exception as gap_error:
         print(f"worktree-guard-hook: the gap could not be recorded: {gap_error}", file=sys.stderr)
 
@@ -772,7 +781,7 @@ def _read_owner_command(call: CommandCall) -> _OwnerCommand | None:
     writes_index = _find_installed_script(call, _SESSION_WRITES_NAME)
     parsed = parse_owner_command(call.argv[owner_index + 1 :]) if owner_index >= 0 else None
     adopt = call.argv[writes_index + 1 : writes_index + 4] if writes_index >= 0 else []
-    folder = Path(call.cwd).resolve() if call.cwd else None
+    folder = _resolve(call.cwd) if call.cwd else None
 
     if parsed is not None:
         named = _join(call.cwd, parsed.folder) if parsed.folder else folder
@@ -806,7 +815,9 @@ def _note_folders_to_add(payload: dict[str, Any]) -> None:
         tool_use_id = payload.get(_TOOL_USE_KEY)
         command = str(_read_tool_input(payload).get(_COMMAND_KEY) or "")
         calls = _try_expand(command, _read_call_folder(payload)) if isinstance(tool_use_id, str) and tool_use_id else []
-        missing = [path for call in calls if (path := _read_added_worktree(call)) is not None and not path.exists()]
+        missing = [
+            path for call in calls if (path := _read_added_worktree(call)) is not None and not os.path.exists(path)
+        ]
 
         if missing and isinstance(tool_use_id, str):
             _write_pending_adds(tool_use_id, missing)
@@ -825,7 +836,7 @@ def _read_added_folders(payload: dict[str, Any]) -> list[Path]:
         noted = []
     if pending is not None:
         pending.unlink(missing_ok=True)
-    return [Path(path) for path in noted if isinstance(path, str) and Path(path).exists()]
+    return [Path(path) for path in noted if isinstance(path, str) and os.path.exists(path)]
 
 
 def _list_worktree_add_operands(arguments: list[str]) -> list[str]:
@@ -977,7 +988,7 @@ def _list_written_absolute_paths(call: CommandCall) -> list[Path]:
 
 def _expand_wildcards(path: Path) -> list[Path]:
     if any(character in str(path) for character in _WILDCARD_CHARACTERS):
-        return [Path(match).resolve() for match in glob.glob(str(path))] or [path]
+        return [_resolve(match) for match in glob.glob(str(path))] or [path]
     else:
         return [path]
 
@@ -1001,7 +1012,7 @@ def _list_removed_folders(call: CommandCall) -> list[Path]:
     removes = program in _REMOVING_PROGRAMS or _is_removing_rsync(call)
     folders = _list_written_absolute_paths(call) if removes else []
 
-    return [folder for folder in folders if folder.is_dir()]
+    return [folder for folder in folders if os.path.isdir(folder)]
 
 
 def _list_contained_worktree_roots(folder: Path) -> list[Path]:
@@ -1061,11 +1072,17 @@ def _join(cwd: str | None, path: str) -> Path:
     """The absolute path with symbolic links resolved, so a linked folder cannot hide the original checkout."""
     expanded = os.path.expanduser(path)
 
-    return Path(os.path.join(cwd or os.getcwd(), expanded)).resolve()
+    return _resolve(os.path.join(cwd or os.getcwd(), expanded))
+
+
+def _resolve(path: str) -> Path:
+    """Resolve symbolic links as far as they go. Paths come from a command's words, so a link loop or a name longer
+    than the system allows resolves without raising (os.path.realpath), where Path.resolve raises on a loop."""
+    return Path(os.path.realpath(path))
 
 
 def _optional_path(folder: str | None) -> list[Path]:
-    return [Path(folder).resolve()] if folder else []
+    return [_resolve(folder)] if folder else []
 
 
 def _run_git(root: Path, arguments: list[str]) -> subprocess.CompletedProcess[str]:
