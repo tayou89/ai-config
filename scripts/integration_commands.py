@@ -9,7 +9,7 @@ import subprocess
 import sys
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, overload
 
 EXIT_DONE = 0
 EXIT_NOT_READY = 2
@@ -39,18 +39,12 @@ class NotReadyError(Exception):
 
 def run_command(arguments: Sequence[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     """Run a command and return its result whatever its exit code; a command that cannot start or hangs is an error."""
-    try:
-        return subprocess.run(
-            list(arguments),
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding=ENCODING,
-            timeout=COMMAND_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired) as error:
-        raise CommandError(f"`{' '.join(arguments)}` could not run: {error}") from error
+    return _run_process(arguments, cwd, text=True)
+
+
+def run_binary_command(arguments: Sequence[str], cwd: Path | None = None) -> subprocess.CompletedProcess[bytes]:
+    """Like run_command with the output left as bytes, since text mode turns a carriage return into a newline."""
+    return _run_process(arguments, cwd, text=False)
 
 
 def run_required(arguments: Sequence[str], cwd: Path | None = None) -> str:
@@ -171,6 +165,38 @@ def _list_ancestors(parents: dict[int, int], pid: int) -> list[int]:
         chain.append(pid)
         pid = parents.get(pid, 0)
     return chain
+
+
+@overload
+def _run_process(
+    arguments: Sequence[str],
+    cwd: Path | None,
+    text: Literal[True],
+) -> subprocess.CompletedProcess[str]: ...
+
+
+@overload
+def _run_process(
+    arguments: Sequence[str],
+    cwd: Path | None,
+    text: Literal[False],
+) -> subprocess.CompletedProcess[bytes]: ...
+
+
+def _run_process(arguments: Sequence[str], cwd: Path | None, text: bool) -> subprocess.CompletedProcess[Any]:
+    """Text output is decoded as UTF-8; bytes output stays as the command wrote it."""
+    try:
+        return subprocess.run(
+            list(arguments),
+            cwd=cwd,
+            capture_output=True,
+            text=text,
+            encoding=ENCODING if text else None,
+            timeout=COMMAND_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise CommandError(f"`{' '.join(arguments)}` could not run: {error}") from error
 
 
 def _is_inside(folder: Path, worktree: Path) -> bool:
