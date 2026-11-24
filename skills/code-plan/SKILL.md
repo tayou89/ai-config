@@ -133,7 +133,7 @@ Before requesting plan approval, audit every diff block line-by-line against eve
 
 ## 7. Request Approval
 
-Show plan summary and wait for **explicit approval**. No implementation code before approval.
+Show plan summary and wait for **explicit approval**, given in this session or relayed as `session-management` "Working alongside other sessions" describes. No implementation code before approval.
 In a project whose rules adopt `milestone-delivery`, an approved milestone plan is the approval for the implementation steps inside it, under that skill's conditions.
 
 ## 8. After Approval

@@ -3,7 +3,7 @@ name: code-plan
 description: Prepare evidence-based plans for substantial features, structural changes, or complex fixes; skip trivial edits and already settled planning.
 ---
 
-<!-- Adapted from skills/code-plan/SKILL.md at acb4ec670f378cc7887a54ad898dab1cf1192c21 -->
+<!-- Adapted from skills/code-plan/SKILL.md at c43937e82c43421ba0a61058318ca492fa8d3901 -->
 
 # Plan Workflow
 
@@ -125,7 +125,7 @@ Before requesting plan approval, audit every diff block line-by-line against eve
 
 ## 7. Request Approval
 
-Show a concrete plan and obtain explicit approval when scope or design still requires a user decision. Approval already given for the same plan or concrete implementation remains valid; record it and continue. Do not turn routine implementation choices or fixes within an approved task into repeated approval gates.
+Show a concrete plan and obtain explicit approval when scope or design still requires a user decision. Approval already given for the same plan or concrete implementation remains valid, whether given in this session or relayed as `session-management` "Working alongside other sessions" describes; record it and continue. Do not turn routine implementation choices or fixes within an approved task into repeated approval gates.
 
 ## 8. After Approval
 
