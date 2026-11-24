@@ -33,6 +33,7 @@ Apply in every project when presenting or comparing two or more alternatives in 
 - Before filing an item as a pending decision, check what it actually blocks (a screen, development, a launch step). If nothing is blocked now, file it as a later task with its deadline instead of asking now, and do not invent a quantity or choice the plan does not need. Move such an item without asking and say in one line where it went (user decision, 2026-11-09).
 - Before proposing a new feature or idea, search the planning documents for it. If it already exists, mention that record first and start from it; do not present an existing idea as new.
 - A user decision applies from the moment the user makes it: when an installed rule or tool has not caught up yet, follow the decision record, say that the installed text lags, and leave the update to the session that owns it (2026-11-18).
+- Before asking for a decision, look for the user's answer on the same target and proposal in this session, in the session that started it, and in any record the brief names, and use it within the limits `session-management` "Working alongside other sessions" sets for an answer from another session; ask only for what that answer does not cover or what a rule has the user answer in this session. While a question waits for its answer, keep it among the waiting items instead of showing it again in later turns, apart from a question a rule keeps in each next-step box (user decision, 2026-11-24).
 
 ## Independent review
 
