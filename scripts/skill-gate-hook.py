@@ -14,14 +14,10 @@ each choice question also needs a record, made beforehand with
 `choice-shown.py`, of what shows every option or of why it is not a choice
 about a screen. A next-step box with an app action asks to go ahead with a
 step rather than to choose a design, so it is not checked. A choice record
-that cannot be read lets the question through with a note on stderr.
-
-For every agent, whether or not its type is gated, a write that would create
-a new file in a session folder of the desktop app's notes folder is refused
-with the project notes folder to use instead, since the app deletes those
-folders without the Trash (`report-writing` "Notes folders", user decision,
-2026-11-23); edits to files already there pass, and SKILL_GATE=off turns
-this refusal off too.
+that cannot be read is an error, which lets the question through with a hook
+error notice. A new file in a session folder of the desktop app's notes
+folder is refused by its own hook, `notes-place-hook.py`, which refuses what
+it cannot judge.
 
 PostToolUse on the Skill tool, and UserPromptExpansion of a slash command the
 user typed, record each skill load in a record per session and agent: a
@@ -33,8 +29,9 @@ invoked_skills attachment after the compaction boundary the first time a gated
 call needs them, instead of reading the whole transcript on every call.
 
 SKILL_GATE=off in the settings env turns the refusal off while loads are still
-recorded. Any failure lets the call through, since a wrong refusal stops the
-work of every session.
+recorded. Any failure, a command line too large to expand included, lets the
+call through with a hook error notice (`hook_failure.py`), since a wrong
+refusal stops the work of every session while a missed skill stays visible.
 """
 
 from __future__ import annotations
@@ -49,21 +46,23 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
 from motion_values import TextKind, has_in_place_motion, has_motion_text, is_motion_change
-from report_check import is_app_session_folder_file, is_notes_report
-from shell_command import IN_PLACE_EDITORS, CommandCall, ExpansionLimitError, expand_shell_command
+from report_check import is_notes_report
+from shell_command import IN_PLACE_EDITORS, CommandCall
 from skill_gate_records import (
+    GATE_OFF,
     get_choice_record_path,
-    get_config_directory,
     get_record_directory,
     list_unshown_labels,
     normalize_text,
     read_choice_records,
+    read_gate_setting,
     to_safe_name,
 )
+from tool_calls import COMMAND_KEY, FILE_PATH_KEYS, SHELL_TOOLS, list_line_calls
 
-_GATE_VARIABLE = "SKILL_GATE"
-_GATE_OFF = "off"
+FAILURE_POLICY = FailurePolicy.notice("skill-gate-hook")
 _RECORD_SUFFIX = ".jsonl"
 _MAIN_RECORD_NAME = "main"
 _RECORD_LIFETIME_SECONDS = 14 * 24 * 60 * 60
@@ -214,9 +213,6 @@ _REPLACE_ALL_KEY = "replace_all"
 _EVERY_MATCH = -1
 _FIRST_MATCH = 1
 _MESSAGE_TOOLS = frozenset({"SendMessage", "Agent", "mcp__ccd_session__start_session"})
-_FILE_PATH_KEYS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
-_SHELL_TOOLS = frozenset({"Bash", "Monitor", "mcp__terminal__run_in_terminal"})
-_COMMAND_KEY = "command"
 _MCP_PREFIX = "mcp__"
 _MCP_SEPARATOR = "__"
 _DESIGN_CODE_TOOL = "use_figma"
@@ -238,7 +234,6 @@ _AGENT_OWNER = "this agent"
 _AGENT_SINCE = "it started (its parent session's loads do not count here)"
 _CHOICE_DENY_REASON = 'A choice question in a session that has loaded `ux-design` needs, before it is asked, a record of what shows each option or of why it is not a choice about a screen (decisions-and-collaboration "Presenting decisions"). Not recorded: {gaps}. Show every option first, then record it with `python3 ~/.claude/scripts/choice-shown.py --question "<the question as asked>" --option "<label>" "<sent file path or URL>"`, one `--option` per option (one board may show several), or with `--not-visual "<why it is not a choice about a screen>"` in place of the options. Asking again without the record is refused again.'
 _UNASKED_GAP = "a box with buttons but no question, which needs its question in `ask` before it can be recorded"
-_NOTES_PLACE_REASON = '`{name}` would be a new file in a session folder of the desktop app\'s notes folder, which the app deletes without the Trash once that session group closes. Write new notes in the project\'s notes folder `~/Documents/session-notes/<project>/` (report-writing "Notes folders"); editing a file already there stays allowed.'
 
 
 @dataclass(frozen=True)
@@ -288,21 +283,19 @@ _JAVASCRIPT_RULES = _ProgramRules(
 )
 
 
-def main() -> None:
-    try:
-        output = handle_event(json.load(sys.stdin), os.environ.get(_GATE_VARIABLE, ""))
+def main() -> int:
+    return run_hook(_make_output, FAILURE_POLICY)
 
-        if output:
-            print(json.dumps(output))
-    except Exception as error:
-        print(f"skill-gate-hook: {type(error).__name__}: {error}", file=sys.stderr)
+
+def _make_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    return handle_event(hook_input, read_gate_setting())
 
 
 def handle_event(hook_input: dict[str, Any], gate_setting: str) -> dict[str, Any] | None:
     """Record the loads and compactions an event reports; for a gated call that lacks its skills, the refusal."""
     event = hook_input.get(_EVENT_KEY)
 
-    if event == _PRE_TOOL_USE and gate_setting != _GATE_OFF:
+    if event == _PRE_TOOL_USE and gate_setting != GATE_OFF:
         return _make_decision(hook_input)
     elif event == _POST_TOOL_USE and hook_input.get(_TOOL_NAME_KEY) == _SKILL_TOOL:
         _record_skill_load(hook_input, str((hook_input.get(_TOOL_INPUT_KEY) or {}).get(_SKILL_KEY) or ""))
@@ -318,12 +311,12 @@ def handle_event(hook_input: dict[str, Any], gate_setting: str) -> dict[str, Any
 
 
 def find_requirement(tool_name: str, tool_input: dict[str, Any], cwd: str | None) -> Requirement | None:
-    file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
+    file_path = tool_input.get(FILE_PATH_KEYS.get(tool_name, ""))
 
     if isinstance(file_path, str) and file_path:
         return _find_file_requirement(file_path, tool_input)
-    elif tool_name in _SHELL_TOOLS:
-        return _find_command_requirement(str(tool_input.get(_COMMAND_KEY) or ""), cwd)
+    elif tool_name in SHELL_TOOLS:
+        return _find_command_requirement(str(tool_input.get(COMMAND_KEY) or ""), cwd)
     elif _is_design_tool(tool_name):
         design_tool = tool_name.rsplit(_MCP_SEPARATOR, 1)[-1]
 
@@ -423,7 +416,11 @@ def _list_match_starts(text: str, part: str, is_every_match: bool) -> list[int]:
 
 
 def _read_existing_text(path: str) -> str | None:
-    """The file's text, or None when it is missing, not a regular file, unreadable, or too large to compare."""
+    """The file's text, or None when it is missing, not a regular file, unreadable, or too large to compare.
+
+    None makes a Write count all of its text as new, which asks for more skills rather than fewer, so an
+    unreadable file stays None instead of an error that would let the call through with a notice.
+    """
     try:
         is_comparable = os.path.isfile(path) and os.path.getsize(path) <= _EXISTING_TEXT_LIMIT
 
@@ -531,7 +528,7 @@ def _list_language_skills(extension: str) -> list[str]:
 
 def _find_command_requirement(command: str, cwd: str | None) -> Requirement | None:
     """The skills a command line needs; what a script file on disk does when the line runs it is not written here."""
-    calls = _list_line_calls(command, cwd)
+    calls = list_line_calls(command, cwd)
     skills = [skill for call in calls for skill in _list_call_skills(call)]
     motion_targets = [target for target in (_find_call_motion_target(call, cwd) for call in calls) if target]
 
@@ -539,16 +536,6 @@ def _find_command_requirement(command: str, cwd: str | None) -> Requirement | No
         return _make_motion_requirement(motion_targets[0], skills)
     else:
         return _make_requirement(_name_command_target(calls), skills)
-
-
-def _list_line_calls(command: str, cwd: str | None) -> list[CommandCall]:
-    """The calls the command line makes itself, none when it is too large to expand."""
-    try:
-        expanded = expand_shell_command(command, cwd, get_config_directory())
-    except ExpansionLimitError:
-        return []
-    else:
-        return [call for call in expanded if not call.is_from_script_file]
 
 
 def _name_command_target(calls: Sequence[CommandCall]) -> str:
@@ -711,9 +698,7 @@ def _make_requirement(target: str, skills: Iterable[str]) -> Requirement | None:
 
 
 def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
-    """A new file in an app session folder is refused for every agent, before and apart from the skill checks."""
-    place_reason = _find_notes_place_reason(hook_input)
-    reason = place_reason or (_find_deny_reason(hook_input) if _is_gated(hook_input) else None)
+    reason = _find_deny_reason(hook_input) if _is_gated(hook_input) else None
 
     if reason:
         return {
@@ -725,36 +710,6 @@ def _make_decision(hook_input: dict[str, Any]) -> dict[str, Any] | None:
         }
     else:
         return None
-
-
-def _find_notes_place_reason(hook_input: dict[str, Any]) -> str | None:
-    """The desktop app deletes its session folders, so notes go in the project's notes folder (`report-writing`)."""
-    tool_name = str(hook_input.get(_TOOL_NAME_KEY) or "")
-    tool_input = hook_input.get(_TOOL_INPUT_KEY) or {}
-    written = _list_tool_written_files(tool_name, tool_input, hook_input.get(_CWD_KEY))
-    new_files = [path for path in written if is_app_session_folder_file(path) and not os.path.lexists(path)]
-
-    return _NOTES_PLACE_REASON.format(name=os.path.basename(new_files[0])) if new_files else None
-
-
-def _list_tool_written_files(tool_name: str, tool_input: dict[str, Any], cwd: str | None) -> list[str]:
-    file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
-
-    if isinstance(file_path, str) and file_path:
-        return [os.path.expanduser(file_path)]
-    elif tool_name in _SHELL_TOOLS:
-        return _list_command_written_files(str(tool_input.get(_COMMAND_KEY) or ""), cwd)
-    else:
-        return []
-
-
-def _list_command_written_files(command: str, cwd: str | None) -> list[str]:
-    """Files the command line itself writes, relative ones resolved from the folder each call runs in."""
-    return [
-        os.path.join(call.cwd or cwd or "", os.path.expanduser(path))
-        for call in _list_line_calls(command, cwd)
-        for path in call.list_written_files()
-    ]
 
 
 def _find_deny_reason(hook_input: dict[str, Any]) -> str | None:
@@ -773,16 +728,12 @@ def _find_deny_reason(hook_input: dict[str, Any]) -> str | None:
 
 
 def _find_choice_deny_reason(hook_input: dict[str, Any], tool_name: str, tool_input: dict[str, Any]) -> str | None:
-    """The refusal for design-session choices whose options are not all recorded; an unreadable record is not one."""
-    try:
-        questions = _list_choice_questions(tool_name, tool_input)
-        is_checked = bool(questions) and _has_ever_loaded(hook_input, _UX_DESIGN)
-        unshown = _list_unshown_options(hook_input, questions) if is_checked else []
+    """The refusal for design-session choices whose options are not all recorded; an unreadable record raises."""
+    questions = _list_choice_questions(tool_name, tool_input)
+    is_checked = bool(questions) and _has_ever_loaded(hook_input, _UX_DESIGN)
+    unshown = _list_unshown_options(hook_input, questions) if is_checked else []
 
-        return _CHOICE_DENY_REASON.format(gaps="; ".join(unshown)) if unshown else None
-    except OSError as error:
-        print(f"skill-gate-hook: choice record unchecked: {error}", file=sys.stderr)
-        return None
+    return _CHOICE_DENY_REASON.format(gaps="; ".join(unshown)) if unshown else None
 
 
 def _list_unshown_options(hook_input: dict[str, Any], questions: Sequence[tuple[str, list[str]]]) -> list[str]:
@@ -1038,4 +989,4 @@ def _is_multi_line(text: str) -> bool:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

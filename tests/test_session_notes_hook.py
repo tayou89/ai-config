@@ -126,7 +126,7 @@ class SessionNotesHookTest(unittest.TestCase):
                 self.assertEqual(output, "")
                 self.assertTrue((self._target / f"local_{tool[-5:]}" / "report.md").is_file())
 
-    def test_an_unreadable_file_denies_every_closing_tool_but_not_the_turn_end(self) -> None:
+    def test_an_unreadable_file_denies_every_closing_tool_and_shows_at_the_turn_end(self) -> None:
         self._skip_as_root()
         self._write_note("local_1/report.md", "보고서")
         self._write_note("local_1/locked.md", "잠김").chmod(0o000)
@@ -137,7 +137,7 @@ class SessionNotesHookTest(unittest.TestCase):
                 self.assertEqual(decision["permissionDecision"], "deny")
                 self.assertIn("locked.md", decision["permissionDecisionReason"])
         self.assertTrue((self._target / "local_1" / "report.md").is_file())
-        self.assertEqual(self._run_stop(), "")
+        self.assertIn("locked.md", self._run_failing_stop())
         self.assertEqual(list(self._target.rglob("*.partial")), [])
 
     def test_many_failures_are_shown_as_a_few_and_a_count(self) -> None:
@@ -156,17 +156,16 @@ class SessionNotesHookTest(unittest.TestCase):
 
         self.assertEqual(decision["permissionDecision"], "deny")
 
-    def test_an_unexpected_error_denies_closing_and_only_logs_at_the_turn_end(self) -> None:
+    def test_an_unexpected_error_denies_closing_and_shows_at_the_turn_end(self) -> None:
         self._skip_as_root()
         self._write_note("local_1/report.md", "보고서")
         self._source.parent.chmod(0o000)
         decision = json.loads(self._run_closing(ARCHIVE_TOOL))["hookSpecificOutput"]
-        stop = self._run(json.dumps({"hook_event_name": "Stop"}))
+        stop_error = self._run_failing_stop()
 
         self.assertEqual(decision["permissionDecision"], "deny")
         self.assertIn("PermissionError", decision["permissionDecisionReason"])
-        self.assertEqual((stop.returncode, stop.stdout), (0, ""))
-        self.assertIn("session-notes-hook:", stop.stderr)
+        self.assertIn("PermissionError", stop_error)
 
     def test_a_copy_that_cannot_write_denies_closing(self) -> None:
         self._write_note("local_1/report.md", "보고서")
@@ -175,7 +174,7 @@ class SessionNotesHookTest(unittest.TestCase):
         decision = json.loads(self._run_closing(ARCHIVE_TOOL))["hookSpecificOutput"]
 
         self.assertEqual(decision["permissionDecision"], "deny")
-        self.assertEqual(self._run_stop(), "")
+        self.assertIn("report.md", self._run_failing_stop())
 
     def test_a_notes_folder_that_cannot_be_made_does_not_stop_the_copy(self) -> None:
         self._write_note("local_1/report.md", "보고서")
@@ -208,7 +207,7 @@ class SessionNotesHookTest(unittest.TestCase):
         self.assertIn("last_run", first)
         self._skip_as_root()
         self._write_note("local_1/locked.md", "잠김").chmod(0o000)
-        self._run_stop()
+        self._run_failing_stop()
         second = json.loads((self._home / STATUS_PATH).read_text(encoding="utf-8"))
 
         self.assertEqual(second["failure_count"], 1)
@@ -231,28 +230,35 @@ class SessionNotesHookTest(unittest.TestCase):
             time.sleep(1)
             is_copied_while_locked = (self._target / "local_1" / "report.md").exists()
             fcntl.flock(lock_file, fcntl.LOCK_UN)
-        output, _ = process.communicate(json.dumps({"hook_event_name": "PreToolUse", "tool_name": ARCHIVE_TOOL}))
+        closing_input = {"hook_event_name": "PreToolUse", "tool_name": ARCHIVE_TOOL, "tool_input": {}}
+        output, _ = process.communicate(json.dumps(closing_input))
 
         self.assertFalse(is_copied_while_locked)
         self.assertEqual(output, "")
         self.assertTrue((self._target / "local_1" / "report.md").is_file())
 
-    def test_other_tools_and_broken_input_never_block(self) -> None:
+    def test_other_tools_pass_after_the_copy(self) -> None:
+        self._write_note("local_1/report.md", "보고서")
+
+        self.assertEqual(self._run_hook({"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {}}), "")
+        self.assertTrue((self._target / "local_1" / "report.md").is_file())
+
+    def test_broken_input_exits_1_so_the_settings_entry_blocks_closing(self) -> None:
         self._write_note("local_1/report.md", "보고서")
         inputs = (
             "",
             "not json",
             "[1, 2]",
-            json.dumps({"hook_event_name": "PreToolUse", "tool_name": "Bash"}),
-            json.dumps({"hook_event_name": "PreToolUse", "tool_name": [ARCHIVE_TOOL]}),
+            json.dumps({"hook_event_name": "PreToolUse", "tool_name": ARCHIVE_TOOL}),
+            json.dumps({"hook_event_name": "PreToolUse", "tool_name": [ARCHIVE_TOOL], "tool_input": {}}),
         )
 
         for stdin in inputs:
             with self.subTest(stdin=stdin):
                 result = self._run(stdin)
 
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "")
+                self.assertEqual((result.returncode, result.stdout), (1, ""))
+                self.assertIn("session-notes-hook:", result.stderr)
 
     def test_copy_now_reports_success_and_failure(self) -> None:
         self._write_note("local_1/report.md", "보고서")
@@ -296,6 +302,14 @@ class SessionNotesHookTest(unittest.TestCase):
 
     def _run_stop(self) -> str:
         return self._run_hook({"hook_event_name": "Stop", "session_id": "session-a"})
+
+    def _run_failing_stop(self) -> str:
+        """A turn end whose copy failed: exit 1 with nothing on stdout, so Claude Code shows the error as a notice."""
+        result = self._run(json.dumps({"hook_event_name": "Stop", "session_id": "session-a"}))
+
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("session-notes-hook:", result.stderr)
+        return result.stderr
 
     def _run_closing(self, tool: str) -> str:
         return self._run_hook({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {}})

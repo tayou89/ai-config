@@ -99,11 +99,11 @@ class SubSessionQuestionHookTest(unittest.TestCase):
         (self._records / f"{CHILD_SESSION}.json").write_text(json.dumps(record), encoding=ENCODING)
         self.assertEqual(self._run_hook(CHILD_SESSION, QUESTION_INPUT), "")
 
-    def test_empty_input_exits_cleanly(self) -> None:
+    def test_empty_input_shows_a_hook_error_and_lets_the_call_through(self) -> None:
         result = self._run_process(CHILD_SESSION, "")
 
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("sub-session-question-hook:", result.stderr)
 
     def _write_record(self, session_id: str, spawned_from: str | None = None, detached: bool = False) -> None:
         record: dict[str, Any] = {"sessionId": session_id}

@@ -167,8 +167,14 @@ class StartSessionHookTest(unittest.TestCase):
 
         self.assertEqual(decision[DECISION_KEY], DENY)
 
-    def test_unknown_load_does_not_ask_even_when_memory_is_short(self) -> None:
-        self.assertIsNone(start_session_hook.decide(FULL_START, None, pressure=PRESSURE_CRITICAL))
+    def test_critical_memory_asks_even_when_the_load_is_unknown(self) -> None:
+        decision = start_session_hook.decide(FULL_START, None, pressure=PRESSURE_CRITICAL)
+
+        self.assertEqual(decision[DECISION_KEY], ASK)
+        self.assertIn("could not be read", decision["permissionDecisionReason"])
+
+    def test_a_memory_warning_with_an_unknown_load_does_not_ask(self) -> None:
+        self.assertIsNone(start_session_hook.decide(FULL_START, None, pressure=PRESSURE_WARN))
 
     def test_make_output_wraps_memory_question(self) -> None:
         hook_input = {"hook_event_name": PRE_TOOL_USE, "tool_name": START_TOOL, "tool_input": FULL_START}
@@ -223,7 +229,7 @@ class StartSessionHookTest(unittest.TestCase):
         self.assertIn(CONTEXT_KEY, output["hookSpecificOutput"])
         self.assertNotIn(DECISION_KEY, output["hookSpecificOutput"])
 
-    def test_main_fails_open_on_malformed_input(self) -> None:
+    def test_malformed_input_exits_1_so_the_settings_entry_blocks_the_start(self) -> None:
         completed = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
             input="not json",
@@ -232,8 +238,9 @@ class StartSessionHookTest(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual(completed.returncode, 0)
+        self.assertEqual(completed.returncode, 1)
         self.assertEqual(completed.stdout, "")
+        self.assertIn("start-session-hook:", completed.stderr)
 
     def _run(self, hook_input: dict[str, Any]) -> dict[str, Any]:
         completed = subprocess.run(
