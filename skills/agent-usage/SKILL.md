@@ -12,17 +12,17 @@ Apply these rules before spawning any agent (sub-agent or team agent) and when c
 
 Never create an agent without explicit user approval. When proposing, specify: count, role/scope for each, and cost concerns if applicable. A user-invoked skill whose instructions spawn agents (e.g. `/domain-pass`) counts as that approval for the agents it describes; anything beyond them still needs approval. A reviewer a rule requires needs no separate approval: the checklist reviewer of a large commit (`git-commit`) and a checkpoint reviewer (section 7), on Codex or on a Claude model in its place; say in one line that it ran (user decisions, 2026-11-09 and 2026-11-18). Ask before any other agent, any other Codex run (section 14), and max effort. An agent that only stands in for a tool the session lacks, such as the app's web-fetch agent reading a page, is a tool call: it needs no approval, and its prompt needs no skills (user decision, 2026-11-11). Starting another session follows the session rules in `collaboration-core` and `session-management` "Working alongside other sessions", not this section.
 
-## 2. Propose Splitting When Scope Grows
+## 2. Propose Delegation When It Improves the Work
 
-Propose agent splitting when: accuracy drops on repetitive review, scope too wide for sequential processing, or mid-task when scope feels larger than expected.
+For optional delegation, propose a split when the expected gain in correctness or completion outweighs the added context, coordination, and review work, and state that gain and the proposed scope under section 1.
 
-## 3. Parallelization Preferred
+## 3. Parallel Work Needs Independent Tracks
 
-For long-running tasks (exhaustive audits, large analysis), prefer splitting into parallel agents and show the split plan.
+Propose parallel agents only for sizeable tracks that can proceed without each other's results, and show their ownership and dependencies in the split plan.
 
-## 4. Proactive Agent Use
+## 4. Keep Small Optional Tasks in the Current Session
 
-When scope is large or thoroughness is needed, actively propose agents rather than doing everything sequentially.
+Handle optional tasks that need only a handful of tool calls in the current session, and use one agent when one is enough. These choices do not replace the reviews section 7 requires or agents the user asks for.
 
 ## 5. Token Budgeting
 
@@ -34,7 +34,7 @@ Team agent creation/deletion requires explicit approval.
 
 ## 7. Independent Review
 
-When, how many, and which model family follow `decisions-and-collaboration` "Independent review": one reviewer for each piece of work, at the checkpoint before anything relies on it (just before presenting a decision, before implementing a plan, before a large change to the main deliverable, before a release or a large commit), reused at later checkpoints for the same piece, and none for small edits, which need only self-review. At that checkpoint, run the `outside-review` skill (another model family, read-only) without asking (user decisions, 2026-11-18 and 2026-11-25). Spawn a same-family reviewer subagent in its place only when the budget tool refuses its reservation or Codex cannot run, saying why with the reset time, or when the user asks for one. A checklist review gets a short brief and a smaller model; a reviewer standing in for the other family gets the `outside-review` brief and a model strong enough for that full review. The review completes **before requesting the user's final approval** of what it covers.
+When, how many, and which model family follow `decisions-and-collaboration` "Independent review": one reviewer for each piece of work at the checkpoint it sets, and none for small edits. At that checkpoint, run the `outside-review` skill (another model family, read-only) without asking (user decisions, 2026-11-18 and 2026-11-25). Spawn a same-family reviewer subagent in its place only when the budget tool refuses its reservation or Codex cannot run, saying why with the reset time, or when the user asks for one. A checklist review gets a short brief and a smaller model; a reviewer standing in for the other family gets the `outside-review` brief and a model strong enough for that full review. The review completes **before requesting the user's final approval** of what it covers.
 
 ## 8. Plan Rigor = Code Rigor
 
