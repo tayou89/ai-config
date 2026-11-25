@@ -3,7 +3,7 @@ name: agent-usage
 description: Coordinate subagents only when the user explicitly authorizes delegation; define review scope and verify their evidence.
 ---
 
-<!-- Adapted from skills/agent-usage/SKILL.md at ba067e4742724b1927d4aaa9cdde12fb8b742670, skills/agent-usage/references/codex-implementation.md at c71e065c4860d8527659b1bebf1134cdedd226f3 -->
+<!-- Adapted from skills/agent-usage/SKILL.md at 0cbbddad2835b1d6b123c62d9c5e18c2bfd032dc, skills/agent-usage/references/codex-implementation.md at c71e065c4860d8527659b1bebf1134cdedd226f3 -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The copy is a short rewrite, not a section-by-section port: Claude's Agent and team-agent tools, slash commands, and model names do not exist in Codex (codex/MIGRATION.md, "Claude Skill/Agent tools and slash commands").
 - Sections 1 to 6 are joined into the opening paragraph; section 6's team agents are left out, since Codex has no team-agent tool.
@@ -21,9 +21,9 @@ Do not spawn subagents merely because this skill is loaded. Obtain explicit user
 
 Use Codex's available collaboration tools for subtasks, not new user-owned chats. Create or message another chat only when the user explicitly requests it. Follow actual tool availability and permission limits.
 
-For independent review, follow the decisions-and-collaboration skill: one reviewer, only at its checkpoints, preferring another model family, covering the full change rather than a file range. Ordinary small work needs self-review, not mandatory agents.
+For independent review, follow the decisions-and-collaboration skill: one reviewer for each piece of work, at the checkpoint before anything relies on it and reused at later checkpoints for the same piece, preferring another model family, covering the full change rather than a file range. Ordinary small work needs self-review, not mandatory agents.
 
-Give each agent bounded ownership and shared contracts. Avoid concurrent edits to the same files. Reviewers read the actual applicable AGENTS.md and skills, then check each rule against the changed code, document, or screen one by one, never from memory or general impression; they trace runtime behavior, type resolution, and test evidence rather than checking only for code presence.
+Give each agent bounded ownership and shared contracts. Avoid concurrent edits to the same files. Reviewers check the changed code, document, or screen against each applicable rule one by one, reading its actual text in AGENTS.md and the skills, never from memory or general impression; an independent reviewer reads in the order decisions-and-collaboration "Independent review" sets; they trace runtime behavior, type resolution, and test evidence rather than checking only for code presence.
 
 Apply the same verification depth to plans as to code. Every classification ("fixable", "unavoidable", "redundant") must cite concrete evidence (line numbers, type resolution trace, actual compile/test output). Never trust agent summaries without verifying key claims against the actual code, document, or source they summarize. For type-related issues, trace the full type resolution chain step by step before classifying. Exhaustive audits require checking every occurrence and reporting exact counts; estimates or round numbers are not proof. Choose each subagent's model and reasoning effort from the work-type table in the decisions-and-collaboration skill, set with Codex's own options, rather than hard-coding a Claude-specific agent type. For unfamiliar tool/model options, consult current supported capabilities.
 
