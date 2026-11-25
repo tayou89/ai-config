@@ -24,15 +24,15 @@ def read_calm_pressure() -> int:
     return CALM_PRESSURE
 
 
-def main() -> None:
+def main() -> int:
     hook = load_script("start-session-hook")
 
     with (
         mock.patch.object(hook, "_read_load", read_calm_load),
         mock.patch.object(hook, "_read_pressure", read_calm_pressure),
     ):
-        hook.main()
+        return int(hook.main())
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

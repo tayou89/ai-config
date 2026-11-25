@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+GATE_VARIABLE = "SKILL_GATE"
+GATE_OFF = "off"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _RECORD_DIRECTORY_NAME = "skill-gate"
@@ -52,6 +54,11 @@ def get_record_directory() -> Path:
 
 def to_safe_name(text: str) -> str:
     return _UNSAFE_NAME_CHARACTERS.sub(_EMPTY_NAME, text) or _EMPTY_NAME
+
+
+def read_gate_setting() -> str:
+    """`SKILL_GATE` from the settings env; `off` stops the skill gate's and the notes-place hook's refusals."""
+    return os.environ.get(GATE_VARIABLE, "")
 
 
 def get_choice_record_path(session_id: str) -> Path:

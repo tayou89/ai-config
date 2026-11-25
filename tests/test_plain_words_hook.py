@@ -86,7 +86,7 @@ class PlainWordsHookTest(unittest.TestCase):
         self.assertIsNone(self._run_pre(WRAP_UP_TOOL, {"recap": "local_c01e4481-76fe-4d8e 세션에 알렸습니다."}))
         self.assertIsNone(self._run_pre(WRAP_UP_TOOL, {"recap": "화면은 Node.js와 Vue.js로 만듭니다."}))
 
-    def test_passes_unrelated_tool_and_bad_input(self) -> None:
+    def test_passes_unrelated_tool_and_shows_bad_input_as_a_hook_error(self) -> None:
         self.assertIsNone(self._run_pre("Bash", {"command": "git show 170d2d4"}))
         completed = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
@@ -96,8 +96,8 @@ class PlainWordsHookTest(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout.strip(), "")
+        self.assertEqual((completed.returncode, completed.stdout), (1, ""))
+        self.assertIn("plain-words-hook:", completed.stderr)
 
     def _run_pre(self, tool_name: str, tool_input: dict[str, Any]) -> Any:
         hook_input = {"hook_event_name": PRE_TOOL_USE, "tool_name": tool_name, "tool_input": tool_input}

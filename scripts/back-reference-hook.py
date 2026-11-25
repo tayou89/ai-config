@@ -13,11 +13,13 @@ questions that pointed back most often sat in a list of open items.
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
+
+FAILURE_POLICY = FailurePolicy.notice("back-reference-hook")
 _PRE_TOOL_USE = "PreToolUse"
 _STOP = "Stop"
 _WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
@@ -51,14 +53,8 @@ _PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?。])\s+|\n")
 
 
-def main() -> None:
-    try:
-        output = _make_output(json.load(sys.stdin))
-
-        if output:
-            print(json.dumps(output, ensure_ascii=False))
-    except (OSError, ValueError, TypeError, AttributeError) as error:
-        print(f"back-reference-hook: {error}", file=sys.stderr)
+def main() -> int:
+    return run_hook(_make_output, FAILURE_POLICY)
 
 
 def _make_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
@@ -153,4 +149,4 @@ def _is_asking(sentence: str) -> bool:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

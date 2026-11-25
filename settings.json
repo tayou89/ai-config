@@ -115,7 +115,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/shell-guard-hook.py\"",
-            "timeout": 30
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       },
@@ -125,7 +126,19 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
-            "timeout": 30
+            "timeout": 30,
+            "onFailure": "continue"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/notes-place-hook.py\"",
+            "timeout": 30,
+            "onFailure": "block"
           }
         ]
       },
@@ -144,7 +157,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 -c 'import sys, json, os; d = json.load(sys.stdin); f = d.get(\"tool_input\", {}).get(\"file_path\", \"\"); b = os.path.basename(f); print(json.dumps({\"hookSpecificOutput\": {\"hookEventName\": \"PreToolUse\", \"additionalContext\": \"[PLAN CODE REMINDER] Plan sample code follows every rule of code-style and the language skill (typescript for .ts or .js, python for .py), as implementation code does; only Skill-tool loads of them survive a compaction.\"}})) if \"claude-plans\" in f and b.startswith(\"plan-\") and b.endswith(\".md\") else None'"
+            "command": "python3 \"$HOME/.claude/scripts/plan-reminder-hook.py\"",
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
@@ -154,12 +169,14 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           },
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/plain-words-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
@@ -169,7 +186,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/start-session-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "block"
           }
         ]
       },
@@ -179,7 +197,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/back-reference-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
@@ -189,7 +208,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/recommendation-change-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
@@ -199,7 +219,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/sub-session-question-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },
@@ -209,7 +230,8 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/main-session-hook.py\"",
-            "timeout": 10
+            "timeout": 10,
+            "onFailure": "continue"
           }
         ]
       },

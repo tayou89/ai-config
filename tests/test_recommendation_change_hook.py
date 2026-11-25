@@ -139,7 +139,7 @@ class RecommendationChangeHookTest(unittest.TestCase):
     def test_continues_only_once(self) -> None:
         self.assertIsNone(self._run_stop("추천을 E로 바꾸겠습니다.", stop_hook_active=True))
 
-    def test_passes_unrelated_tool_and_bad_input(self) -> None:
+    def test_passes_unrelated_tool_and_shows_bad_input_as_a_hook_error(self) -> None:
         self.assertIsNone(self._run_pre("Bash", {"command": "echo 추천을 E로 바꿨습니다"}))
         completed = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
@@ -149,8 +149,8 @@ class RecommendationChangeHookTest(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual(completed.returncode, 0)
-        self.assertEqual(completed.stdout, "")
+        self.assertEqual((completed.returncode, completed.stdout), (1, ""))
+        self.assertIn("recommendation-change-hook:", completed.stderr)
 
     def _run_pre(self, tool_name: str, tool_input: dict[str, Any]) -> Any:
         return self._run({"hook_event_name": PRE_TOOL_USE, "tool_name": tool_name, "tool_input": tool_input})

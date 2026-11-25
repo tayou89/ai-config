@@ -131,7 +131,7 @@ class ReplyLanguageHookTest(unittest.TestCase):
         self.assertIsNone(self._run_pre(PLAN_TOOL, tool_input, language=None))
         self.assertIsNone(self._run_pre(PLAN_TOOL, tool_input, language="KO"))
 
-    def test_fails_open_on_malformed_input(self) -> None:
+    def test_malformed_input_shows_a_hook_error_and_lets_the_call_through(self) -> None:
         for raw_input in (
             "not json",
             json.dumps([1, 2]),
@@ -139,8 +139,8 @@ class ReplyLanguageHookTest(unittest.TestCase):
         ):
             result = self._run_raw(raw_input, KOREAN)
 
-            self.assertEqual(result.returncode, 0)
-            self.assertEqual(result.stdout, "")
+            self.assertEqual((result.returncode, result.stdout), (1, ""))
+            self.assertIn("reply-language-hook:", result.stderr)
 
     def test_fails_open_on_missing_transcript(self) -> None:
         hook_input = {
@@ -373,7 +373,7 @@ class ReplyLanguageHookTest(unittest.TestCase):
         if language:
             environment[LANGUAGE_VARIABLE] = language
         return subprocess.run(
-            [sys.executable, "-I", str(HOOK_SCRIPT)],
+            [sys.executable, "-E", "-s", str(HOOK_SCRIPT)],
             input=raw_input,
             capture_output=True,
             text=True,

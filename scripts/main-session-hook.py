@@ -42,7 +42,8 @@ the main sessions' model that day; a model with another window reads wrong.
 A subagent's tool calls get nothing, since it cannot start sessions, and an
 unreadable transcript leaves out the size and skill sentences.
 MAIN_SESSION_NOTICE=off in the settings env turns the notices off. The hook
-never blocks, and any failure adds nothing.
+never blocks; a failure adds no notice and shows a hook error notice instead
+(`hook_failure.py`).
 """
 
 from __future__ import annotations
@@ -55,6 +56,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
 from project_rules import list_not_main_role_titles, list_role_titles
 from session_lineage import (
     count_started_sessions,
@@ -65,6 +67,7 @@ from session_lineage import (
 )
 
 _HOOK_NAME = "main-session-hook"
+FAILURE_POLICY = FailurePolicy.notice(_HOOK_NAME)
 _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 _SWITCH_OFF = "off"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
@@ -137,15 +140,7 @@ class _Lead:
 
 
 def main() -> int:
-    try:
-        output = _make_hook_output(_read_hook_input())
-
-        if output is not None:
-            print(json.dumps(output))
-    except Exception as error:
-        # The notice is advisory: a failure must not delay or break the turn or the tool call.
-        print(f"{_HOOK_NAME}: {type(error).__name__}: {error}", file=sys.stderr)
-    return 0
+    return run_hook(_make_hook_output, FAILURE_POLICY)
 
 
 def _make_hook_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
@@ -173,13 +168,6 @@ def _make_notice(hook_input: dict[str, Any]) -> str | None:
         return lead.tool_notice if lead is not None else None
     else:
         return None
-
-
-def _read_hook_input() -> dict[str, Any]:
-    text = sys.stdin.read()
-    hook_input = json.loads(text) if text.strip() else {}
-
-    return hook_input if isinstance(hook_input, dict) else {}
 
 
 def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:

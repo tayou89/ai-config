@@ -10,7 +10,11 @@ uses: a 1-minute load average above 1.5 times the CPU count. When memory is
 also short (the system's memory pressure level is critical, or it warns while
 the load is above that threshold), it asks the user before the start instead,
 since starting more sessions then can freeze the computer (user decision,
-2026-11-23). An unreadable pressure level keeps the load notice alone.
+2026-11-23). A critical level asks even when the load cannot be read; an
+unreadable pressure level keeps the load notice alone. When the hook cannot
+finish its own judgment it refuses the start, and its settings entry blocks
+the start when the hook cannot answer at all (`hook_failure.py`): the user
+can still start the session from the app's sidebar.
 
 A session started to share a folder (`use_worktree: false`, or a `cwd`
 without its own worktree) works where that folder is. When the folder is a
@@ -23,7 +27,6 @@ any folder, so the start itself is never refused for it.
 
 from __future__ import annotations
 
-import json
 import os
 import subprocess
 import sys
@@ -37,6 +40,13 @@ from folder_owner import (
     find_linked_worktree,
     judge_access,
     read_current_identity,
+)
+from hook_failure import Decision, FailurePolicy, run_hook
+
+FAILURE_POLICY = FailurePolicy.blocking(
+    "start-session-hook",
+    Decision.DENY,
+    'The start-session hook could not check this start ({error}), so it refuses it. Tell the user, who can start the session from the app\'s sidebar; README "Hooks" (failure handling) says how to repair the hook from a terminal.',
 )
 
 _START_TOOL = "mcp__ccd_session__start_session"
@@ -86,17 +96,15 @@ _MEMORY_REASON = (
     "(limit {limit:.0f}). Another session now may freeze this computer, so the user decides. "
     "If the user declines, keep the start queued and try again after a running session finishes."
 )
+_MEMORY_REASON_WITHOUT_LOAD = "Memory is short: the system reports memory pressure level {pressure}, and the load average could not be read. Another session now may freeze this computer, so the user decides. If the user declines, keep the start queued and try again after a running session finishes."
 
 
-def main() -> None:
-    try:
-        hook_input = json.load(sys.stdin)
-        output = make_output(hook_input, _read_load(), _read_pressure())
+def main() -> int:
+    return run_hook(_make_current_output, FAILURE_POLICY)
 
-        if output:
-            print(json.dumps(output))
-    except (OSError, ValueError, TypeError, AttributeError) as error:
-        print(f"start-session-hook: {error}", file=sys.stderr)
+
+def _make_current_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    return make_output(hook_input, _read_load(), _read_pressure())
 
 
 def _read_load() -> tuple[float, int] | None:
@@ -173,18 +181,25 @@ def _decide_folder_and_load(
     folder_notices = _list_folder_notices(access)
     notices = [*folder_notices, *_list_load_notices(tool_input, load)]
 
-    if load is not None and pressure is not None and _is_starting_now(tool_input) and _is_memory_short(pressure, *load):
-        current, cpus = load
-
+    if pressure is not None and _is_starting_now(tool_input) and _is_memory_short(pressure, load):
         return {
             _DECISION_KEY: _DECISION_ASK,
-            _DECISION_REASON_KEY: _MEMORY_REASON.format(pressure=pressure, load=current, limit=_LOAD_FACTOR * cpus),
+            _DECISION_REASON_KEY: _describe_short_memory(pressure, load),
             _CONTEXT_KEY: "\n".join(folder_notices),
         }
     elif notices:
         return {_CONTEXT_KEY: "\n".join(notices)}
     else:
         return None
+
+
+def _describe_short_memory(pressure: int, load: tuple[float, int] | None) -> str:
+    if load is not None:
+        current, cpus = load
+
+        return _MEMORY_REASON.format(pressure=pressure, load=current, limit=_LOAD_FACTOR * cpus)
+    else:
+        return _MEMORY_REASON_WITHOUT_LOAD.format(pressure=pressure)
 
 
 def _list_folder_notices(access: FolderAccess | None) -> list[str]:
@@ -252,9 +267,10 @@ def _is_overloaded(load: float, cpus: int) -> bool:
     return load > _LOAD_FACTOR * cpus
 
 
-def _is_memory_short(pressure: int, load: float, cpus: int) -> bool:
-    return pressure >= _PRESSURE_CRITICAL or (pressure >= _PRESSURE_WARN and _is_overloaded(load, cpus))
+def _is_memory_short(pressure: int, load: tuple[float, int] | None) -> bool:
+    """A critical level is short on its own; a warning counts only with a load that was read and is above the limit."""
+    return pressure >= _PRESSURE_CRITICAL or (pressure >= _PRESSURE_WARN and load is not None and _is_overloaded(*load))
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

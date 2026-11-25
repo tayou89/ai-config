@@ -13,19 +13,21 @@ Lineage comes from the desktop app's session records through
 `session_lineage`. A top-level session, one moved to the top level, a
 subagent's call, and a session without a readable record pass.
 SUB_SESSION_QUESTION=off in the settings env turns the hook off, and any
-failure lets the dialog through.
+failure lets the dialog through with a hook error notice (`hook_failure.py`),
+since the user may be waiting to answer it.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import sys
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
 from session_lineage import is_under_another_session, read_host_session_record
 
 _HOOK_NAME = "sub-session-question-hook"
+FAILURE_POLICY = FailurePolicy.notice(_HOOK_NAME)
 _SWITCH_VARIABLE = "SUB_SESSION_QUESTION"
 _SWITCH_OFF = "off"
 _EVENT_KEY = "hook_event_name"
@@ -42,15 +44,7 @@ _DENY_REASON = (
 
 
 def main() -> int:
-    try:
-        output = _make_hook_output(_read_hook_input())
-
-        if output is not None:
-            print(json.dumps(output))
-    except Exception as error:
-        # A failure must not block the dialog, since the user may be waiting to answer it.
-        print(f"{_HOOK_NAME}: {type(error).__name__}: {error}", file=sys.stderr)
-    return 0
+    return run_hook(_make_hook_output, FAILURE_POLICY)
 
 
 def _make_hook_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
@@ -64,13 +58,6 @@ def _make_hook_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
         return {"hookSpecificOutput": decision}
     else:
         return None
-
-
-def _read_hook_input() -> dict[str, Any]:
-    text = sys.stdin.read()
-    hook_input = json.loads(text) if text.strip() else {}
-
-    return hook_input if isinstance(hook_input, dict) else {}
 
 
 def _is_sub_session_question(hook_input: dict[str, Any]) -> bool:
