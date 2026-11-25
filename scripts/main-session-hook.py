@@ -11,16 +11,24 @@ and passed the replacement threshold without proposing it did so with that
 rule missing from its context (2026-11-13). This hook puts the facts back:
 
 - UserPromptSubmit, which also runs on turns another session's message
-  starts: the role, the context's size against the 80% replacement
-  threshold, and whether the installed `session-management` skill
-  changed after this session last loaded it.
+  starts: the role, the context's size against the context threshold, and
+  whether the installed `session-management` skill changed after this
+  session last loaded it. Any other session, a terminal session with no
+  app records included, gets one size sentence once its context is
+  past the threshold, since `collaboration-core` has every session record
+  its state there (user decision, 2026-11-25).
 - PreToolUse on file edits and long commands (Edit, Write, NotebookEdit,
   Monitor, a terminal-tab command, a Bash command run in the background): one
   sentence that such work goes to a session of its own.
+- SessionStart after a compaction (matcher `compact`): a main or role
+  session is told that it was just compacted, since `session-management`
+  has it reload that skill, read its state record, and check it against the
+  live session list before coordinating again (user decision, 2026-11-25).
 
 Hook input carries no session lineage, so the hook reads the desktop app's
 session records through `session_lineage`; when they or the app's session
-variable are missing, as in a terminal session, the hook adds nothing. A
+variable are missing, as in a terminal session, the hook gives no role
+sentence. A
 top-level session whose title its project's role list marks `(not main)`,
 read through `project_rules` from the hook input's folder, is not main, since
 the user set that role apart (user decision, 2026-11-16). A role session
@@ -28,17 +36,31 @@ gets a role sentence of its own, the same size and skill sentences, and a
 tool sentence like a main session's: it is a session whose title is in that
 role list and that is either directly under a top-level session, as under a
 project master, or top-level and marked `(not main)`. A
-task session under a role session is two levels down, so it gets nothing
-even when its title matches, and so does a top-level session that has not
-started one yet, such as a new master. A role session under a master ran
+task session under a role session is two levels down, so it gets no role
+sentence even when its title matches, and so does a top-level session that
+has not started one yet, such as a new master. A role session under a master ran
 on a skill copy loaded hours before the rule changed when it prepared
 another session's estimate itself (`session-management` "Project master and
 role sessions", user decision, 2026-11-19); the notice keeps the role and the
-installed skill's state in view and blocks nothing. The
-context's size is the last request's input tokens in the transcript, which
-matched the app's context reading within 1% on 2026-11-17. Hook input carries
-no window size, so the window is the 1,000,000 tokens the app reported for
-the main sessions' model that day; a model with another window reads wrong.
+installed skill's state in view and blocks nothing.
+
+The context's size is the input tokens of the last request after the
+transcript's last compaction boundary, read from the transcript's end; it
+matched the app's context reading within 1% on 2026-11-17, and right after
+a compaction, before the next request, it is unknown and left out. The
+threshold is 85% of the automatic compaction point the session's settings
+give, read the way Claude Code documents it (model-config "Set the
+auto-compact window", read 2026-11-25): `CLAUDE_CODE_AUTO_COMPACT_WINDOW` as a
+literal token count, then the managed, project-local, project, and user
+settings files, the project ones at the original checkout's root as the
+desktop app reads them for a worktree, each file's `modelSettings` value for
+the transcript's last model before its top-level `autoCompactWindow`; at least
+100,000 tokens and at most the 1,000,000-token window of the models this
+setup runs, lowered by `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`, and about 967,000
+when nothing sets it or a model value is "auto". `autoCompactEnabled` false
+or `DISABLE_AUTO_COMPACT` turns compaction off, and the notice says so. A
+`--autocompact` launch option is not visible to a hook, so the sentence names
+the point as what the settings give.
 A subagent's tool calls get nothing, since it cannot start sessions, and an
 unreadable transcript leaves out the size and skill sentences.
 MAIN_SESSION_NOTICE=off in the settings env turns the notices off. The hook
@@ -65,11 +87,13 @@ from session_lineage import (
     read_parent_record,
     read_session_title,
 )
+from workflow_policy import find_repository_root, read_original_checkout
 
 _HOOK_NAME = "main-session-hook"
 FAILURE_POLICY = FailurePolicy.notice(_HOOK_NAME)
 _SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 _SWITCH_OFF = "off"
+_ENCODING = "utf-8"
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _LEAD_SKILL = "session-management"
@@ -83,14 +107,22 @@ _TOOL_INPUT_KEY = "tool_input"
 _TRANSCRIPT_PATH_KEY = "transcript_path"
 _CWD_KEY = "cwd"
 _BACKGROUND_KEY = "run_in_background"
+_SOURCE_KEY = "source"
 _USER_PROMPT_SUBMIT = "UserPromptSubmit"
 _PRE_TOOL_USE = "PreToolUse"
+_SESSION_START = "SessionStart"
+_COMPACT_SOURCE = "compact"
 _BASH_TOOL = "Bash"
 _WRITING_TOOLS = ("Edit", "Write", "NotebookEdit", "Monitor", "mcp__terminal__run_in_terminal")
 _RECORD_TYPE_KEY = "type"
 _ASSISTANT_TYPE = "assistant"
 _ASSISTANT_MARKER = b'"type":"assistant"'
+_COMPACT_BOUNDARY = "compact_boundary"
+_COMPACT_BOUNDARY_MARKER = f'"subtype":"{_COMPACT_BOUNDARY}"'.encode()
+_SUBTYPE_KEY = "subtype"
+_TAIL_START_BYTES = 1 << 20
 _SIDECHAIN_KEY = "isSidechain"
+_MODEL_KEY = "model"
 _MESSAGE_KEY = "message"
 _USAGE_KEY = "usage"
 _CONTENT_KEY = "content"
@@ -102,18 +134,42 @@ _INPUT_TOKEN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_
 _UTC_SUFFIX = "Z"
 _UTC_OFFSET = "+00:00"
 _CONTEXT_WINDOW = 1_000_000
-_REPLACEMENT_PERCENT = 80
+_DEFAULT_COMPACTION_POINT = 967_000
+_MINIMUM_COMPACTION_POINT = 100_000
+_THRESHOLD_PERCENT = 85
 _PERCENT_SCALE = 100
 _THOUSAND = 1_000
+_WINDOW_VARIABLE = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+_PERCENT_OVERRIDE_VARIABLE = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+_DISABLE_VARIABLE = "DISABLE_AUTO_COMPACT"
+_TRUE_VALUES = ("1", "true", "yes", "on")
+_TOKEN_SUFFIXES = {"k": 1_000, "m": 1_000_000}
+_WINDOW_KEY = "autoCompactWindow"
+_ENABLED_KEY = "autoCompactEnabled"
+_MODEL_SETTINGS_KEY = "modelSettings"
+_AUTO_VALUE = "auto"
+_LONG_CONTEXT_SUFFIX = "[1m]"
+_MANAGED_SETTINGS = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
+_PROJECT_SETTINGS_FOLDER = ".claude"
+_SETTINGS_FILE = "settings.json"
+_PROJECT_SETTINGS_FILES = ("settings.local.json", _SETTINGS_FILE)
 _NOTICE_TAG = "[MAIN SESSION]"
+_LEAD_SUBJECT = "Its"
+_OTHER_SUBJECT = "This session's"
 _ROLE_NOTICE = (
     f"{_NOTICE_TAG} This session started {{count}} other {{noun}} and is not under another session, so it is "
     f'a main session, which {_LEAD_SKILL} "Working alongside other sessions" limits to '
     "conversation and managing sessions."
 )
-_SIZE_NOTICE = "Its context is about {size}k of the {window}k window ({percent}%), {position} the {threshold}% {threshold_name}."
-_MAIN_THRESHOLD_NAME = "replacement threshold"
-_ROLE_THRESHOLD_NAME = "context threshold"
+_SIZE_NOTICE = (
+    "{subject} context is about {size}k, {percent}% of the {point}k automatic compaction point its settings give, "
+    "{position} the {threshold}% context threshold."
+)
+_COMPACTION_OFF_NOTICE = "Its context is about {size}k, and its settings turn automatic compaction off."
+_COMPACTED_NOTICE = (
+    f"This session was just compacted, and {_LEAD_SKILL} has a coordinating session reload that skill, read its "
+    "state record, and check it against the live session list and waiting items before coordinating again."
+)
 _PAST_POSITION = "past"
 _BELOW_POSITION = "below"
 _SKILL_CHANGED_NOTICE = (
@@ -132,11 +188,18 @@ _ROLE_TOOL_NOTICE = f"{_ROLE_NOTICE_TAG} This is a role session, where file chan
 
 @dataclass(frozen=True)
 class _Lead:
-    """What a session that leads others is told: its role sentence, its tool notice, and its context threshold."""
+    """What a session that leads others is told: its role sentence and its tool notice."""
 
     role_notice: str
     tool_notice: str
-    threshold_name: str
+
+
+@dataclass(frozen=True)
+class _ContextReading:
+    """The last request after the transcript's last compaction: its input tokens and model, or None for each."""
+
+    size: int | None
+    model: str | None
 
 
 def main() -> int:
@@ -166,22 +229,61 @@ def _make_notice(hook_input: dict[str, Any]) -> str | None:
         lead = _read_lead(hook_input)
 
         return lead.tool_notice if lead is not None else None
+    elif event == _SESSION_START and hook_input.get(_SOURCE_KEY) == _COMPACT_SOURCE:
+        lead = _read_lead(hook_input)
+
+        return f"{lead.role_notice} {_COMPACTED_NOTICE}" if lead is not None else None
     else:
         return None
 
 
 def _make_turn_notice(hook_input: dict[str, Any]) -> str | None:
     lead = _read_lead(hook_input)
+    reading = _read_context_tail(hook_input.get(_TRANSCRIPT_PATH_KEY))
 
     if lead is not None:
         transcript = _read_transcript_records(hook_input.get(_TRANSCRIPT_PATH_KEY))
         lines = [lead.role_notice]
 
-        if transcript is not None:
-            lines.extend(_list_transcript_notices(transcript, lead.threshold_name))
+        if transcript is not None and reading is not None:
+            lines.extend(_list_size_notices(hook_input, reading))
+            lines.extend(_list_skill_notices(transcript))
         return " ".join(lines)
+    elif reading is not None and _is_possibly_past_threshold(reading.size):
+        return _make_context_notice(hook_input, reading)
     else:
         return None
+
+
+def _make_context_notice(hook_input: dict[str, Any], reading: _ContextReading) -> str | None:
+    """The one sentence a session that leads none gets, only once its context is past the threshold."""
+    point = _read_compaction_point(_get_session_folder(hook_input), reading.model)
+
+    if reading.size is not None and point is not None and _is_past_threshold(reading.size, point):
+        return _make_size_notice(reading.size, point, _OTHER_SUBJECT)
+    else:
+        return None
+
+
+def _list_size_notices(hook_input: dict[str, Any], reading: _ContextReading) -> list[str]:
+    if reading.size is None:
+        return []
+    else:
+        point = _read_compaction_point(_get_session_folder(hook_input), reading.model)
+
+        if point is None:
+            return [_COMPACTION_OFF_NOTICE.format(size=round(reading.size / _THOUSAND))]
+        else:
+            return [_make_size_notice(reading.size, point, _LEAD_SUBJECT)]
+
+
+def _is_possibly_past_threshold(size: int | None) -> bool:
+    """Whether a size could pass the threshold of any compaction point, so smaller ones skip reading settings."""
+    return size is not None and _is_past_threshold(size, _apply_percent_override(_MINIMUM_COMPACTION_POINT))
+
+
+def _is_past_threshold(size: int, point: int) -> bool:
+    return size * _PERCENT_SCALE > point * _THRESHOLD_PERCENT
 
 
 def _read_lead(hook_input: dict[str, Any]) -> _Lead | None:
@@ -199,13 +301,11 @@ def _read_lead(hook_input: dict[str, Any]) -> _Lead | None:
         return _Lead(
             role_notice=_ROLE_NOTICE.format(count=count, noun="session" if count == 1 else "sessions"),
             tool_notice=_TOOL_NOTICE,
-            threshold_name=_MAIN_THRESHOLD_NAME,
         )
     elif _is_role_session(record, title, folder, is_set_apart):
         return _Lead(
             role_notice=_ROLE_SESSION_NOTICE.format(title=title),
             tool_notice=_ROLE_TOOL_NOTICE,
-            threshold_name=_ROLE_THRESHOLD_NAME,
         )
     else:
         return None
@@ -262,32 +362,12 @@ def _read_transcript_records(transcript_path: Any) -> list[dict[str, Any]] | Non
         return None
 
 
-def _list_transcript_notices(transcript: list[dict[str, Any]], threshold_name: str) -> list[str]:
-    size = _read_context_size(transcript)
-    notices = [_make_size_notice(size, threshold_name)] if size is not None else []
-
-    return notices + _list_skill_notices(transcript)
-
-
 def _parse_record(line: bytes) -> dict[str, Any] | None:
     try:
         record = json.loads(line)
 
         return record if isinstance(record, dict) else None
     except (ValueError, RecursionError):
-        return None
-
-
-def _read_context_size(transcript: list[dict[str, Any]]) -> int | None:
-    """The last request's input tokens, the whole context the model read.
-
-    Records with no input tokens, such as messages the tool writes itself, are not requests and are skipped.
-    """
-    totals = [total for total in map(_sum_input_tokens, transcript) if total]
-
-    if totals:
-        return totals[-1]
-    else:
         return None
 
 
@@ -301,17 +381,185 @@ def _sum_input_tokens(record: dict[str, Any]) -> int | None:
         return None
 
 
-def _make_size_notice(size: int, threshold_name: str) -> str:
-    is_past = size * _PERCENT_SCALE > _CONTEXT_WINDOW * _REPLACEMENT_PERCENT
-
+def _make_size_notice(size: int, point: int, subject: str) -> str:
     return _SIZE_NOTICE.format(
+        subject=subject,
         size=round(size / _THOUSAND),
-        window=f"{_CONTEXT_WINDOW // _THOUSAND:,}",
-        percent=round(size * _PERCENT_SCALE / _CONTEXT_WINDOW),
-        position=_PAST_POSITION if is_past else _BELOW_POSITION,
-        threshold=_REPLACEMENT_PERCENT,
-        threshold_name=threshold_name,
+        percent=round(size * _PERCENT_SCALE / point),
+        point=f"{point // _THOUSAND:,}",
+        position=_PAST_POSITION if _is_past_threshold(size, point) else _BELOW_POSITION,
+        threshold=_THRESHOLD_PERCENT,
     )
+
+
+def _read_context_tail(transcript_path: Any) -> _ContextReading | None:
+    """The last main-chain request after the last compaction boundary, read backward from the transcript's end.
+
+    The read doubles from 1 MB until it finds that request, a boundary, or the file's start, so a long transcript
+    is not read whole on every turn. None means there is no readable transcript.
+    """
+    try:
+        if isinstance(transcript_path, str) and transcript_path:
+            return _scan_transcript_tail(Path(transcript_path))
+        else:
+            return None
+    except OSError:
+        return None
+
+
+def _scan_transcript_tail(path: Path) -> _ContextReading:
+    file_size = path.stat().st_size
+    length = _TAIL_START_BYTES
+    reading = None
+
+    with path.open("rb") as transcript:
+        while reading is None:
+            start = max(file_size - length, 0)
+
+            transcript.seek(start)
+            lines = transcript.read().splitlines()
+            reading = _find_last_request(lines[1:] if start else lines, is_whole=start == 0)
+            length *= 2
+    return reading
+
+
+def _find_last_request(lines: list[bytes], is_whole: bool) -> _ContextReading | None:
+    """The reading from the last lines, or None when they hold neither a request nor a boundary and more lie before.
+
+    Lines are picked by a byte marker and judged by their parsed fields, since a message can quote either marker.
+    """
+    candidates = (line for line in reversed(lines) if _ASSISTANT_MARKER in line or _COMPACT_BOUNDARY_MARKER in line)
+    parsed = (record for record in map(_parse_record, candidates) if record is not None)
+    records = (record for record in parsed if not record.get(_SIDECHAIN_KEY))
+    found = next((record for record in records if _is_boundary(record) or _sum_input_tokens(record)), None)
+
+    if found is not None and not _is_boundary(found):
+        return _ContextReading(size=_sum_input_tokens(found), model=_read_model(found))
+    elif found is not None or is_whole:
+        return _ContextReading(size=None, model=None)
+    else:
+        return None
+
+
+def _is_boundary(record: dict[str, Any]) -> bool:
+    return record.get(_SUBTYPE_KEY) == _COMPACT_BOUNDARY
+
+
+def _read_model(record: dict[str, Any]) -> str | None:
+    message = _get_assistant_message(record)
+    model = message.get(_MODEL_KEY) if message is not None else None
+
+    return model if isinstance(model, str) else None
+
+
+def _read_compaction_point(folder: Path, model: str | None) -> int | None:
+    """The token count at which the session's settings compact it, or None when they turn compaction off."""
+    settings = _read_settings_files(folder)
+
+    if _is_compaction_off(settings):
+        return None
+    else:
+        window = _read_window_variable() or _find_settings_window(settings, model) or _DEFAULT_COMPACTION_POINT
+        point = min(max(window, _MINIMUM_COMPACTION_POINT), _CONTEXT_WINDOW)
+
+        return _apply_percent_override(point)
+
+
+def _read_settings_files(folder: Path) -> list[dict[str, Any]]:
+    """The settings files from the highest scope down: managed, project-local, project, then user."""
+    root = _find_settings_root(folder)
+    project_files = [root / _PROJECT_SETTINGS_FOLDER / name for name in _PROJECT_SETTINGS_FILES]
+    paths = [_MANAGED_SETTINGS, *project_files, _get_config_directory() / _SETTINGS_FILE]
+
+    return [_read_json_object(path) for path in paths]
+
+
+def _find_settings_root(folder: Path) -> Path:
+    """The folder whose `.claude` settings apply: the original checkout's root for a worktree, as the app reads it."""
+    root = find_repository_root(folder)
+    original = read_original_checkout(root) if root is not None else None
+
+    return original or root or folder
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(path.read_text(encoding=_ENCODING))
+
+        return value if isinstance(value, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _is_compaction_off(settings: list[dict[str, Any]]) -> bool:
+    if os.environ.get(_DISABLE_VARIABLE, "").strip().lower() in _TRUE_VALUES:
+        return True
+    else:
+        switches = [value[_ENABLED_KEY] for value in settings if isinstance(value.get(_ENABLED_KEY), bool)]
+
+        return bool(switches) and switches[0] is False
+
+
+def _read_window_variable() -> int | None:
+    """The variable's token count: a bare number is literal tokens, a k or M suffix multiplies; unusable is skipped."""
+    text = os.environ.get(_WINDOW_VARIABLE, "").strip().lower()
+    multiplier = _TOKEN_SUFFIXES.get(text[-1:], 1)
+    number = text[:-1] if multiplier != 1 else text
+
+    try:
+        tokens = int(float(number) * multiplier)
+
+        return tokens if tokens > 0 else None
+    except (ValueError, OverflowError):
+        return None
+
+
+def _find_settings_window(settings: list[dict[str, Any]], model: str | None) -> int | None:
+    """The first window the settings files set, each file's value for the model before its top-level value."""
+    windows = (_read_model_window(value, model) or _read_token_count(value.get(_WINDOW_KEY)) for value in settings)
+
+    return next((window for window in windows if window is not None), None)
+
+
+def _read_model_window(settings: dict[str, Any], model: str | None) -> int | None:
+    """A file's `modelSettings` window for the model, matched on the transcript's model id with or without `[1m]`.
+
+    "auto" gives the tuned default, which also outranks the file's top-level value; a key written as an alias such
+    as `opus` does not match, so the top-level value then applies.
+    """
+    model_settings = settings.get(_MODEL_SETTINGS_KEY)
+
+    if model is None or not isinstance(model_settings, dict):
+        return None
+    else:
+        entries = [entry for key, entry in model_settings.items() if _is_same_model(key, model)]
+        windows = [entry.get(_WINDOW_KEY) for entry in entries if isinstance(entry, dict)]
+
+        if _AUTO_VALUE in windows:
+            return _DEFAULT_COMPACTION_POINT
+        else:
+            return next((count for count in map(_read_token_count, windows) if count is not None), None)
+
+
+def _is_same_model(key: Any, model: str) -> bool:
+    return isinstance(key, str) and key.removesuffix(_LONG_CONTEXT_SUFFIX) == model.removesuffix(_LONG_CONTEXT_SUFFIX)
+
+
+def _read_token_count(value: Any) -> int | None:
+    """A settings window, which the settings reference gives as a number of tokens; anything else is skipped."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    else:
+        return None
+
+
+def _apply_percent_override(point: int) -> int:
+    text = os.environ.get(_PERCENT_OVERRIDE_VARIABLE, "").strip()
+
+    if text.isdecimal() and text.isascii() and 1 <= int(text) <= _PERCENT_SCALE:
+        return point * int(text) // _PERCENT_SCALE
+    else:
+        return point
 
 
 def _list_skill_notices(transcript: list[dict[str, Any]]) -> list[str]:

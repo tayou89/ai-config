@@ -33,7 +33,7 @@ SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 NOTICE_TAG = "[MAIN SESSION]"
 TOOL_NOTICE_TEXT = "file changes and long commands go to a session of their own"
 NOT_LOADED_TEXT = f"has not loaded the {LEAD_SKILL} skill"
-SIZE_TEXT = "conversation part"
+SIZE_TEXT = "Its context is about"
 MAIN_SESSION = "local_main"
 CHILD_SESSION = "local_child"
 GRANDCHILD_SESSION = "local_grandchild"
@@ -59,6 +59,19 @@ SKILL_LOADED_AT = "2026-11-11T09:28:44.763Z"
 SKILL_LOADED_EPOCH = 1_794_389_324.763
 USER_PROMPT_SUBMIT = "UserPromptSubmit"
 PRE_TOOL_USE = "PreToolUse"
+SESSION_START = "SessionStart"
+OTHER_SIZE_TEXT = "This session's context is about"
+COMPACTED_TEXT = "This session was just compacted"
+MODEL = "claude-opus-5-5"
+WINDOW_KEY = "autoCompactWindow"
+WINDOW_VARIABLE = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+PERCENT_OVERRIDE_VARIABLE = "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE"
+DISABLE_VARIABLE = "DISABLE_AUTO_COMPACT"
+COMPACTION_VARIABLES = (WINDOW_VARIABLE, PERCENT_OVERRIDE_VARIABLE, DISABLE_VARIABLE)
+TRIAL_WINDOW = 350_000
+TRIAL_THRESHOLD = 297_500
+PAST_TEXT = "past the 85% context threshold"
+BELOW_TEXT = "below the 85% context threshold"
 WRITING_TOOLS = ("Edit", "Write", "NotebookEdit", "Monitor", "mcp__terminal__run_in_terminal")
 
 
@@ -69,7 +82,13 @@ def make_usage_record(total: int, sidechain: bool = False) -> dict[str, Any]:
         "cache_read_input_tokens": max(total - 10, 0),
     }
 
-    return {"type": "assistant", "isSidechain": sidechain, "message": {"role": "assistant", "usage": usage}}
+    message = {"role": "assistant", "model": MODEL, "usage": usage}
+
+    return {"type": "assistant", "isSidechain": sidechain, "message": message}
+
+
+def make_compaction_record() -> dict[str, Any]:
+    return {"type": "system", "subtype": "compact_boundary", "isSidechain": False}
 
 
 def make_skill_load_record(stamp: str, sidechain: bool = False) -> dict[str, Any]:
@@ -105,28 +124,255 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertTrue(context.startswith(NOTICE_TAG))
         self.assertIn("started 1 other session and", context)
-        self.assertIn("about 210k of the 1,000k window (21%), below the 80% replacement threshold", context)
+        self.assertIn(
+            "about 210k, 22% of the 967k automatic compaction point its settings give, below the 85% context threshold",
+            context,
+        )
 
     def test_size_past_the_threshold_says_so(self) -> None:
         self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
         self._write_transcript(
             make_usage_record(FIRST_REQUEST_TOKENS),
-            make_usage_record(812_345),
+            make_usage_record(310_000),
         )
 
-        self.assertIn("about 812k of the 1,000k window (81%), past the 80% replacement threshold", self._read_turn_context())
+        self.assertIn("about 310k, 89% of the 350k automatic compaction point", self._read_turn_context())
+        self.assertIn(PAST_TEXT, self._read_turn_context())
 
     def test_size_at_the_threshold_is_not_yet_past(self) -> None:
         self._write_main_with_child()
-        self._write_transcript(make_usage_record(800_000))
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD))
 
-        self.assertIn("(80%), below the 80% replacement threshold", self._read_turn_context())
+        self.assertIn(BELOW_TEXT, self._read_turn_context())
 
     def test_size_just_over_the_threshold_is_past(self) -> None:
         self._write_main_with_child()
-        self._write_transcript(make_usage_record(800_001))
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD + 1))
 
-        self.assertIn("(80%), past the 80% replacement threshold", self._read_turn_context())
+        self.assertIn(PAST_TEXT, self._read_turn_context())
+
+    def test_window_variable_outranks_the_settings_files(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD + 1))
+        context = self._read_context(
+            MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment={WINDOW_VARIABLE: "500k"}
+        )
+
+        self.assertIn("of the 500k automatic compaction point", context)
+
+    def test_window_variable_is_a_literal_token_count_raised_to_the_minimum(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(90_000))
+        context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment={WINDOW_VARIABLE: "350"})
+
+        self.assertIn("of the 100k automatic compaction point", context)
+
+    def test_unusable_window_variable_falls_back_to_the_settings(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment={WINDOW_VARIABLE: "soon"})
+
+        self.assertIn("of the 350k automatic compaction point", context)
+
+    def test_project_settings_outrank_user_settings_and_local_outranks_project(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_settings(self._project / ".claude", {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 400k automatic compaction point", self._read_turn_context())
+        self._write_settings(self._project / ".claude", {WINDOW_KEY: 450_000}, name="settings.local.json")
+        self.assertIn("of the 450k automatic compaction point", self._read_turn_context())
+
+    def test_model_value_outranks_the_top_level_value_in_the_same_file(self) -> None:
+        self._write_main_with_child()
+        model_settings = {MODEL: {WINDOW_KEY: 300_000}}
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW, "modelSettings": model_settings})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 300k automatic compaction point", self._read_turn_context())
+
+    def test_model_value_matches_its_long_context_spelling(self) -> None:
+        self._write_main_with_child()
+        model_settings = {f"{MODEL}[1m]": {WINDOW_KEY: 300_000}}
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW, "modelSettings": model_settings})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 300k automatic compaction point", self._read_turn_context())
+
+    def test_model_value_auto_gives_the_tuned_default_over_the_top_level_value(self) -> None:
+        self._write_main_with_child()
+        model_settings = {MODEL: {WINDOW_KEY: "auto"}}
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW, "modelSettings": model_settings})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 967k automatic compaction point", self._read_turn_context())
+
+    def test_higher_file_top_level_value_outranks_a_lower_file_model_value(self) -> None:
+        self._write_main_with_child()
+        model_settings = {MODEL: {WINDOW_KEY: 300_000}}
+        self._write_settings(self._claude_home, {"modelSettings": model_settings})
+        self._write_settings(self._project / ".claude", {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 400k automatic compaction point", self._read_turn_context())
+
+    def test_values_that_are_not_token_counts_are_skipped(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._project / ".claude", {WINDOW_KEY: "350k"})
+        self._write_settings(self._claude_home, {WINDOW_KEY: True})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+
+        self.assertIn("of the 967k automatic compaction point", self._read_turn_context())
+
+    def test_window_is_kept_between_the_minimum_and_the_context_window(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        cases = [(50_000, "100k"), (2_000_000, "1,000k")]
+
+        for window, shown in cases:
+            with self.subTest(window=window):
+                self._write_settings(self._claude_home, {WINDOW_KEY: window})
+
+                self.assertIn(f"of the {shown} automatic compaction point", self._read_turn_context())
+
+    def test_percent_override_lowers_the_point(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        context = self._read_context(
+            MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment={PERCENT_OVERRIDE_VARIABLE: "50"}
+        )
+
+        self.assertIn("of the 200k automatic compaction point", context)
+
+    def test_unusable_variable_values_are_skipped(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        cases = [{WINDOW_VARIABLE: "1e999"}, {WINDOW_VARIABLE: "inf"}, {PERCENT_OVERRIDE_VARIABLE: "²"}]
+
+        for environment in cases:
+            with self.subTest(environment=environment):
+                context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment=environment)
+
+                self.assertIn("of the 967k automatic compaction point", context)
+
+    def test_lowered_point_below_the_minimum_still_warns_other_sessions(self) -> None:
+        self._write_settings(self._claude_home, {WINDOW_KEY: 100_000})
+        self._write_transcript(make_usage_record(60_000))
+        context = self._read_context(None, USER_PROMPT_SUBMIT, extra_environment={PERCENT_OVERRIDE_VARIABLE: "50"})
+
+        self.assertTrue(context.startswith(OTHER_SIZE_TEXT))
+        self.assertIn("of the 50k automatic compaction point", context)
+
+    def test_compaction_turned_off_is_said_instead_of_a_threshold(self) -> None:
+        self._write_main_with_child()
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        cases: list[tuple[dict[str, Any], dict[str, str]]] = [
+            ({"autoCompactEnabled": False}, {}),
+            ({}, {DISABLE_VARIABLE: "1"}),
+        ]
+
+        for settings, environment in cases:
+            with self.subTest(settings=settings, environment=environment):
+                self._write_settings(self._claude_home, settings)
+                context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, extra_environment=environment)
+
+                self.assertIn("about 90k, and its settings turn automatic compaction off", context)
+
+    def test_worktree_reads_the_original_checkout_settings(self) -> None:
+        original = self._root / "original"
+        worktree = self._root / "worktree"
+        identity = ["-c", "user.name=test", "-c", "user.email=test@example.com"]
+        subprocess.run(["git", "init", "-q", str(original)], check=True)
+        subprocess.run(
+            ["git", "-C", str(original), *identity, "commit", "-q", "--allow-empty", "-m", "start"],
+            check=True,
+        )
+        subprocess.run(["git", "-C", str(original), "worktree", "add", "-q", str(worktree)], check=True)
+        self._write_main_with_child()
+        self._write_settings(original / ".claude", {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, cwd=str(worktree))
+
+        self.assertIn("of the 400k automatic compaction point", context)
+
+    def test_size_after_the_last_compaction_counts_and_none_before_a_request(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(340_000), make_compaction_record())
+
+        self.assertNotIn(SIZE_TEXT, self._read_turn_context())
+        self._write_transcript(
+            make_usage_record(340_000),
+            make_compaction_record(),
+            make_usage_record(120_000),
+            make_usage_record(330_000),
+            make_compaction_record(),
+            make_usage_record(115_000),
+        )
+        self.assertIn("about 115k, 33% of the 350k", self._read_turn_context())
+
+    def test_quoted_boundary_text_in_a_message_is_not_a_compaction(self) -> None:
+        self._write_main_with_child()
+        quoted = {"type": "user", "message": {"content": 'grep shows "subtype":"compact_boundary"'}}
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS), quoted)
+
+        self.assertIn("about 90k,", self._read_turn_context())
+
+    def test_size_is_found_before_a_long_tail(self) -> None:
+        self._write_main_with_child()
+        filler = {"type": "user", "message": {"content": "x" * 1_500_000}}
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS), filler)
+
+        self.assertIn("about 90k,", self._read_turn_context())
+
+    def test_session_outside_the_app_past_the_threshold_gets_the_context_sentence(self) -> None:
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD + 1))
+        context = self._read_context(None, USER_PROMPT_SUBMIT)
+
+        self.assertTrue(context.startswith(f"{OTHER_SIZE_TEXT} 298k"))
+        self.assertIn(PAST_TEXT, context)
+
+    def test_task_session_past_the_threshold_gets_the_context_sentence(self) -> None:
+        self._write_main_with_child()
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD + 1))
+
+        self.assertTrue(self._read_context(CHILD_SESSION, USER_PROMPT_SUBMIT).startswith(OTHER_SIZE_TEXT))
+
+    def test_session_outside_the_app_below_the_threshold_gets_nothing(self) -> None:
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD))
+
+        self.assertEqual(self._run_hook(None, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
+
+    def test_subagent_past_the_threshold_gets_nothing(self) -> None:
+        self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
+        self._write_transcript(make_usage_record(TRIAL_THRESHOLD + 1))
+
+        self.assertEqual(self._run_hook(None, {EVENT_KEY: USER_PROMPT_SUBMIT, "agent_id": "agent"}), "")
+
+    def test_lead_session_is_told_after_a_compaction(self) -> None:
+        self._write_main_with_child()
+        context = self._read_context(MAIN_SESSION, SESSION_START, source="compact")
+
+        self.assertTrue(context.startswith(NOTICE_TAG))
+        self.assertIn(COMPACTED_TEXT, context)
+
+    def test_other_session_starts_get_nothing(self) -> None:
+        self._write_main_with_child()
+        cases = [(MAIN_SESSION, "startup"), (CHILD_SESSION, "compact"), (None, "compact")]
+
+        for session_id, source in cases:
+            with self.subTest(session_id=session_id, source=source):
+                self.assertEqual(self._run_hook(session_id, {EVENT_KEY: SESSION_START, "source": source}), "")
 
     def test_sidechain_requests_do_not_count(self) -> None:
         self._write_main_with_child()
@@ -136,7 +382,7 @@ class MainSessionHookTest(unittest.TestCase):
             make_usage_record(900_000, sidechain=True),
         )
 
-        self.assertIn("about 140k of the", self._read_turn_context())
+        self.assertIn("about 140k,", self._read_turn_context())
 
     def test_records_without_input_tokens_do_not_count(self) -> None:
         self._write_main_with_child()
@@ -146,7 +392,7 @@ class MainSessionHookTest(unittest.TestCase):
             make_usage_record(FIRST_REQUEST_TOKENS + 30_000),
         )
 
-        self.assertIn("about 120k of the", self._read_turn_context())
+        self.assertIn("about 120k,", self._read_turn_context())
 
     def test_counts_every_session_it_started_including_archived(self) -> None:
         self._write_record(MAIN_SESSION)
@@ -195,7 +441,7 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertTrue(context.startswith(ROLE_NOTICE_TAG))
         self.assertIn("belong to a task session under it, other sessions' requests included", context)
-        self.assertIn("(81%), past the 80% context threshold", context)
+        self.assertIn("about 812k, 84% of the 967k automatic compaction point its settings give, below", context)
         self.assertIn(SKILL_CHANGED_TEXT, context)
 
     def test_role_session_under_a_master_gets_the_tool_notice(self) -> None:
@@ -288,6 +534,7 @@ class MainSessionHookTest(unittest.TestCase):
 
     def test_session_outside_the_app_gets_nothing(self) -> None:
         self._write_main_with_child()
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
 
         self.assertEqual(self._run_hook(None, {EVENT_KEY: USER_PROMPT_SUBMIT}), "")
 
@@ -341,7 +588,7 @@ class MainSessionHookTest(unittest.TestCase):
         with self._transcript.open("a", encoding=ENCODING) as stream:
             stream.write('{"type":"assistant", broken\n')
 
-        self.assertIn("about 130k of the", self._read_turn_context())
+        self.assertIn("about 130k,", self._read_turn_context())
 
     def test_file_changes_and_long_commands_in_a_main_session_get_the_tool_notice(self) -> None:
         self._write_main_with_child()
@@ -432,6 +679,10 @@ class MainSessionHookTest(unittest.TestCase):
     def _write_rules(self, name: str, text: str) -> None:
         (self._project / name).write_text(text, encoding=ENCODING)
 
+    def _write_settings(self, folder: Path, settings: dict[str, Any], name: str = "settings.json") -> None:
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_text(json.dumps(settings), encoding=ENCODING)
+
     def _write_transcript(self, *records: dict[str, Any]) -> None:
         lines = [json.dumps(record, separators=(",", ":")) for record in records]
 
@@ -447,8 +698,14 @@ class MainSessionHookTest(unittest.TestCase):
     def _read_turn_context(self) -> str:
         return self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT)
 
-    def _read_context(self, session_id: str, event: str, **fields: Any) -> str:
-        output = self._run_hook(session_id, {EVENT_KEY: event, **fields})
+    def _read_context(
+        self,
+        session_id: str | None,
+        event: str,
+        extra_environment: dict[str, str] | None = None,
+        **fields: Any,
+    ) -> str:
+        output = self._run_hook(session_id, {EVENT_KEY: event, **fields}, extra_environment)
         hook_output = json.loads(output)["hookSpecificOutput"]
 
         self.assertEqual(hook_output["hookEventName"], event)
@@ -472,7 +729,7 @@ class MainSessionHookTest(unittest.TestCase):
         stdin_text: str,
         extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        removed = (HOST_SESSION_VARIABLE, SWITCH_VARIABLE)
+        removed = (HOST_SESSION_VARIABLE, SWITCH_VARIABLE, *COMPACTION_VARIABLES)
         environment = {key: value for key, value in os.environ.items() if key not in removed}
 
         environment.update({"HOME": str(self._home), "CLAUDE_CONFIG_DIR": str(self._claude_home)})

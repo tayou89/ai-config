@@ -54,6 +54,7 @@
     ]
   },
   "model": "opus[1m]",
+  "autoCompactWindow": 350000,
   "cleanupPeriodDays": 90,
   "desktopSessionCleanupPeriodDays": 90,
   "attribution": {
@@ -93,6 +94,11 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/reply-language-hook.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/main-session-hook.py\"",
             "timeout": 10
           }
         ]
@@ -362,6 +368,11 @@
           {
             "type": "command",
             "command": "python3 \"$HOME/.claude/scripts/skill-gate-hook.py\"",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "cat \"$HOME/.claude/scripts/compaction-instructions.txt\"",
             "timeout": 10
           }
         ]

@@ -109,6 +109,7 @@ RUNTIME_SCRIPTS = (
     "claude-commit.py",
     "config-sync-hook.py",
     "main-session-hook.py",
+    "compaction-instructions.txt",
     "session_lineage.py",
     "session_states.py",
     "project_rules.py",
