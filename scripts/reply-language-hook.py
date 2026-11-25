@@ -28,6 +28,8 @@ import re
 import sys
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from hook_failure import FailurePolicy, run_hook
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
@@ -45,6 +47,7 @@ class _Field(NamedTuple):
     text: str
 
 
+FAILURE_POLICY = FailurePolicy.notice("reply-language-hook")
 _LANGUAGE_VARIABLE = "REPLY_LANGUAGE"
 _LANGUAGES = {
     "ko": _Language(
@@ -139,16 +142,14 @@ _FIELD_READERS: dict[str, Callable[[dict[str, Any]], Iterator[_Field]]] = {
 }
 
 
-def main() -> None:
-    try:
-        hook_input = json.load(sys.stdin)
-        language = _LANGUAGES.get(os.environ.get(_LANGUAGE_VARIABLE, ""))
-        output = _make_output(hook_input, language) if language else None
+def main() -> int:
+    return run_hook(_make_language_output, FAILURE_POLICY)
 
-        if output:
-            print(json.dumps(output))
-    except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
-        print(f"reply-language-hook: {error}", file=sys.stderr)
+
+def _make_language_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    language = _LANGUAGES.get(os.environ.get(_LANGUAGE_VARIABLE, ""))
+
+    return _make_output(hook_input, language) if language else None
 
 
 def _make_output(hook_input: dict[str, Any], language: _Language) -> dict[str, Any] | None:
@@ -277,19 +278,28 @@ def _write_state(state_path: str, uuid: str) -> None:
 
 
 def _read_transcript_tail(transcript_path: str) -> list[dict[str, Any]]:
-    with open(transcript_path, "rb") as transcript:
-        size = transcript.seek(0, os.SEEK_END)
-
-        transcript.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
-        lines = transcript.read().decode(_ENCODING, errors="replace").split("\n")
     entries = []
 
-    for line in lines[1:] if size > _TRANSCRIPT_TAIL_BYTES else lines:
+    for line in _read_tail_lines(transcript_path):
         entry = _parse_entry(line) if _ASSISTANT_MARKER in line else None
 
         if entry:
             entries.append(entry)
     return entries
+
+
+def _read_tail_lines(transcript_path: str) -> list[str]:
+    """The transcript's last lines; one Claude Code has not written, as in a run that keeps no session, has none."""
+    try:
+        with open(transcript_path, "rb") as transcript:
+            size = transcript.seek(0, os.SEEK_END)
+
+            transcript.seek(max(0, size - _TRANSCRIPT_TAIL_BYTES))
+            lines = transcript.read().decode(_ENCODING, errors="replace").split("\n")
+
+        return lines[1:] if size > _TRANSCRIPT_TAIL_BYTES else lines
+    except FileNotFoundError:
+        return []
 
 
 def _parse_entry(line: str) -> dict[str, Any] | None:
@@ -354,4 +364,4 @@ def _is_foreign(text: str, language: _Language, minimum_latin: int) -> bool:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

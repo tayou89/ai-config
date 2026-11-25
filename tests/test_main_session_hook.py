@@ -363,7 +363,6 @@ class MainSessionHookTest(unittest.TestCase):
         tool_inputs: list[Any] = [
             {"command": "git status"},
             {"command": "git status", "run_in_background": False},
-            ["not", "a", "dict"],
         ]
 
         for tool_input in tool_inputs:
@@ -397,11 +396,11 @@ class MainSessionHookTest(unittest.TestCase):
 
                 self.assertEqual(output, "")
 
-    def test_empty_input_exits_cleanly(self) -> None:
+    def test_empty_input_shows_a_hook_error_and_lets_the_call_through(self) -> None:
         result = self._run_process(MAIN_SESSION, "")
 
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout, "")
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("main-session-hook:", result.stderr)
 
     def _write_main_with_child(self) -> None:
         self._write_record(MAIN_SESSION)

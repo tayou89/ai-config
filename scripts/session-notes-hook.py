@@ -12,11 +12,13 @@ safety net for those older folders, not a guarantee for every way a session
 closes: a session closed from the sidebar after an interrupted turn skips it.
 
 - Stop: at the end of every turn it copies and never blocks, since blocking a
-  turn's end would keep the session from stopping.
+  turn's end would keep the session from stopping; a file it could not copy,
+  or any other error, exits 1 so the turn ends with a hook error notice.
 - PreToolUse on the tools that archive, delete, or move a session to the
   cloud: it always copies first and denies the call when any file could not
-  be copied or anything else went wrong; the settings also block the call
-  when the hook itself fails or times out (`onFailure`).
+  be copied or anything else went wrong (`hook_failure.py`); the settings
+  also block the call when the hook itself fails, times out, or gets input
+  it cannot read (`onFailure`).
 - `--now`: run by hand, it copies once and prints one line, exiting 1 when a
   file could not be copied; sessions started before this hook use it before
   they close another session.
@@ -43,6 +45,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, TextIO
 
+from hook_failure import Decision, FailurePolicy, make_decision, run_hook
 from report_check import APP_NOTES_PATH, PROJECT_NOTES_PATH
 
 _HOOK_NAME = "session-notes-hook"
@@ -63,6 +66,8 @@ _EVENT_KEY = "hook_event_name"
 _TOOL_KEY = "tool_name"
 _PRE_TOOL_USE = "PreToolUse"
 _ENCODING = "utf-8"
+_DENY_REASON = f"Closing, deleting, or moving a session can make the desktop app delete its notes folder, and the copy to {_COPY_PATH_SHOWN} failed first: {{error}}. Fix the copy and try again, or ask the user to close the session from the sidebar knowing those files may be lost."
+FAILURE_POLICY = FailurePolicy.blocking(_HOOK_NAME, Decision.DENY, _DENY_REASON)
 # The PreToolUse matcher in settings.json names the same tools; a test keeps the two equal.
 CLOSING_TOOLS = frozenset(
     {
@@ -73,7 +78,6 @@ CLOSING_TOOLS = frozenset(
 )
 _FAILURE_EXAMPLE_LIMIT = 3
 _EXIT_FAILED = 1
-_DENY_REASON = "Closing, deleting, or moving a session can make the desktop app delete its notes folder, and the copy to {target} failed first: {details}. Fix the copy and try again, or ask the user to close the session from the sidebar knowing those files may be lost."
 _LOCK_TIMEOUT = "another copy held the lock for {seconds:.0f} seconds"
 _NOW_DONE = "Copied the app's session notes from {source} to {target}."
 _NOW_FAILED = "Copying the app's session notes from {source} to {target} failed: {details}."
@@ -90,41 +94,31 @@ class _LockTimeoutError(Exception):
     pass
 
 
+class _CopyFailedError(Exception):
+    pass
+
+
 def main() -> int:
     if sys.argv[1:] == [_NOW_FLAG]:
         return _copy_now()
     else:
-        return _run_hook(_read_hook_input())
+        return run_hook(_make_output, FAILURE_POLICY)
 
 
-def _read_hook_input() -> dict[str, Any]:
-    try:
-        text = sys.stdin.read()
-        hook_input = json.loads(text) if text.strip() else {}
-
-        return hook_input if isinstance(hook_input, dict) else {}
-    except (OSError, ValueError, RecursionError):
-        return {}
-
-
-def _run_hook(hook_input: dict[str, Any]) -> int:
+def _make_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
+    """Copy, then refuse a closing call when a file was not copied; at a turn's end a failed file is an error to show."""
     is_closing = _is_closing_call(hook_input)
+    wait_seconds = _CLOSING_LOCK_WAIT_SECONDS if is_closing else _TURN_END_LOCK_WAIT_SECONDS
 
-    try:
-        wait_seconds = _CLOSING_LOCK_WAIT_SECONDS if is_closing else _TURN_END_LOCK_WAIT_SECONDS
+    _make_notes_folder()
+    result = _copy_app_notes(wait_seconds)
 
-        _make_notes_folder()
-        result = _copy_app_notes(wait_seconds)
-
-        if is_closing and result.failures:
-            print(json.dumps(_make_denial(_describe_failures(result.failures))))
-    except Exception as error:
-        # Closing could delete what was not copied, so any error there denies; elsewhere a copy is best effort.
-        if is_closing:
-            print(json.dumps(_make_denial(f"{type(error).__name__}: {error}")))
-        else:
-            print(f"{_HOOK_NAME}: {type(error).__name__}: {error}", file=sys.stderr)
-    return 0
+    if is_closing and result.failures:
+        return _make_denial(_describe_failures(result.failures))
+    elif result.failures:
+        raise _CopyFailedError(_describe_failures(result.failures))
+    else:
+        return None
 
 
 def _copy_now() -> int:
@@ -263,13 +257,7 @@ def _write_status(status_path: Path, result: _CopyResult) -> None:
 
 
 def _make_denial(details: str) -> dict[str, Any]:
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": _PRE_TOOL_USE,
-            "permissionDecision": "deny",
-            "permissionDecisionReason": _DENY_REASON.format(target=_COPY_PATH_SHOWN, details=details),
-        },
-    }
+    return make_decision(Decision.DENY, [_DENY_REASON.format(error=details)])
 
 
 def _describe_failures(failures: tuple[str, ...]) -> str:

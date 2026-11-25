@@ -16,11 +16,13 @@ session names.
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
+
+FAILURE_POLICY = FailurePolicy.notice("plain-words-hook")
 _PRE_TOOL_USE = "PreToolUse"
 _WRAP_UP_TOOL = "mcp__ccd_turn__wrap_up"
 _QUESTION_TOOL = "AskUserQuestion"
@@ -54,14 +56,8 @@ _IGNORED_SPANS = (
 _DECISION_NOTICE = f"{_NOTICE_PREFIX} The closing message comes next and asks the user to decide. Describe each choice by what it does, in words the user has used or everyday ones: a developer word (main, branch, pull request, hook), a label from a brief or another session's message, and a name coined earlier in this conversation, Korean renamings included, each need a plain sentence in its place ({_RULE_NAME})."
 
 
-def main() -> None:
-    try:
-        output = _make_output(json.load(sys.stdin))
-
-        if output:
-            print(json.dumps(output, ensure_ascii=False))
-    except (OSError, ValueError, TypeError, AttributeError) as error:
-        print(f"plain-words-hook: {error}", file=sys.stderr)
+def main() -> int:
+    return run_hook(_make_output, FAILURE_POLICY)
 
 
 def _make_output(hook_input: dict[str, Any]) -> dict[str, Any] | None:
@@ -133,4 +129,4 @@ def _to_text(value: object) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

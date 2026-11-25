@@ -419,6 +419,23 @@ class ScriptModeTest(unittest.TestCase):
         self.assertEqual(not_executable, [])
 
 
+class CopyIntoPlaceTest(unittest.TestCase):
+    def test_the_copy_replaces_the_file_whole_and_leaves_no_partial_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            source = folder / "source.py"
+            destination = folder / "installed" / "hook.py"
+
+            source.write_text("new\n", encoding="utf-8")
+            source.chmod(0o755)
+            destination.parent.mkdir()
+            destination.write_text("old\n", encoding="utf-8")
+            install.copy_into_place(source, destination)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "new\n")
+            self.assertTrue(os.access(destination, os.X_OK))
+            self.assertEqual([path.name for path in destination.parent.iterdir()], ["hook.py"])
+
+
 class InstallerTest(unittest.TestCase):
     def setUp(self):
         self._directory = tempfile.TemporaryDirectory()
@@ -705,6 +722,10 @@ class ParseOptionsTest(unittest.TestCase):
         self._assert_refused(["--check", "--from-upstream"])
         self._assert_refused(["--check", "--checkout", str(REPOSITORY_ROOT)])
 
+    def test_revision_needs_from_upstream(self):
+        self._assert_refused(["--revision", "origin/main~1"])
+        self.assertEqual(install.parse_options(["--from-upstream", "--revision", "abc"]).revision, "abc")
+
     def _assert_refused(self, arguments: list[str]) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             install.parse_options(arguments)
@@ -793,6 +814,37 @@ class FromUpstreamTest(unittest.TestCase):
         write_checkout_record(self._platform.claude_home, recorded)
         self._install_from_upstream(self._make_checkout_behind_its_upstream())
         self.assertEqual(self._executed[0][3:5], ["--checkout", str(recorded)])
+
+    def test_a_revision_the_default_branch_holds_is_installed_and_not_passed_on(self):
+        checkout = self._make_checkout_behind_its_upstream()
+        self._options = install.Options(
+            apply=True,
+            prune=False,
+            allow_dirty=False,
+            first_merge="",
+            from_upstream=True,
+            revision="origin/main~1",
+        )
+        code = self._install_from_upstream(checkout)
+
+        self.assertEqual(code, 7)
+        self.assertEqual(self._copy_contents, ["first\n"])
+        self.assertEqual(self._executed[0][3:], ["--checkout", str(checkout), "--apply"])
+
+    def test_a_revision_the_default_branch_does_not_hold_is_refused(self):
+        checkout = self._make_checkout_behind_its_upstream()
+        self._options = install.Options(
+            apply=True,
+            prune=False,
+            allow_dirty=False,
+            first_merge="",
+            from_upstream=True,
+            revision="HEAD",
+        )
+
+        with self.assertRaises(install.InstallError):
+            self._install_from_upstream(checkout)
+        self.assertEqual(self._executed, [])
 
     def test_a_failed_fetch_installs_the_upstream_as_fetched_last(self):
         checkout = self._make_checkout_behind_its_upstream()

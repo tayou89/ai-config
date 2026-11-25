@@ -618,14 +618,10 @@ class SkillGateHookTest(unittest.TestCase):
             self._read_reason(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)),
         )
 
-    def test_unreadable_choice_record_lets_the_question_through(self) -> None:
+    def test_an_unreadable_choice_record_is_an_error_the_hook_shows(self) -> None:
         self._load_design_skills()
-        with (
-            mock.patch.object(skill_gate_hook, "read_choice_records", side_effect=OSError("broken")),
-            mock.patch("sys.stderr") as stderr,
-        ):
-            self.assertIsNone(self._decide(tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX))
-        self.assertIn("choice record unchecked", "".join(call.args[0] for call in stderr.write.call_args_list))
+        with mock.patch.object(skill_gate_hook, "read_choice_records", side_effect=OSError("broken")):
+            self.assertRaises(OSError, self._decide, tool_name=WRAP_UP_TOOL, tool_input=CHOICE_BOX)
 
     def test_gate_off_lets_an_unrecorded_choice_through(self) -> None:
         self._load_design_skills()
@@ -976,81 +972,17 @@ class SkillGateHookTest(unittest.TestCase):
         self.assertIsNone(self._decide())
         self.assertEqual(self._read_record()[-1]["skills"], [CODE_STYLE, PYTHON])
 
-    def test_hook_script_refuses_and_survives_bad_input(self) -> None:
+    def test_hook_script_refuses_and_shows_bad_input_as_a_hook_error(self) -> None:
         refused = self._run_script({**self._make_edit_input(), "agent_type": None})
         broken = self._run_script("not json")
-        missing_session = self._run_script({"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": None})
+        no_tool_input = self._run_script({"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": None})
+        missing_session = self._run_script({"hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {}})
 
         self.assertEqual(json.loads(refused.stdout)["hookSpecificOutput"]["permissionDecision"], DENY)
-        self.assertEqual((broken.returncode, broken.stdout), (0, ""))
+        self.assertEqual((broken.returncode, broken.stdout), (1, ""))
         self.assertIn("skill-gate-hook:", broken.stderr)
+        self.assertEqual((no_tool_input.returncode, no_tool_input.stdout), (1, ""))
         self.assertEqual((missing_session.returncode, missing_session.stdout), (0, ""))
-
-    def test_writes_that_move_folder_inside_the_command_are_judged_where_they_land(self) -> None:
-        folder = self._app_notes() / "local_1"
-        cases = (
-            (f"cd '{folder}' && echo text > r.md", str(self.directory.name), True),
-            ("cd /tmp && echo text > r.md", str(folder), False),
-        )
-
-        for command, cwd, is_refused in cases:
-            with self.subTest(command=command):
-                hook_input = {**self._make_edit_input(), "tool_name": "Bash", "tool_input": {"command": command}}
-
-                hook_input["cwd"] = cwd
-                output = skill_gate_hook.handle_event(hook_input, GATE_ON)
-                self.assertEqual("would be a new file" in self._read_reason(output) if output else False, is_refused)
-
-    def test_copies_of_the_app_notes_folder_elsewhere_are_not_refused(self) -> None:
-        copy = Path(self.directory.name) / "Documents" / "session-notes-backup" / "snapshot" / "side-session-notes"
-        restored = copy / "local_1" / "restored.json"
-
-        self.assertIsNone(self._decide(None, "Write", {"file_path": str(restored), "content": "{}"}))
-
-    def test_new_files_in_app_session_folders_are_refused_for_every_agent(self) -> None:
-        new_report = str(self._app_notes() / "local_1" / "new.md")
-
-        for agent in (None, GUIDE_AGENT, {"agent_id": "x1"}):
-            with self.subTest(agent=agent):
-                reason = self._read_reason(self._decide(agent, "Write", {"file_path": new_report, "content": "x"}))
-
-                self.assertIn("`new.md` would be a new file", reason)
-                self.assertIn("~/Documents/session-notes/<project>/", reason)
-        self.assertIsNone(self._decide(None, "Write", {"file_path": new_report}, gate_setting=GATE_OFF))
-
-    def test_files_already_in_app_session_folders_can_still_be_edited(self) -> None:
-        existing = self._app_notes() / "local_1" / "INDEX.md"
-
-        existing.parent.mkdir(parents=True)
-        existing.write_text("목록\n", encoding="utf-8")
-        self._load(REPORT_WRITING)
-        edit = {"file_path": str(existing), "old_string": "목록", "new_string": "목록 고침"}
-        self.assertIsNone(self._decide(None, "Edit", edit))
-        self.assertIsNone(self._decide(None, "Write", {"file_path": str(existing), "content": "새 목록"}))
-        self.assertIsNone(self._decide(None, "Bash", {"command": f"echo row >> '{existing}'"}))
-
-    def test_bulletin_and_folders_the_app_keeps_are_not_refused(self) -> None:
-        notes = self._app_notes()
-
-        for path in (notes / "bulletin.md", notes / ".obsidian" / "workspace.json"):
-            with self.subTest(path=path):
-                self.assertIsNone(self._decide(None, "Write", {"file_path": str(path), "content": "x"}))
-
-    def test_shell_writes_of_new_files_in_app_session_folders_are_refused(self) -> None:
-        folder = self._app_notes() / "local_1"
-        commands = (
-            (f"cat > '{folder}/r.md' <<'EOF'\ntext\nEOF", str(self.directory.name)),
-            ("echo text > r.md", str(folder)),
-            (f"echo text | tee '{folder}/log.txt'", str(self.directory.name)),
-        )
-
-        for command, cwd in commands:
-            with self.subTest(command=command):
-                hook_input = {**self._make_edit_input(), "tool_name": "Bash", "tool_input": {"command": command}}
-
-                hook_input["cwd"] = cwd
-                reason = self._read_reason(skill_gate_hook.handle_event(hook_input, GATE_ON))
-                self.assertIn("would be a new file", reason)
 
     def test_project_notes_folder_reports_need_report_writing(self) -> None:
         report = Path(self.directory.name) / "Documents" / "session-notes" / "ai-config" / "r.md"
@@ -1058,9 +990,6 @@ class SkillGateHookTest(unittest.TestCase):
 
         self.assertEqual(requirement.skills if requirement else None, (REPORT_WRITING,))
         self.assertIn("needs `report-writing`", self._read_reason(self._decide(None, "Write", {"file_path": str(report)})))
-
-    def _app_notes(self) -> Path:
-        return Path(self.directory.name) / "Library" / "Application Support" / "Claude" / "side-session-notes"
 
     def _decide(
         self,

@@ -3,7 +3,7 @@
 
 Usage:
     install.py [--apply | --check] [--prune] [--allow-dirty] [--first-merge {keep-local,use-repository}]
-               [--from-upstream] [--checkout PATH]
+               [--from-upstream [--revision COMMIT]] [--checkout PATH]
 
 Without --apply nothing is written: the script prints what it would change.
 With --apply it first copies every file it replaces into a backups folder,
@@ -15,7 +15,11 @@ into a temporary folder, runs the clone's own install.py with the same
 options, and removes the clone, so work here that is not merged and pushed
 stays out. It reads the remote's default branch, not this checkout's own
 upstream, so a run from a task branch or its worktree never installs work
-that is not merged (user decision, 2026-11-13).
+that is not merged (user decision, 2026-11-13). With --revision it installs
+that commit instead, only when the default branch holds it, such as the
+merge just before one that broke a hook; it installs that whole version.
+Each file is copied beside its place and renamed into it, so a hook that
+starts during the install reads a whole file, old or new.
 
 Files the repository owns (rules, skills, scripts, mods) are copied as they
 are, execute permission included; an installed copy whose content matches
@@ -137,6 +141,10 @@ RUNTIME_SCRIPTS = (
     "worktree-cleanup.py",
     "worktree-guard-hook.py",
     "folder_owner.py",
+    "hook_failure.py",
+    "notes-place-hook.py",
+    "plan-reminder-hook.py",
+    "tool_calls.py",
 )
 MAINTENANCE_SCRIPTS = (
     "install.py",
@@ -186,6 +194,8 @@ APPLY_FLAG = "--apply"
 PRUNE_FLAG = "--prune"
 FIRST_MERGE_FLAG = "--first-merge"
 CHECKOUT_FLAG = "--checkout"
+REVISION_FLAG = "--revision"
+PARTIAL_COPY_SUFFIX = ".partial"
 FETCH_HEAD_FILE = "FETCH_HEAD"
 FETCH_INTERVAL_SECONDS = 3600
 PER_COMPUTER_SETTINGS = ("enabledPlugins.discord@claude-plugins-official", "env.KNOWLEDGE_VAULT_DIR")
@@ -275,6 +285,7 @@ class Options:
     check: bool = False
     from_upstream: bool = False
     checkout: Path | None = None
+    revision: str = ""
 
 
 @dataclass(frozen=True)
@@ -692,6 +703,24 @@ def read_remote_head_branch(run: Runner, repository: str) -> str:
         return ""
 
 
+def read_merged_commit(run: Runner, repository: str, revision: str, name: str, tip: str) -> str:
+    """The commit `revision` names, accepted only when the default branch already holds it (user decision, 2026-11-13)."""
+    resolved = run(["git", "-C", repository, "rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"])
+    commit = resolved.stdout.strip()
+    is_merged = (
+        resolved.returncode == 0
+        and run(["git", "-C", repository, "merge-base", "--is-ancestor", commit, tip]).returncode == 0
+    )
+
+    if is_merged:
+        return commit
+    else:
+        raise InstallError(
+            EXIT_COMMAND_FAILED,
+            f"{revision} is not a commit {name} holds, so it is not installed: pick one from `git log --oneline {name}`.",
+        )
+
+
 def clone_commit(run: Runner, repository: str, commit: str, copy: Path) -> None:
     """Clone the checkout and check out one commit; a local clone holds every object, the fetched remote's too."""
     run_required(run, ["git", "clone", "--quiet", "--no-checkout", repository, str(copy)])
@@ -709,6 +738,28 @@ def make_copy_arguments(options: Options, checkout: Path) -> list[str]:
     if options.first_merge:
         arguments.extend([FIRST_MERGE_FLAG, options.first_merge])
     return arguments
+
+
+def copy_into_place(source: Path, destination: Path) -> None:
+    """Copy into a new file of its own beside the destination, then rename it into place, so a hook reads a whole file.
+
+    The temporary file is created exclusively, so a link left under a guessable name cannot redirect the copy.
+    """
+    descriptor, partial_name = tempfile.mkstemp(
+        dir=destination.parent,
+        prefix=f".{destination.name}.",
+        suffix=PARTIAL_COPY_SUFFIX,
+    )
+    partial = Path(partial_name)
+
+    try:
+        with os.fdopen(descriptor, "wb") as target, source.open("rb") as origin:
+            shutil.copyfileobj(origin, target)
+        shutil.copystat(source, partial)
+        os.replace(partial, destination)
+    finally:
+        if os.path.lexists(partial):
+            partial.unlink()
 
 
 def list_entry_names(directory: Path) -> Set[str]:
@@ -833,7 +884,7 @@ def check_hook_commands(platform_paths: Platform, which: Callable[[str], object]
     if missing:
         raise InstallError(
             EXIT_HOOK_RUNTIME_MISSING,
-            f"The settings.json hooks need {', '.join(missing)}, which this computer does not have. Without them the shell guard cannot start and every command passes unchecked. Install them, then run this script again.",
+            f"The settings.json hooks need {', '.join(missing)}, which this computer does not have. Without them no hook can start: the hooks whose entries block on failure refuse every call they cover, and the rest let it through unchecked. Install them, then run this script again.",
         )
 
 
@@ -1041,7 +1092,7 @@ class Installer:
             if self._options.apply:
                 self._back_up(destination, root)
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(source, destination)
+                copy_into_place(source, destination)
         elif read_execute_bits(source) != read_execute_bits(destination):
             self._changes.append(f"mode {relative_path} -> {destination}")
             if self._options.apply:
@@ -1266,6 +1317,11 @@ def parse_options(arguments: Sequence[str]) -> Options:
         help="install the commit origin's default branch points at, from a temporary clone, leaving out work that is not merged and pushed",
     )
     parser.add_argument(
+        REVISION_FLAG,
+        default="",
+        help="with --from-upstream, install this commit of origin's default branch instead of its tip, such as the merge before a broken one",
+    )
+    parser.add_argument(
         CHECKOUT_FLAG,
         type=parse_checkout,
         help="the working checkout to record for the session-start check and to set core.hooksPath in (default: the recorded one while it has scripts/install.py, else this one)",
@@ -1281,6 +1337,7 @@ def parse_options(arguments: Sequence[str]) -> Options:
         check=parsed.check,
         from_upstream=parsed.from_upstream,
         checkout=parsed.checkout,
+        revision=parsed.revision,
     )
 
 
@@ -1300,6 +1357,8 @@ def check_mode_options(parser: argparse.ArgumentParser, parsed: argparse.Namespa
         parser.error(
             "--check compares this checkout with this computer, so it takes neither --from-upstream nor --checkout",
         )
+    elif parsed.revision and not parsed.from_upstream:
+        parser.error("--revision names a commit of origin's default branch, so it needs --from-upstream")
 
 
 def run_from_upstream(
@@ -1312,7 +1371,8 @@ def run_from_upstream(
     """Install through the clone's own install.py, so the files and the code that installs them come from one commit."""
     repository = str(repository_root)
     fetch = run(["git", "-C", repository, "fetch", "--quiet", DEFAULT_REMOTE])
-    name, commit = read_default_branch(run, repository)
+    name, tip = read_default_branch(run, repository)
+    commit = read_merged_commit(run, repository, options.revision, name, tip) if options.revision else tip
     checkout = resolve_checkout(options.checkout, read_checkout_record(platform_paths.claude_home), repository_root)
 
     print(
