@@ -3,7 +3,7 @@ name: typescript
 description: Apply personal TypeScript and TSX conventions for type safety, module interoperability, ownership, and verification.
 ---
 
-<!-- Adapted from skills/typescript/SKILL.md at 04887ad46a0df96101ff4ff85db228e3a75c841c, skills/typescript/references/examples-and-procedures.md at baf1863c778a24cf97a93dbb19afa1a98dd8654d -->
+<!-- Adapted from skills/typescript/SKILL.md at 0189c48684504bf7a4095d653cbf016a71bb0d7a, skills/typescript/references/examples-and-procedures.md at baf1863c778a24cf97a93dbb19afa1a98dd8654d -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The opening authorization line, and the scope paragraph that covers TSX, uses the installed toolchain, and lets typescript-migration lead on behavior preservation: Codex permissions and codex/MIGRATION.md, "Clarified Technical Assumptions".
 - The "JavaScript and TypeScript" rules, and the TypeScript rules "Type/Interface Section — No Blank Lines Between" and "Named Alias for Complex Type Constraints", stay in code-style, and the reference file's examples sit beside their rules. History: Claude moved them on 2026-11-12 to fit how much of a skill Claude Code restores after context compaction. Kept in this audit: whether Codex cuts long skills the same way is not checked, and the content is the same wherever it sits.

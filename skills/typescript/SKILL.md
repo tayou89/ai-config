@@ -99,14 +99,11 @@ Before running `tsc` build (output generation):
 4. **User approval**: show code, get confirmation
 5. **`npx tsc` build**: generate .js/.js.map only after approval
 
-**Never run `npx tsc` (output build) without user approval.**
-
 ### Source and Build Artifacts
 
 When `.ts` and corresponding `.js` coexist, `.js` is a build artifact. **Always edit `.ts` and build with `tsc`** — never edit `.js` directly. Check for corresponding `.ts` before modifying any `.js`.
 
-- After `.ts` changes, build and commit `.js`, `.js.map`, `tsconfig.tsbuildinfo` together.
-- `.ts` source and its `.js`/`.js.map` output MUST be in the **same commit**.
+- After `.ts` changes, build and commit `.js`, `.js.map`, and `tsconfig.tsbuildinfo` in the same commit as the `.ts` source.
 
 ### ESModule Syntax
 
