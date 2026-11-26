@@ -3,7 +3,7 @@ name: pr-create
 description: Create or update GitHub PRs whose body opens with what changed and whether the user must act, in plain words, keeps checks, risks, and undo, and ends with the developer record; honor authorization and repository conventions.
 ---
 
-<!-- Adapted from skills/pr-create/SKILL.md at c662f32e3befb6c6564787ab8778d0bafd134f2e -->
+<!-- Adapted from skills/pr-create/SKILL.md at 9f0260071e16e04fa2e73d35be03268d15525935 -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The opening authorization line, and section 4 reuses an existing authorization outside guarded repositories instead of always showing the body first: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
 - The opening and section 5 work through the GitHub connector, CLI, or browser and pass the body as a file, not a heredoc: Codex reaches GitHub through whichever of these is connected, and a file keeps the body's newlines out of shell quoting.
@@ -106,8 +106,6 @@ Flags:
 
 - **Never create a PR without the opening, 할 일, 확인한 것, 남은 위험, and 되돌리기** — the user must see what changed, whether to act, and how safe it is without reading the record.
 - **Never compose body purely from commit messages** — commits describe WHAT not WHY.
-- **Never use `--fill`** — bypasses the required sections.
 - **Do not include `Generated with Claude Code` or similar trailers** per global policy.
 - **Do not reference bare issue numbers** — always include what the issue is about.
 - **Do not push `--force` without explicit user approval**, especially after PR creation.
-- **Never enable GitHub auto-merge**, and merge only as section 4 allows.

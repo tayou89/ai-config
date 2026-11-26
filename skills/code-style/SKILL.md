@@ -12,11 +12,10 @@ JavaScript and TypeScript rules (equality, nullish checks, `const`, Promise hand
 
 ## Design-First Proposal
 
-Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and present multi-axis comparison.
+Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and compare them as `decisions-and-collaboration` describes.
 
 ## Standards Over Workarounds
 
-- Always prefer **industry standard / best practices** when writing, modifying, or suggesting code.
 - Resolution order: (1) find the standard approach first, (2) workarounds (casts, non-null assertions, loose types) only when standard is technically impossible, (3) if workaround needed, explain why standard is impossible and get user approval.
 - **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (`work-principles` "Proposals and options").
 - **Definitions are root causes**: When casts, assertions, or workarounds exist because a type/interface/schema definition is wrong or incomplete, the definition IS the root cause — fix it first. Never classify a workaround as "unavoidable" without verifying the underlying definition is correct and complete.
@@ -57,11 +56,7 @@ Don't define a wrapper function (helper, adapter, `safely*`, `try*`) that duplic
 
 ## No Duplicate Logic
 
-Logic repeated in 2+ places → extract to a method. Check existing codebase for same patterns before writing new code.
-
-## Minimize Duplicate Code
-
-Extract identical code into shared functions. In switch-case: if all cases produce same result, put it outside switch. If results differ, set in each case.
+Logic or identical code repeated in 2+ places → extract to a shared method or function. Check existing codebase for same patterns before writing new code. In switch-case: if all cases produce same result, put it outside switch. If results differ, set in each case.
 
 ## Pure Helper Placement
 

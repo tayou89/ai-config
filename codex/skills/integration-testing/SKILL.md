@@ -3,7 +3,7 @@ name: integration-testing
 description: Run authorized integration or runtime tests with external services, simulators, databases, or brokers; diagnose prerequisites and preserve test evidence; and start or restart applications, servers, simulators, or daemons safely.
 ---
 
-<!-- Adapted from skills/integration-testing/SKILL.md at d7fbb8f0730c15f7c829c5756c27777027953c23 -->
+<!-- Adapted from skills/integration-testing/SKILL.md at fa5bacaf83f4348677769da916d9d113c648380c -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The opening authorization line: Codex permissions (codex/MIGRATION.md, "Repeated plan/build/commit approvals").
 - Section 1 probes only the endpoints the test needs, through authorized checks, and does not treat a blocked ping as down; section 4 fixes other repositories only within their own authorized scope: codex/MIGRATION.md, "Runtime test probes and remote fixes".
@@ -20,8 +20,8 @@ Apply these rules when running integration/runtime tests against a live or simul
 
 ## Starting Applications
 
-- **Startup failure**: When a process fails to start, comes up partially (some endpoints listening, others not), or behaves inconsistently after a startup attempt, find which component failed and why (env, config, port collision, dependency, code) and fix it before retrying or moving to later steps, never by blind restarts or retry loops. This applies to test environments, dev servers, simulators, daemons, and any multi-process startup.
-- **Production, staging, or live mode**: Never start an application in these modes on a development machine without the user's explicit approval, whatever selects the mode (an environment variable, a command-line option, or a production-only script). Even after approval, first (1) inspect the config and secrets the mode will load and report whether endpoints point at real production infrastructure, and (2) if so, evaluate which active connections it forms on boot (API writes, databases, message brokers, hardware controllers, subscriptions) and re-confirm, since even a few seconds of startup can affect production. Verify in simulation, sandbox, or test modes instead; production-mode startup belongs only on the production host.
+- **Startup failure** (`work-principles` 10): look for the failed component among env, config, port collision, dependency, and code, and never retry in a loop. This covers a startup that comes up partially (some endpoints listening, others not) and applies to test environments, dev servers, simulators, daemons, and any multi-process startup.
+- **Production, staging, or live mode** (`work-principles` 11): the mode may be selected by an environment variable, a command-line option, or a production-only script. Even after the user's approval, first (1) inspect the config and secrets the mode will load and report whether endpoints point at real production infrastructure, and (2) if so, evaluate which active connections it forms on boot (API writes, databases, message brokers, hardware controllers, subscriptions) and re-confirm, since even a few seconds of startup can affect production. Verify in simulation, sandbox, or test modes instead; production-mode startup belongs only on the production host.
 
 ## 1. Verify Infrastructure First (Hard Prereq)
 

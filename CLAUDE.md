@@ -2,7 +2,7 @@
 
 ## Hook-Enforced Rules
 
-Hooks enforce these and say why when they stop or ask; follow their message, and see "Hooks" in the shared configuration repository's README for how each works (user decisions, 2026-11-08 to 2026-11-18):
+Hooks enforce these and say why when they stop or ask; follow their message, and see "Hooks" in the shared configuration repository's README for how each works (decisions 2026-11-08 to 11-18):
 
 - Commits go only through the `git-commit` wrapper; the shell guard asks before an unusual push, a production, staging, or live-mode run, or, outside task worktrees, a commit of lines the session's write record does not show as its own; in a task worktree only its owner session commits and no other session writes.
 - Starting a session needs a model and effort; when a start goes ahead on an overloaded computer, tell the user the load in one line, and when memory is also short the start asks the user first.
@@ -14,11 +14,11 @@ Hooks enforce these and say why when they stop or ask; follow their message, and
 
 ## Skill Triggers
 
-Load each skill that this section or `rules/skill-triggers.md` names with the Skill tool before the first action of its task type rather than by reading its file, since only Skill-tool loads are restored after a compaction; read the file only for a skill the Skill tool cannot load (user-invoked only) (user decision, 2026-11-11).
+Load each skill that this section or `rules/skill-triggers.md` names with the Skill tool before the first action of its task type rather than by reading its file, since only Skill-tool loads are restored after a compaction; read the file only for a skill the Skill tool cannot load (user-invoked only) (decision 2026-11-11).
 
 - **Research access**: Read `research-access` before reading result lists or sources on video sites, review stores, or community sites, or when a search or fetch is refused or returns nothing.
 - **User-invoked only**: `/deep-prompt` (rewrite a request into a deeper prompt for a new session), `/domain-pass` (sequential subagents, one per relevant field). Run them only when the user invokes them or asks for one in words (then read its skill file).
 
 ## Miscellaneous
 
-- **Post-completion session advice**: After finishing a distinct work unit (task/phase/commit/planning stage) in a session the user opened, recommend without being asked one of `/clear` (topic shift, memory/plan captures handover), `/compact` (related follow-up, shared decisions matter), or continue (immediate follow-up, shared context essential), with a one-line rationale and, for `/clear` or `/compact`, a ready-to-paste next-session prompt referencing the relevant memory/plan files. Skip it in a session another session started, which that session closes when done, and in a main session, which `session-management` covers.
+- **Post-completion session advice**: After a distinct work unit (task, phase, commit, planning stage) in a session the user opened, recommend unasked `/clear` (topic shift, handover captured in memory or a plan), `/compact` (related follow-up, shared decisions matter), or continuing (immediate follow-up, shared context essential), with a one-line reason and, for `/clear` or `/compact`, a ready-to-paste next-session prompt naming the memory or plan files. Skip it in a session another session started, which that session closes when done, and in a main session, which `session-management` covers.

@@ -128,8 +128,6 @@ Flags:
 
 - **Never create a PR without the opening, 할 일, 확인한 것, 남은 위험, and 되돌리기** — the user must see what changed, whether to act, and how safe it is without reading the record.
 - **Never compose body purely from commit messages** — commits describe WHAT not WHY.
-- **Never use `--fill`** — bypasses the required sections.
 - **Do not include `Generated with Claude Code` or similar trailers** per global policy.
 - **Do not reference bare issue numbers** — always include what the issue is about.
 - **Do not push `--force` without explicit user approval**, especially after PR creation.
-- **Never enable GitHub auto-merge**, and merge only as section 4 allows.
