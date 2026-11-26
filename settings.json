@@ -378,6 +378,18 @@
         ]
       }
     ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|idle_prompt|elicitation_dialog|elicitation_url_dialog|agent_needs_input|quota_auto_resume_stale|quota_auto_resume_disabled",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.claude/scripts/tmux-window-mark-hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUseFailure": [
       {
         "matcher": "Edit|Write|NotebookEdit|Bash|Monitor|mcp__terminal__run_in_terminal",

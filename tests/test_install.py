@@ -515,6 +515,12 @@ class InstallerTest(unittest.TestCase):
         self.assertTrue(list((self._platform.claude_home / "backups").rglob("retired.md")))
         self.assertTrue(any("retired.md" in change for change in pruned._changes))
 
+    def test_apply_copies_terminal_settings(self):
+        self._run_installer(apply=True)
+        for source in sorted((REPOSITORY_ROOT / install.TERMINAL_DIRECTORY).iterdir()):
+            copied = self._platform.claude_home / install.TERMINAL_DIRECTORY / source.name
+            self.assertEqual(copied.read_bytes(), source.read_bytes())
+
     def test_check_writes_nothing_and_lists_both_directions(self):
         self._run_installer(apply=True)
         skill = self._platform.claude_home / "skills" / "made-here" / "SKILL.md"
