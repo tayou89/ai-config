@@ -3,7 +3,7 @@ name: git-commit
 description: Review, create, and push Git commits without asking for routine work, then follow the repository's recorded workflow (task worktree, pull request, guarded merge, cleanup), preserving exact change scope and personal message conventions.
 ---
 
-<!-- Adapted from skills/git-commit/SKILL.md at 6f7608e6c9a30b7950813a45912fae3462f94c4f, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 0ff1a1295d1bc681ac5e5139a29282def37bef94 -->
+<!-- Adapted from skills/git-commit/SKILL.md at 2b52325a8e9c1cdb01e83a8445070c4338c0c75f, skills/git-commit/references/release-commits.md at c80e262d99cc99431d47e4a9ff9b16cf42ec5761, skills/git-commit/references/wrapper-steps.md at 6a2f8ee75bdda81aaaafca68836a4c52f5f925e6 -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The commit wrapper, the shell guard, the worktree guard, the folder-owner and write-record tools, own-lines staging, and every exit code and option of the wrapper are left out, with the wrapper-steps reference: none is installed for Codex (codex/MIGRATION.md, "Claude commit wrapper and PreToolUse hooks"). The copy keeps as instructions what they enforce: staging exact paths, a private index built from a recorded base, reading the commit back from the reflog, the worktree owner rule, the checkout lock, and the amend, push, and large-change limits.
 - Every point where the shell guard would ask (force, deletion, other remote, a push that deploys, the merge that switches a repository to pull requests) is an approval Codex asks for itself before running the command.

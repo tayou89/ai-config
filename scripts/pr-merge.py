@@ -172,7 +172,7 @@ def main(arguments: Sequence[str]) -> int:
             wait_for_checks(root, number, limit)
         lock_wait_seconds = read_lock_wait_seconds(options, limit)
 
-        with hold_integration_lock(find_common_git_directory(root), lock_wait_seconds, announce_wait):
+        with hold_integration_lock(read_common_git_directory(root), lock_wait_seconds, announce_wait):
             pull_request = view_pull_request(str(number))
             ready = bring_in_base(root, pull_request, limit) if options.wait else pull_request
             result = merge_when_ready(root, ready)
@@ -243,15 +243,6 @@ def read_lock_wait_seconds(options: MergeOptions, limit: WaitLimit) -> float:
         return max(limit.read_seconds_left(), DEFAULT_WAIT_SECONDS)
     else:
         return DEFAULT_WAIT_SECONDS
-
-
-def find_common_git_directory(root: Path) -> Path:
-    common = read_common_git_directory(root)
-
-    if common is None:
-        raise CommandError(f"Git cannot find the repository folder of {root}")
-    else:
-        return common
 
 
 def view_pull_request(selector: str | None) -> PullRequest:

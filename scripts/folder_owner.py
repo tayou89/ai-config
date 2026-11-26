@@ -21,8 +21,9 @@ hard-linked into place, which fails when another claim got there first. A
 handover replaces the record under a lock that the operating system
 releases when its holder exits, after checking that the owner is still the
 one the caller read, as a compare-and-swap does. Gaps, the calls the guard
-let through unjudged, are added and settled under the same lock, so a gap
-added while a commit settles the ones it showed is kept for the next one.
+could not match to the owner record, are added and settled under the same
+lock, so a gap added while a commit settles the ones it showed is kept for
+the next one.
 """
 
 from __future__ import annotations
@@ -56,7 +57,7 @@ from session_lineage import (
     read_session_title,
     read_worktree_path,
 )
-from workflow_policy import GIT_DIRECTORY_NAME, find_repository_root
+from workflow_policy import GIT_DIRECTORY_NAME, GitReadError, find_repository_root
 
 OWNER_FILE_NAME = "claude-owner.json"
 LOCK_FILE_NAME = "claude-owner.lock"
@@ -90,6 +91,10 @@ _GAP_WHAT_KEY = "what"
 _GAP_CALL_KEY = "call"
 _GITDIR_PREFIX = "gitdir:"
 COMMONDIR_FILE = "commondir"
+_WORKTREE_LINK_FILE = "gitdir"
+_REPOSITORY_VARIABLES = frozenset(
+    {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_INDEX_FILE"}
+)
 _LOCK_WAIT_SECONDS = 2.0
 _LOCK_POLL_SECONDS = 0.02
 _SESSION_PROCESS_NAME = "claude"
@@ -232,7 +237,9 @@ class FolderAccess:
 
 @dataclass(frozen=True)
 class GuardGap:
-    """A call the folder guard could not judge and let through, so a write it should have refused may have run.
+    """A call the folder guard could not match to the owner record, so another session's write may have run there:
+    a take the user was asked about whose step after the call did not finish, or a write approved after another
+    session took the folder.
 
     `line` is the record's line as read, which settling matches, so a gap added after it was read stays;
     `call_id` is the tool call's id, None for a record written before ids were kept.
@@ -255,17 +262,61 @@ class _ProcessRow:
 def find_linked_worktree(path: Path) -> LinkedWorktree | None:
     """The linked worktree holding a path, or None in an original checkout, a submodule, or outside Git.
 
-    It reads only the worktree's `.git` file, so the guard can ask it of
-    every path a command names without running Git.
+    It reads the worktree's `.git` file and runs Git only when the folder
+    that file names holds no worktree record, so the guard can ask it of
+    every path a command names, mostly without running Git. Raises GitReadError
+    when a `.git` entry other than a folder cannot be read, names no Git
+    folder, or names one that is gone or holds neither a worktree record nor
+    a repository of its own, such as an empty folder or a worktree record
+    that lost its link to the shared Git folder, since Git could not use the
+    folder then; a submodule's Git folder is a repository of its own.
     """
     root = find_repository_root(path)
-    git_file = root / GIT_DIRECTORY_NAME if root is not None else None
-    git_directory = _read_git_file(git_file) if git_file is not None and git_file.is_file() else None
 
-    if root is not None and git_directory is not None and (git_directory / COMMONDIR_FILE).is_file():
-        return LinkedWorktree(root.resolve(), git_directory)
-    else:
+    if root is None or (root / GIT_DIRECTORY_NAME).is_dir():
         return None
+    else:
+        return _read_linked_worktree(root, root / GIT_DIRECTORY_NAME)
+
+
+def _read_linked_worktree(root: Path, git_file: Path) -> LinkedWorktree | None:
+    git_directory = _read_git_file(git_file)
+
+    if (git_directory / COMMONDIR_FILE).is_file():
+        return LinkedWorktree(root.resolve(), git_directory)
+    elif _is_separate_repository(git_directory):
+        return None
+    elif git_directory.is_dir():
+        raise GitReadError(f"{git_file} names {git_directory}, which holds neither a worktree record nor a repository")
+    else:
+        raise GitReadError(f"{git_file} names {git_directory}, which is gone")
+
+
+def _is_separate_repository(git_directory: Path) -> bool:
+    """A Git folder that holds a repository of its own, such as a submodule's or one `git clone --separate-git-dir`
+    made, as Git itself confirms with the location variables it would inherit left out; a worktree's record, which
+    names a checkout of its own, is none. Raises GitReadError when Git cannot run, since the folder could not be told
+    apart then."""
+    environment = {name: value for name, value in os.environ.items() if name not in _REPOSITORY_VARIABLES}
+    command = ["git", "--git-dir", str(git_directory), "rev-parse", "--git-dir"]
+
+    if os.path.lexists(git_directory / _WORKTREE_LINK_FILE):
+        return False
+    else:
+        try:
+            result = subprocess.run(
+                command,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding=_ENCODING,
+                timeout=_GIT_TIMEOUT_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise GitReadError(f"git could not check {git_directory}: {error}") from error
+        else:
+            return result.returncode == 0
 
 
 def read_current_identity(cli_session: str | None = None) -> SessionIdentity | None:
@@ -390,25 +441,35 @@ def is_app_worktree(worktree: LinkedWorktree, identity: SessionIdentity) -> bool
 
 
 def has_uncommitted_changes(worktree: LinkedWorktree) -> bool:
-    """Tracked changes or untracked files not ignored; a folder Git cannot read counts as changed."""
+    """Tracked changes or untracked files not ignored. Raises GitReadError when Git cannot tell, so taking the folder is
+    refused rather than asked about without knowing what it holds (user decision, 2026-11-24)."""
+    command = ["git", "-C", str(worktree.root), "status", "--porcelain"]
+
     try:
         result = subprocess.run(
-            ["git", "-C", str(worktree.root), "status", "--porcelain"],
+            command,
             capture_output=True,
             text=True,
             encoding=_ENCODING,
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return True
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise GitReadError(f"git status did not run in {worktree.root}: {error}") from error
     else:
-        return result.returncode != 0 or bool(result.stdout.strip())
+        return _has_status_changes(worktree, result)
+
+
+def _has_status_changes(worktree: LinkedWorktree, result: subprocess.CompletedProcess[str]) -> bool:
+    if result.returncode == 0:
+        return bool(result.stdout.strip())
+    else:
+        raise GitReadError(f"git status failed in {worktree.root}: {result.stderr.strip() or result.returncode}")
 
 
 def add_gap(worktree: LinkedWorktree, identity: SessionIdentity | None, what: str, call_id: str | None) -> None:
-    """Note one call the guard could not judge. Its runs before and after the call note the same call once, by
-    `call_id`. Raises OwnerBusyError when a handover or a commit holds the folder's lock too long.
+    """Note one call the guard could not match to the owner record. Its runs before and after the call note the same
+    call once, by `call_id`. Raises OwnerBusyError when a handover or a commit holds the folder's lock too long.
     """
     gap = {
         _GAP_ID_KEY: uuid.uuid4().hex,
@@ -422,14 +483,15 @@ def add_gap(worktree: LinkedWorktree, identity: SessionIdentity | None, what: st
 
 
 def read_gaps(worktree: LinkedWorktree) -> list[GuardGap]:
-    """The gaps not settled yet. A line that cannot be parsed still counts, and so does a file that cannot be read,
-    so a damaged record never hides a gap."""
+    """The gaps not settled yet. A line that cannot be parsed still counts, so a damaged line never hides a gap, and
+    a record that cannot be read raises OwnerFileError, since a dialog could not show what it holds and an approval
+    of it would cover writes no one saw (user decision, 2026-11-24)."""
     try:
         lines = worktree.gaps_file.read_text(encoding=_ENCODING).splitlines()
     except FileNotFoundError:
         return []
     except (OSError, UnicodeDecodeError) as error:
-        return [GuardGap(0.0, None, f"the gap record cannot be read: {error}", "")]
+        raise OwnerFileError(f"the gap record {worktree.gaps_file} cannot be read: {error}") from error
     else:
         return [_parse_gap(line) for line in lines if line.strip()]
 
@@ -449,6 +511,15 @@ def settle_gaps(worktree: LinkedWorktree, shown: Sequence[GuardGap]) -> None:
     Raises OwnerBusyError when the lock is held too long, and OSError when the records cannot be rewritten.
     """
     _run_locked(worktree, lambda: _move_settled_gaps(worktree, {gap.line for gap in shown}))
+
+
+def settle_call_gaps(worktree: LinkedWorktree, call_id: str) -> None:
+    """Settle the pending gap the guard noted for a call before it ran, once the call's own step after it took the
+    folder or recorded that another session took it first. Raises as settle_gaps does."""
+    pending = [gap for gap in read_gaps(worktree) if gap.call_id == call_id]
+
+    if pending:
+        settle_gaps(worktree, pending)
 
 
 def is_protected_file(path: Path) -> bool:
@@ -672,16 +743,20 @@ def _parse_gap(line: str) -> GuardGap:
         return GuardGap(0.0, None, line.strip(), line)
 
 
-def _read_git_file(git_file: Path) -> Path | None:
-    """The Git folder a worktree's `.git` file points to (`gitdir: <path>`), or None when it holds none."""
+def _read_git_file(git_file: Path) -> Path:
+    """The Git folder a `.git` file points to (`gitdir: <path>`). Raises GitReadError when the file cannot be read or
+    names none, since Git could not use the folder either."""
     try:
         text = git_file.read_text(encoding=_ENCODING).strip()
-    except (OSError, UnicodeDecodeError):
-        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise GitReadError(f"{git_file} cannot be read: {error}") from error
     else:
         location = text[len(_GITDIR_PREFIX) :].strip() if text.startswith(_GITDIR_PREFIX) else ""
 
-        return (git_file.parent / location).resolve() if location else None
+        if location:
+            return Path(os.path.realpath(git_file.parent / location))
+        else:
+            raise GitReadError(f"{git_file} names no Git folder")
 
 
 def _find_session_process() -> ProcessMark | None:
@@ -862,7 +937,7 @@ def main(arguments: Sequence[str]) -> int:
     """Run one command; argparse itself exits with status 2 on a command line it does not take."""
     try:
         return _run_command(_parse_command_line(arguments))
-    except (_OwnerCommandError, OwnerFileError, OwnerBusyError, OSError) as error:
+    except (_OwnerCommandError, OwnerFileError, OwnerBusyError, GitReadError, OSError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
         return _EXIT_FAILED
 

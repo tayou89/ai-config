@@ -59,6 +59,7 @@ from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integr
 from workflow_policy import PolicyError, WorkflowMode, WorkflowPolicy, read_original_checkout, read_original_policy
 
 INTEGRATION_FOLDER = "agent-integration"
+REMOVAL_WARNING = "Warning: could not remove the temporary worktree {folder} ({error}); the next run removes it."
 BRANCH_NAME_SEPARATOR = "/"
 FOLDER_NAME_SEPARATOR = "-"
 CHECK_TIMEOUT_SECONDS = 3600
@@ -235,13 +236,18 @@ def move_base(original: Path, base: str, merge_commit: str) -> None:
 
 
 def remove_worktree(original: Path, folder: Path) -> None:
-    """Auxiliary: a temporary folder left behind is removed by the next run, so a failure here only warns."""
+    """Auxiliary: a temporary folder left behind is removed by the next run, so a failure here only warns. The folder
+    is deleted even when Git cannot drop it from its worktree list, which the next run's `git worktree prune` does, so
+    a damaged leftover never stays for every later run."""
     try:
-        run_command(["git", "-C", str(original), "worktree", "remove", "--force", str(folder)])
+        removal = run_command(["git", "-C", str(original), "worktree", "remove", "--force", str(folder)])
         if folder.exists():
             shutil.rmtree(folder)
     except (CommandError, OSError) as error:
-        print(f"Warning: could not remove the temporary worktree {folder} ({error}); the next run removes it.")
+        print(REMOVAL_WARNING.format(folder=folder, error=error))
+    else:
+        if removal.returncode != 0:
+            print(REMOVAL_WARNING.format(folder=folder, error=removal.stderr.strip() or removal.returncode))
 
 
 if __name__ == "__main__":

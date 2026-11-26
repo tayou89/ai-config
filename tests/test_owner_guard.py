@@ -11,13 +11,16 @@ from __future__ import annotations
 
 import json
 import shlex
+import subprocess
 import unittest
 
 from owner_world import (
     ASK,
+    COMMIT_MESSAGE,
     DENY,
     FOLDER_OWNER_COMMAND,
     FOURTH,
+    GAPS_EXIT,
     GAPS_FILE_NAME,
     OTHER,
     OWNER,
@@ -28,10 +31,14 @@ from owner_world import (
     TERMINAL,
     THIRD,
     OwnerWorld,
+    Session,
 )
 from workflow_world import BASE, ENCODING
 
 NESTED_SHELLS = 14
+PENDING_TAKE_NOTE = "was asked to take the folder"
+LEFT_FILE = "left.txt"
+ACCEPT_GAPS_COMMAND = f"python3 ~/.claude/scripts/claude-commit.py --accept-gaps 'Fix: x' {LEFT_FILE}"
 LONG_NAME_PROGRAM = "import json\nprint(" + "1" * 300 + " / 60)\n"
 LONG_PATH_PROGRAM = "".join(f"print({'2' * 150} / 3)\n" for _ in range(8))
 
@@ -142,13 +149,20 @@ class OwnerGuardTest(unittest.TestCase):
         self.assertEqual(self.world.decide(OTHER, "mcp__terminal__run_in_terminal", reading, self.world.root), PASS)
         self.assertEqual(self.world.decide(OWNER, "mcp__terminal__run_in_terminal", tool_input, self.world.root), PASS)
 
-    def test_a_command_the_guard_cannot_follow_is_refused_only_when_it_names_the_folder(self) -> None:
-        naming = f"echo x > {self.worktree}/notes.txt"
-        elsewhere = f"echo x > {self.world.root}/notes.txt"
+    def test_a_command_the_guard_cannot_follow_is_refused(self) -> None:
+        cases = [
+            (f"echo x > {self.worktree}/notes.txt", self.world.root),
+            (f"echo x > {self.world.root}/notes.txt", self.world.root),
+            ("ls", self.worktree),
+        ]
 
-        self.assertEqual(self.world.bash(OTHER, nest(naming), self.world.root), DENY)
-        self.assertEqual(self.world.bash(OTHER, nest(elsewhere), self.world.root), PASS)
-        self.assertEqual(self.world.bash(OTHER, nest("ls"), self.worktree), DENY)
+        for command, cwd in cases:
+            with self.subTest(command=command):
+                result = self.world.run_guard(OTHER, "Bash", {"command": nest(command)}, cwd)
+                output = json.loads(result.stdout)["hookSpecificOutput"]
+
+                self.assertEqual(output["permissionDecision"], DENY)
+                self.assertIn("ExpansionLimitError", output["permissionDecisionReason"])
 
     def test_symbolic_links_into_the_folder_are_followed(self) -> None:
         link = self.world.root / "shortcut"
@@ -220,6 +234,115 @@ class OwnerClaimTest(unittest.TestCase):
         self.assertEqual(self.world.decide(OTHER, "Write", self.write_input, self.world.root), ASK)
         self.assertEqual(self.world.read_owner_cli(self.worktree), OTHER.cli)
         self.assertEqual(self.world.decide(OTHER, "Write", self.write_input, self.world.root), PASS)
+
+    def test_an_asked_take_stays_noted_until_its_step_after_the_call_takes_the_folder(self) -> None:
+        gaps = self.world.git_directory(self.worktree) / GAPS_FILE_NAME
+
+        self.world.write(self.worktree, "left.txt", "left behind\n")
+        before = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root)
+        noted = gaps.read_text(encoding=ENCODING)
+
+        self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, POST_TOOL_USE, {})
+        remaining = gaps.read_text(encoding=ENCODING) if gaps.exists() else ""
+
+        self.assertEqual(json.loads(before.stdout)["hookSpecificOutput"]["permissionDecision"], ASK)
+        self.assertIn(PENDING_TAKE_NOTE, noted)
+        self.assertNotIn(PENDING_TAKE_NOTE, remaining)
+        self.assertEqual(self.world.read_owner_cli(self.worktree), OTHER.cli)
+
+    def test_an_asked_take_stays_noted_when_its_step_after_the_call_fails(self) -> None:
+        gaps = self.world.git_directory(self.worktree) / GAPS_FILE_NAME
+
+        self.world.write(self.worktree, "left.txt", "left behind\n")
+        self.world.run_guard(OTHER, "Write", self.write_input, self.world.root)
+        self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
+        after = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, POST_TOOL_USE, {})
+
+        self.assertEqual(after.returncode, 1)
+        self.assertIn(PENDING_TAKE_NOTE, gaps.read_text(encoding=ENCODING))
+
+    def test_an_asked_call_is_noted_in_every_folder_it_takes_not_only_the_one_it_asks_about(self) -> None:
+        clean = self.world.add_worktree("task-clean")
+        command = {"command": f"touch {clean / 'x.txt'} {self.worktree / 'x.txt'}"}
+
+        self.world.write(self.worktree, "left.txt", "left behind\n")
+        before = self.world.run_guard(OTHER, "Bash", command, self.world.root)
+        noted = [self.world.git_directory(folder) / GAPS_FILE_NAME for folder in (clean, self.worktree)]
+
+        self.assertEqual(json.loads(before.stdout)["hookSpecificOutput"]["permissionDecision"], ASK)
+        for gaps in noted:
+            with self.subTest(folder=gaps.parent.name):
+                self.assertIn(PENDING_TAKE_NOTE, gaps.read_text(encoding=ENCODING))
+
+    def test_a_take_whose_loss_cannot_be_recorded_after_the_call_stays_noted(self) -> None:
+        """The owner record stays sound; only recording that another session took the folder first fails."""
+        gaps = self.world.git_directory(self.worktree) / GAPS_FILE_NAME
+
+        self.world.write(self.worktree, "left.txt", "left behind\n")
+        self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, tool_use_id="call-other")
+        self.world.run_guard(THIRD, "Write", self.write_input, self.world.root, tool_use_id="call-third")
+        self.world.run_guard(THIRD, "Write", self.write_input, self.world.root, POST_TOOL_USE, {}, "call-third")
+        gaps.chmod(0o444)
+        self.addCleanup(gaps.chmod, 0o644)
+        after = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, POST_TOOL_USE, {}, "call-other")
+
+        self.assertEqual(after.returncode, 1)
+        self.assertEqual(self.world.read_owner_cli(self.worktree), THIRD.cli)
+        self.assertIn(PENDING_TAKE_NOTE, gaps.read_text(encoding=ENCODING))
+        self.assertIn(OTHER.app, gaps.read_text(encoding=ENCODING))
+
+    def test_a_take_left_noted_after_another_session_won_stops_the_owners_commit_until_shown_once(self) -> None:
+        """The note a failed step after the call leaves reaches the owner's real commit, which is refused for the gap
+        while its owner record stays sound, and goes ahead once the guard's dialog has shown it."""
+        gaps = self.world.git_directory(self.worktree) / GAPS_FILE_NAME
+
+        self.world.write(self.worktree, LEFT_FILE, "left behind\n")
+        self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, tool_use_id="call-other")
+        self.world.run_guard(THIRD, "Write", self.write_input, self.world.root, tool_use_id="call-third")
+        self.world.run_guard(THIRD, "Write", self.write_input, self.world.root, POST_TOOL_USE, {}, "call-third")
+        gaps.chmod(0o444)
+        self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, POST_TOOL_USE, {}, "call-other")
+        gaps.chmod(0o644)
+        refused, decision, accepted = self.commit_through_gap_dialog(THIRD)
+
+        self.assertEqual(refused.returncode, GAPS_EXIT, refused.stdout + refused.stderr)
+        self.assertIn(PENDING_TAKE_NOTE, refused.stdout + refused.stderr)
+        self.assertEqual(decision, ASK)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
+    def test_a_declined_take_stays_noted_and_the_next_owners_commit_asks_about_it_once(self) -> None:
+        """A call the user declined never ran its step after the call, so its note says it may not have run."""
+        self.world.write(self.worktree, LEFT_FILE, "left behind\n")
+        declined = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root, tool_use_id="call-other")
+        taken = self.world.decide(THIRD, "Write", self.write_input, self.world.root)
+        refused, decision, accepted = self.commit_through_gap_dialog(THIRD)
+
+        self.assertEqual(json.loads(declined.stdout)["hookSpecificOutput"]["permissionDecision"], ASK)
+        self.assertEqual(taken, ASK)
+        self.assertEqual(refused.returncode, GAPS_EXIT, refused.stdout + refused.stderr)
+        self.assertIn("one may not have run", refused.stdout + refused.stderr)
+        self.assertIn(PENDING_TAKE_NOTE, refused.stdout + refused.stderr)
+        self.assertEqual(decision, ASK)
+        self.assertEqual(accepted.returncode, 0, accepted.stdout + accepted.stderr)
+
+    def commit_through_gap_dialog(
+        self, session: Session
+    ) -> tuple[subprocess.CompletedProcess[str], str, subprocess.CompletedProcess[str]]:
+        """The owner's commit, the guard's dialog for --accept-gaps, and the commit the dialog lets through."""
+        refused = self.world.run_commit(session, self.worktree, COMMIT_MESSAGE, LEFT_FILE)
+        decision = self.world.bash(session, ACCEPT_GAPS_COMMAND, self.worktree)
+        accepted = self.world.run_commit(session, self.worktree, "--accept-gaps", COMMIT_MESSAGE, LEFT_FILE)
+
+        return refused, decision, accepted
+
+    def test_a_folder_whose_changes_git_cannot_list_is_refused_rather_than_asked_about(self) -> None:
+        (self.world.git_directory(self.worktree) / "index").write_text("garbage", encoding=ENCODING)
+        result = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root)
+        output = json.loads(result.stdout)["hookSpecificOutput"]
+
+        self.assertEqual(output["permissionDecision"], DENY)
+        self.assertIn("GitReadError", output["permissionDecisionReason"])
+        self.assertIsNone(self.world.read_owner(self.worktree))
 
     def test_declined_claim_leaves_the_folder_unowned(self) -> None:
         self.world.write(self.worktree, "left.txt", "left behind\n")
@@ -310,23 +433,19 @@ class OwnerClaimTest(unittest.TestCase):
         self.world.archive(OWNER)
         self.assertEqual(self.world.bash(OTHER, adopt, self.worktree), PASS)
 
-    def test_a_guard_failure_is_recorded_as_a_gap_and_passes(self) -> None:
-        self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
-        result = self.world.run_guard(OTHER, "Write", self.write_input, self.world.root)
-        gaps = (self.world.git_directory(self.worktree) / "claude-owner-gaps.jsonl").read_text(encoding=ENCODING)
-
-        self.assertEqual(result.stdout.strip(), "")
-        self.assertIn("worktree-guard-hook", result.stderr)
-        self.assertIn(OTHER.app, gaps)
-
-    def test_a_guard_failure_on_a_relative_file_path_is_recorded_there(self) -> None:
-        self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
+    def test_a_guard_failure_refuses_the_call_and_leaves_no_gap(self) -> None:
         relative = {"file_path": str(self.worktree.relative_to(self.world.original) / "x.txt")}
 
-        self.world.run_guard(OTHER, "Write", relative, self.world.original)
-        gaps = (self.world.git_directory(self.worktree) / "claude-owner-gaps.jsonl").read_text(encoding=ENCODING)
+        self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
+        for tool_input, cwd in [(self.write_input, self.world.root), (relative, self.world.original)]:
+            with self.subTest(cwd=cwd):
+                result = self.world.run_guard(OTHER, "Write", tool_input, cwd)
+                output = json.loads(result.stdout)["hookSpecificOutput"]
 
-        self.assertIn(OTHER.app, gaps)
+                self.assertEqual(output["permissionDecision"], DENY)
+                self.assertIn("OwnerFileError", output["permissionDecisionReason"])
+                self.assertIn("worktree-guard-hook", result.stderr)
+        self.assertFalse((self.world.git_directory(self.worktree) / GAPS_FILE_NAME).exists())
 
     def test_worktree_with_the_same_name_after_cleanup_starts_unowned(self) -> None:
         worktree = self.world.add_worktree_as(OWNER, "again")
@@ -513,15 +632,15 @@ class GuardFailureTest(unittest.TestCase):
     def test_removing_a_name_too_long_for_a_file_does_not_fail(self) -> None:
         self.assertEqual(self.world.bash(OWNER, f"rm -rf {'y' * 300}/z", self.worktree), PASS)
 
-    def test_a_call_the_guard_fails_on_before_and_after_it_runs_is_one_gap(self) -> None:
+    def test_a_failure_after_a_call_shows_a_hook_error_and_leaves_no_gap(self) -> None:
         self.world.owner_file(self.worktree).write_text("{broken", encoding=ENCODING)
         command = {"command": f"echo x > {self.worktree / 'x.txt'}"}
+        result = self.world.run_guard(OTHER, "Bash", command, self.world.root, POST_TOOL_USE, {})
 
-        self.world.run_guard(OTHER, "Bash", command, self.world.root)
-        self.world.run_guard(OTHER, "Bash", command, self.world.root, POST_TOOL_USE, {})
-        gaps = (self.world.git_directory(self.worktree) / GAPS_FILE_NAME).read_text(encoding=ENCODING)
-
-        self.assertEqual(len(gaps.splitlines()), 1, gaps)
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("OwnerFileError", result.stderr)
+        self.assertFalse((self.world.git_directory(self.worktree) / GAPS_FILE_NAME).exists())
 
 
 if __name__ == "__main__":

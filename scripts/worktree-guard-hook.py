@@ -36,11 +36,18 @@ changes, and the claim is recorded once the call ran. Owner records are
 written only by folder_owner.py, never by a tool call.
 
 What a script file or a program does inside itself is not seen, as in the
-skill gate. Any failure lets the call through, since a wrong refusal stops
-every session's work; a failure in a task worktree is recorded there as a
-gap, one per call, and the commit wrapper asks the user once before
-committing over it. A gap the folder's owner left there after taking it is
-not asked about, since the owner's writes there pass anyway.
+skill gate. A call the hook cannot finish judging is refused, since not
+knowing must not read as safe (user decision, 2026-11-24): run_hook in
+hook_failure.py answers an error before a call with FAILURE_POLICY, what it
+could not read raises instead of reading as nothing there (GitReadError,
+an unknown session, a command too deep to follow), and the settings entry
+blocks on failure, so a crash or a timeout refuses the call too. After a
+call or at session start an error only leaves an owner unrecorded, and the
+folder goes to its next writer. README "Hooks" says how to recover from a
+terminal when the hook itself breaks. A write approved after another
+session took the folder is recorded there as a gap, which the owner's
+commit asks about once; a gap the owner left there after taking it is not
+asked about, since the owner's writes there pass anyway.
 """
 
 from __future__ import annotations
@@ -54,7 +61,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -89,8 +96,11 @@ from folder_owner import (
     read_owner,
     read_owner_state,
     refresh_owner_process,
+    settle_call_gaps,
     take_folder,
 )
+from hook_failure import Decision, FailurePolicy, run_hook
+from path_listing import list_matching_paths
 from session_lineage import CLI_SESSION_VARIABLE, HOST_SESSION_VARIABLE
 from shell_command import (
     IN_PLACE_EDITORS,
@@ -106,12 +116,18 @@ from shell_command import (
 )
 from workflow_policy import (
     GIT_DIRECTORY_NAME,
+    GitReadError,
     find_repository_root,
     is_original_checkout,
     read_checkout_policy,
     read_original_checkout,
 )
 
+FAILURE_POLICY = FailurePolicy.blocking(
+    "worktree-guard-hook",
+    Decision.DENY,
+    "The folder guard could not finish judging this call ({error}), so it refuses it rather than let a write reach the original checkout or another session's worktree unjudged. Retry it or split it; if every call is refused, tell the user, since the README's Hooks section (failure handling) says how to repair the guard from a terminal.",
+)
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
 _FILE_PATH_KEYS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
@@ -343,7 +359,9 @@ _SESSION_IDENTITY_REASON = (
 )
 _LOST_CLAIM_REASON = "{root} was just claimed by {owner}, so this session may only read there ({what})."
 _LOST_AFTER_CALL_GAP = "{what} ran after the user approved taking the folder, but {owner} took it first"
-_UNREADABLE_COMMAND_WHAT = "a command this hook cannot follow"
+_PENDING_TAKE_GAP = "{what} was asked to take the folder; if the user approved, it ran before its owner was recorded"
+_UNCERTAIN_COMMAND_WHAT = "a command that hides where it writes"
+_UNKNOWN_SESSION_ERROR = "this session's id is unknown, so the hook cannot tell whose folder this is"
 _CLAIM_QUESTION = (
     "이 작업 폴더에는 주인 세션 기록이 없고, 아직 커밋하지 않은 바뀜이 있습니다: {root}\n"
     "이 세션({me})이 이 폴더를 맡아 써도 되면 승인해 주세요. 승인하시면 이 세션이 주인이 되어 그 바뀜도 함께 커밋할 수 있고, "
@@ -359,12 +377,7 @@ _TAKE_OPEN_QUESTION = (
 )
 _OPEN_STATE_WORDS = "아직 닫히지 않은"
 _UNKNOWN_STATE_WORDS = "닫혔는지 알 수 없는"
-_GAPS_QUESTION = (
-    "폴더 보호 장치가 이 작업 폴더에서 {count}번 판정하지 못하고 호출을 그대로 통과시켰습니다. "
-    "그때 다른 세션이 이 폴더에 썼을 수도 있습니다: {root}\n{gaps}\n"
-    "이 커밋에 그때의 바뀜이 섞여도 되면 승인해 주세요. 승인하신 호출은 이 커밋이 실패해도 다시 묻지 않습니다. "
-    "거절하시면 커밋하지 않습니다."
-)
+_GAPS_QUESTION = "이 작업 폴더에는 어느 세션의 작업인지 확인을 끝내지 못한 요청이 {count}개 남아 있습니다. 실행되지 않은 요청일 수도 있고, 그때 다른 세션이 이 폴더에 썼을 수도 있습니다: {root}\n{gaps}\n이번 커밋에 그 요청으로 생긴 변경이 포함되어도 되면 승인해 주세요. 승인하신 요청은 이 커밋이 실패해도 다시 묻지 않습니다. 거절하시면 커밋하지 않습니다."
 _GAP_LINE = "  - {session}: {what}"
 _MORE_GAPS_LINE = "  … 그 밖에 {count}건"
 
@@ -391,26 +404,24 @@ class _OwnerCommand:
 
 @dataclass(frozen=True)
 class _Verdict:
+    """`pending` are the folders the call may write in once the user approves taking them, noted as gaps before it
+    runs so that a step after it that fails still leaves them to be asked about."""
+
     deny: list[str]
     ask: list[str]
     claims: list[_FolderUse]
+    pending: list[_FolderUse] = field(default_factory=list)
 
 
 _NO_VERDICT = _Verdict([], [], [])
 
 
-def main() -> None:
-    payload: dict[str, Any] = {}
+class _UnknownSessionError(Exception):
+    """A call touches a task worktree, but the hook cannot tell which session makes it."""
 
-    try:
-        payload = json.load(sys.stdin)
-        decision = decide(payload)
 
-        if decision:
-            print(json.dumps(decision))
-    except Exception as error:
-        print(f"worktree-guard-hook: {type(error).__name__}: {error}", file=sys.stderr)
-        _record_gap(payload, error)
+def main() -> int:
+    return run_hook(decide, FAILURE_POLICY)
 
 
 def decide(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -439,26 +450,35 @@ def _decide_before_call(payload: dict[str, Any]) -> dict[str, Any] | None:
         verdict = _judge_command(str(tool_input.get(_COMMAND_KEY) or ""), cwd, identity)
     else:
         verdict = _NO_VERDICT
-    decision = _settle_verdict(verdict, identity)
+    decision = _settle_verdict(verdict, identity, _read_tool_use_id(payload))
 
     if tool_name in _SHELL_TOOLS and (decision is None or decision[_HOOK_OUTPUT_KEY][_DECISION_KEY] != _DENY):
         _note_folders_to_add(payload)
     return decision
 
 
-def _settle_verdict(verdict: _Verdict, identity: _IdentityReader) -> dict[str, Any] | None:
+def _settle_verdict(verdict: _Verdict, identity: _IdentityReader, call_id: str | None) -> dict[str, Any] | None:
     """Refuse, ask, or claim the folders the call takes and let it through. A folder may change between the judgment
-    and the claim: another session's claim refuses, and new uncommitted changes ask first."""
+    and the claim: another session's claim refuses, and new uncommitted changes ask first. Before asking, the call is
+    noted as a pending gap in every folder it takes that is not claimed yet, the ones it asks about and the ones it
+    would have claimed without asking, which its step after the call settles."""
     current = identity() if verdict.claims and not verdict.deny and not verdict.ask else None
     claims = [_claim_before_call(use, current) for use in verdict.claims] if current is not None else []
     claimed = _merge_verdicts(claims)
+    unclaimed = verdict.claims if current is None else []
 
     if verdict.deny or claimed.deny:
         return _make_decision(_DENY, [*verdict.deny, *claimed.deny])
     elif verdict.ask or claimed.ask:
+        _add_pending_gaps([*verdict.pending, *unclaimed, *claimed.pending], identity, call_id)
         return _make_decision(_ASK, [*verdict.ask, *claimed.ask])
     else:
         return None
+
+
+def _add_pending_gaps(uses: list[_FolderUse], identity: _IdentityReader, call_id: str | None) -> None:
+    for use in uses:
+        add_gap(use.worktree, identity(), _PENDING_TAKE_GAP.format(what=use.what), call_id)
 
 
 def _judge_file_tool(path: Path, what: str, identity: _IdentityReader) -> _Verdict:
@@ -472,22 +492,19 @@ def _judge_file_tool(path: Path, what: str, identity: _IdentityReader) -> _Verdi
 
 def _judge_command(command: str, cwd: str | None, identity: _IdentityReader) -> _Verdict:
     """Judge each call; when a call that may write hides where it writes (a variable, an unknown folder), also refuse
-    the whole command if it names a folder another open session owns, since not knowing must not read as safe."""
-    try:
-        calls = expand_shell_command(command, cwd, _get_config_directory())
-    except ExpansionLimitError:
-        return _judge_unreadable_command(command, cwd, identity)
-    else:
-        is_uncertain = any(_is_uncertain_call(call) for call in calls)
-        fallback = _judge_unreadable_command(command, cwd, identity) if is_uncertain else _NO_VERDICT
+    the whole command if it names a folder another open session owns, since not knowing must not read as safe. A
+    command too deep to follow raises ExpansionLimitError, which the failure policy refuses."""
+    calls = expand_shell_command(command, cwd, _get_config_directory())
+    is_uncertain = any(_is_uncertain_call(call) for call in calls)
+    fallback = _judge_uncertain_command(command, cwd, identity) if is_uncertain else _NO_VERDICT
 
-        return _merge_verdicts([*(_judge_call(call, identity) for call in calls), fallback])
+    return _merge_verdicts([*(_judge_call(call, identity) for call in calls), fallback])
 
 
-def _judge_unreadable_command(command: str, cwd: str | None, identity: _IdentityReader) -> _Verdict:
-    """A command too deep to follow is refused only where it names a folder another open session owns."""
+def _judge_uncertain_command(command: str, cwd: str | None, identity: _IdentityReader) -> _Verdict:
+    """A command that hides where it writes is refused where it names a folder another open session owns."""
     named = [_join(cwd, path) for path in _ABSOLUTE_PATH_PATTERN.findall(command)]
-    verdict = _judge_uses(_list_folder_uses([*_optional_path(cwd), *named], _UNREADABLE_COMMAND_WHAT), identity)
+    verdict = _judge_uses(_list_folder_uses([*_optional_path(cwd), *named], _UNCERTAIN_COMMAND_WHAT), identity)
 
     return _Verdict(verdict.deny, [], [])
 
@@ -551,10 +568,10 @@ def _list_folder_uses(paths: Iterable[Path], what: str) -> list[_FolderUse]:
 
 
 def _judge_uses(uses: list[_FolderUse], identity: _IdentityReader) -> _Verdict:
-    """Refuse writes to another open session's folder, ask before taking one with changes, and claim the rest."""
-    current = identity() if uses else None
-
-    if current is not None:
+    """Refuse writes to another open session's folder, ask before taking one with changes, and claim the rest; a session
+    the hook cannot name raises, since whose folder it is cannot be judged then."""
+    if uses:
+        current = _require_identity(identity)
         accesses = [(use, judge_access(use.worktree, current)) for use in uses]
 
         for use, access in accesses:
@@ -564,6 +581,7 @@ def _judge_uses(uses: list[_FolderUse], identity: _IdentityReader) -> _Verdict:
             [_make_others_reason(use, access, current) for use, access in accesses if access.kind == AccessKind.OTHERS],
             [_make_take_question(use, access, current) for use, access in accesses if access.kind.is_asking],
             [use for use, access in accesses if access.kind in (AccessKind.CLAIM, AccessKind.TAKE)],
+            [use for use, access in accesses if access.kind.is_asking],
         )
     else:
         return _NO_VERDICT
@@ -574,10 +592,11 @@ def _judge_owner_command(call: CommandCall, owner_command: _OwnerCommand, identi
     worktree = find_linked_worktree(owner_command.folder) if owner_command.folder is not None else None
     command = owner_command.command
     is_taking = command is not None and command not in _READING_OWNER_COMMANDS
-    current = identity() if worktree is not None and is_taking else None
 
-    if worktree is not None and current is not None and command is not None:
-        return _ask_before_taking(_FolderUse(worktree, _describe_call(call)), command, owner_command.sender, current)
+    if worktree is not None and is_taking and command is not None:
+        use = _FolderUse(worktree, _describe_call(call))
+
+        return _ask_before_taking(use, command, owner_command.sender, _require_identity(identity))
     else:
         return _NO_VERDICT
 
@@ -593,8 +612,8 @@ def _ask_before_taking(use: _FolderUse, command: str, sender: str | None, identi
 
 
 def _judge_gap_acceptance(call: CommandCall) -> _Verdict:
-    """The commit wrapper's --accept-gaps commits over calls the guard let through unjudged, so the user decides, and
-    the gaps the dialog shows are kept, so the wrapper takes in only those."""
+    """The commit wrapper's --accept-gaps commits over calls the guard could not match to the owner record, so the
+    user decides, and the gaps the dialog shows are kept, so the wrapper takes in only those."""
     arguments = _read_commit_arguments(call)
     accepts = arguments is not None and arguments.accept_gaps
     worktree = find_linked_worktree(_resolve(call.cwd)) if accepts and call.cwd else None
@@ -612,7 +631,7 @@ def _claim_before_call(use: _FolderUse, identity: SessionIdentity) -> _Verdict:
     owner = take_folder(access, identity) if access.kind in (AccessKind.CLAIM, AccessKind.TAKE) else access.owner
 
     if access.kind.is_asking:
-        return _Verdict([], [_make_take_question(use, access, identity)], [])
+        return _Verdict([], [_make_take_question(use, access, identity)], [], [use])
     elif owner is not None and not owner.owner.is_same(identity):
         reason = _LOST_CLAIM_REASON.format(root=use.worktree.root, owner=owner.describe(), what=use.what)
 
@@ -634,16 +653,25 @@ def _record_call_owners(payload: dict[str, Any], identity: SessionIdentity) -> N
     tool_input = _read_tool_input(payload)
     cwd = _read_call_folder(payload)
     file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
+    call_id = _read_tool_use_id(payload)
 
     if tool_name == _ENTER_WORKTREE_TOOL:
         _claim_created([*_list_response_paths(payload.get(_TOOL_RESPONSE_KEY)), *_optional_path(cwd)], identity)
     elif isinstance(file_path, str) and file_path:
-        _take_after_call(_list_folder_uses([_join(cwd, file_path)], tool_name), identity)
+        _take_after_call(_list_folder_uses([_join(cwd, file_path)], tool_name), identity, call_id)
     elif tool_name in _SHELL_TOOLS:
-        _record_command_owners(str(tool_input.get(_COMMAND_KEY) or ""), cwd, identity, _read_added_folders(payload))
+        added = _read_added_folders(payload)
+
+        _record_command_owners(str(tool_input.get(_COMMAND_KEY) or ""), cwd, identity, added, call_id)
 
 
-def _record_command_owners(command: str, cwd: str | None, identity: SessionIdentity, added: list[Path]) -> None:
+def _record_command_owners(
+    command: str,
+    cwd: str | None,
+    identity: SessionIdentity,
+    added: list[Path],
+    call_id: str | None,
+) -> None:
     """Own the worktrees this call made, which the step before it found missing, and take those it wrote after the
     user approved."""
     calls = _try_expand(command, cwd)
@@ -651,7 +679,7 @@ def _record_command_owners(command: str, cwd: str | None, identity: SessionIdent
     uses = [use for call in writing for use in _list_call_uses(call, _list_written_absolute_paths(call))]
 
     _claim_created(added, identity)
-    _take_after_call(uses, identity)
+    _take_after_call(uses, identity, call_id)
 
 
 def _claim_created(paths: Iterable[Path], identity: SessionIdentity) -> None:
@@ -660,9 +688,10 @@ def _claim_created(paths: Iterable[Path], identity: SessionIdentity) -> None:
             claim_folder(worktree, identity, read_identity_title(identity), ClaimMethod.CREATED)
 
 
-def _take_after_call(uses: list[_FolderUse], identity: SessionIdentity) -> None:
+def _take_after_call(uses: list[_FolderUse], identity: SessionIdentity, call_id: str | None) -> None:
     """Take the folders a call wrote after the user approved taking them. When another session took one first, the
-    call wrote in that session's folder, so the folder records a gap, which its owner's commit asks about."""
+    call wrote in that session's folder, so the folder records a gap, which its owner's commit asks about. The pending
+    gap the step before the call noted is settled only after that, so a failure here leaves it to be asked about."""
     for use in uses:
         access = judge_access(use.worktree, identity)
         owner = take_folder(access, identity) if access.kind.is_taking else access.owner
@@ -671,6 +700,8 @@ def _take_after_call(uses: list[_FolderUse], identity: SessionIdentity) -> None:
             lost = _LOST_AFTER_CALL_GAP.format(owner=owner.describe(), what=use.what)
 
             add_gap(use.worktree, identity, lost, None)
+        if call_id is not None:
+            settle_call_gaps(use.worktree, call_id)
 
 
 def _claim_app_worktree(payload: dict[str, Any]) -> None:
@@ -686,27 +717,6 @@ def _claim_app_worktree(payload: dict[str, Any]) -> None:
 
     if is_unclaimed_app_worktree and worktree is not None and identity is not None:
         claim_folder(worktree, identity, read_identity_title(identity), ClaimMethod.APP_WORKTREE)
-
-
-def _record_gap(payload: dict[str, Any], error: Exception) -> None:
-    """Note a failure in every task worktree the call names, so the commit there asks once; this never raises."""
-    try:
-        tool_name = _read_tool_name(payload)
-        tool_input = _read_tool_input(payload)
-        cwd = _read_call_folder(payload)
-        texts = [str(value) for value in tool_input.values() if isinstance(value, str)]
-        paths = [_join(cwd, path) for text in texts for path in _ABSOLUTE_PATH_PATTERN.findall(text)]
-        file_path = tool_input.get(_FILE_PATH_KEYS.get(tool_name, ""))
-        files = [_join(cwd, file_path)] if isinstance(file_path, str) and file_path else []
-        identity = read_current_identity(payload.get(_SESSION_KEY) or None)
-        call_id = payload.get(_TOOL_USE_KEY)
-
-        for worktree in _find_worktrees([*_optional_path(cwd), *paths, *files]):
-            what = f"{tool_name}: {type(error).__name__}: {error}"
-
-            add_gap(worktree, identity, what, call_id if isinstance(call_id, str) else None)
-    except Exception as gap_error:
-        print(f"worktree-guard-hook: the gap could not be recorded: {gap_error}", file=sys.stderr)
 
 
 def _list_original_reasons(call: CommandCall) -> list[str]:
@@ -809,31 +819,24 @@ def _read_added_worktree(call: CommandCall) -> Path | None:
 
 def _note_folders_to_add(payload: dict[str, Any]) -> None:
     """Before a call runs, keep the folders its `git worktree add` calls name that do not exist yet, so the step
-    after it owns only a worktree this call made, never one a skipped command named. Recording only helps, so a
-    failure here leaves the new worktree to its first write."""
-    try:
-        tool_use_id = payload.get(_TOOL_USE_KEY)
-        command = str(_read_tool_input(payload).get(_COMMAND_KEY) or "")
-        calls = _try_expand(command, _read_call_folder(payload)) if isinstance(tool_use_id, str) and tool_use_id else []
-        missing = [
-            path for call in calls if (path := _read_added_worktree(call)) is not None and not os.path.exists(path)
-        ]
+    after it owns only a worktree this call made, never one a skipped command named. A failure here raises, so the
+    failure policy refuses the call rather than leave the new worktree to whichever session writes there first."""
+    tool_use_id = payload.get(_TOOL_USE_KEY)
+    command = str(_read_tool_input(payload).get(_COMMAND_KEY) or "")
+    calls = _try_expand(command, _read_call_folder(payload)) if isinstance(tool_use_id, str) and tool_use_id else []
+    missing = [path for call in calls if (path := _read_added_worktree(call)) is not None and not os.path.exists(path)]
 
-        if missing and isinstance(tool_use_id, str):
-            _write_pending_adds(tool_use_id, missing)
-    except Exception as error:
-        print(f"worktree-guard-hook: the new worktree's owner will be its first writer ({error})", file=sys.stderr)
+    if missing and isinstance(tool_use_id, str):
+        _write_pending_adds(tool_use_id, missing)
 
 
 def _read_added_folders(payload: dict[str, Any]) -> list[Path]:
-    """The folders noted before this call that exist now; the note is removed either way."""
-    tool_use_id = payload.get(_TOOL_USE_KEY)
-    pending = _get_pending_adds_directory() / f"{tool_use_id}.json" if isinstance(tool_use_id, str) else None
+    """The folders noted before this call that exist now; the note is removed once read. A note that cannot be read
+    raises, so the step shows a hook error rather than leave the new worktree to whichever session writes first."""
+    tool_use_id = _read_tool_use_id(payload)
+    pending = _get_pending_adds_directory() / f"{tool_use_id}.json" if tool_use_id is not None else None
+    noted = json.loads(pending.read_text(encoding=_ENCODING)) if pending is not None and pending.exists() else []
 
-    try:
-        noted = json.loads(pending.read_text(encoding=_ENCODING)) if pending is not None and pending.exists() else []
-    except (OSError, ValueError):
-        noted = []
     if pending is not None:
         pending.unlink(missing_ok=True)
     return [Path(path) for path in noted if isinstance(path, str) and os.path.exists(path)]
@@ -912,6 +915,7 @@ def _merge_verdicts(verdicts: list[_Verdict]) -> _Verdict:
         [reason for verdict in verdicts for reason in verdict.deny],
         [question for verdict in verdicts for question in verdict.ask],
         [use for verdict in verdicts for use in verdict.claims],
+        [use for verdict in verdicts for use in verdict.pending],
     )
 
 
@@ -962,6 +966,12 @@ def _read_tool_name(payload: dict[str, Any]) -> str:
     return str(payload.get(_TOOL_NAME_KEY) or "")
 
 
+def _read_tool_use_id(payload: dict[str, Any]) -> str | None:
+    tool_use_id = payload.get(_TOOL_USE_KEY)
+
+    return tool_use_id if isinstance(tool_use_id, str) and tool_use_id else None
+
+
 def _read_tool_input(payload: dict[str, Any]) -> dict[str, Any]:
     tool_input = payload.get(_TOOL_INPUT_KEY)
 
@@ -1004,7 +1014,12 @@ def _list_removed_owner_records(call: CommandCall) -> list[Path]:
     """Owner records inside a Git folder a removing command deletes or moves."""
     removed = [folder for folder in _list_removed_folders(call) if GIT_DIRECTORY_NAME in folder.parts]
 
-    return [record for folder in removed for pattern in _OWNER_RECORD_PATTERNS for record in folder.glob(pattern)]
+    return [
+        record
+        for folder in removed
+        for pattern in _OWNER_RECORD_PATTERNS
+        for record in list_matching_paths(folder, pattern)
+    ]
 
 
 def _list_removed_folders(call: CommandCall) -> list[Path]:
@@ -1019,10 +1034,10 @@ def _list_contained_worktree_roots(folder: Path) -> list[Path]:
     """Linked worktrees of the repository holding a folder that lie inside it, read from the repository's own list."""
     root = find_repository_root(folder)
     common = _read_common_directory(root) if root is not None else None
-    records = sorted(common.glob(_WORKTREE_RECORD_PATTERN)) if common is not None else []
+    records = list_matching_paths(common, _WORKTREE_RECORD_PATTERN) if common is not None else []
     roots = [_read_worktree_root(record) for record in records]
 
-    return [path for path in roots if path is not None and (path == folder or folder in path.parents)]
+    return [path for path in roots if path == folder or folder in path.parents]
 
 
 def _read_common_directory(root: Path) -> Path | None:
@@ -1037,20 +1052,23 @@ def _read_common_directory(root: Path) -> Path | None:
         return None
 
 
-def _read_worktree_root(record: Path) -> Path | None:
+def _read_worktree_root(record: Path) -> Path:
     """A worktree's folder from its `gitdir` record, which names the worktree's `.git` file."""
-    git_file = _read_text_path(record, record.parent)
-
-    return git_file.parent if git_file is not None else None
+    return _read_text_path(record, record.parent).parent
 
 
-def _read_text_path(path: Path, base: Path) -> Path | None:
+def _read_text_path(path: Path, base: Path) -> Path:
+    """A path Git keeps in a file of its own folder. Raises GitReadError when the file cannot be read or is empty, so a
+    worktree inside a folder being removed is never left out."""
     try:
         text = path.read_text(encoding=_ENCODING).strip()
-    except (OSError, UnicodeDecodeError):
-        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise GitReadError(f"{path} cannot be read: {error}") from error
     else:
-        return (base / text).resolve() if text else None
+        if text:
+            return (base / text).resolve()
+        else:
+            raise GitReadError(f"{path} is empty")
 
 
 def _find_worktrees(paths: Iterable[Path]) -> list[LinkedWorktree]:
@@ -1146,6 +1164,15 @@ def _make_identity_reader(payload: dict[str, Any]) -> _IdentityReader:
         return read_current_identity(session_id)
 
     return read_identity
+
+
+def _require_identity(identity: _IdentityReader) -> SessionIdentity:
+    current = identity()
+
+    if current is not None:
+        return current
+    else:
+        raise _UnknownSessionError(_UNKNOWN_SESSION_ERROR)
 
 
 def _is_reading_call(call: CommandCall) -> bool:
@@ -1309,4 +1336,4 @@ def _is_unguarded_worktree_change(subcommand: str, arguments: list[str]) -> bool
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

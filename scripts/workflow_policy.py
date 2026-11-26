@@ -16,6 +16,7 @@ recorded (user decision, 2026-11-17).
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -26,8 +27,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from integration_commands import CommandError
+
 POLICY_FILE = ".agent-workflow.json"
 GIT_DIRECTORY_NAME = ".git"
+GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
 _MODE_KEY = "mode"
 _BASE_KEY = "base"
 _REQUIRED_CHECKS_KEY = "requiredChecks"
@@ -62,6 +66,14 @@ class PolicyError(Exception):
     """The workflow file exists but does not say what the tools need."""
 
 
+class GitReadError(CommandError):
+    """Git, or a file Git keeps for a worktree, could not answer what a guard or tool needs.
+
+    This is not the same as there being nothing to find, so a guard refuses the call instead of reading it as safe
+    (user decision, 2026-11-24), and the tools, which already stop on a CommandError, stop as before.
+    """
+
+
 @dataclass(frozen=True)
 class WorkflowPolicy:
     mode: WorkflowMode
@@ -91,11 +103,14 @@ def parse_policy(text: str, source: str) -> WorkflowPolicy:
 
 
 def read_checkout_policy(root: Path) -> WorkflowPolicy | None:
-    """The policy in a checkout's working tree, or None when the repository records none."""
+    """The policy in a checkout's working tree, or None when the repository records none; something other than a
+    file in its place raises PolicyError, since the repository may record one there that cannot be read."""
     path = root / POLICY_FILE
 
     if path.is_file():
         return parse_policy(_read_policy_text(path), str(path))
+    elif os.path.lexists(path):
+        raise PolicyError(f"{path} is not a file")
     else:
         return None
 
@@ -114,29 +129,52 @@ def find_repository_root(path: Path) -> Path | None:
     """The nearest folder at or above a path holding `.git`: a folder in an original checkout, a file in a worktree.
 
     Callers pass any word of a command that may be a path, so a name no file can have, such as one longer than the
-    system allows, counts as missing (os.path.exists) instead of raising as pathlib does.
+    system allows, counts as missing (os.path.exists) instead of raising as pathlib does. The `.git` entry of an
+    existing folder is read strictly: one that is there but cannot be examined, such as a link that loops, counts as
+    there, and one the system cannot examine at all raises GitReadError, so a damaged repository never reads as a
+    folder outside any repository (user decision, 2026-11-24).
     """
     existing = next((folder for folder in [path, *path.parents] if os.path.exists(folder)), None)
     folders = [existing, *existing.parents] if existing else []
 
-    return next((folder for folder in folders if os.path.exists(folder / GIT_DIRECTORY_NAME)), None)
+    return next((folder for folder in folders if _has_git_entry(folder)), None)
 
 
-def read_common_git_directory(root: Path) -> Path | None:
-    """The Git folder a checkout shares with its worktrees, or None when Git cannot tell."""
+def has_git_location_variable() -> bool:
+    """Whether the environment names a repository for Git through its location variables, as Git reads them."""
+    return any(name in os.environ for name in GIT_LOCATION_VARIABLES)
+
+
+def _has_git_entry(folder: Path) -> bool:
+    try:
+        os.lstat(folder / GIT_DIRECTORY_NAME)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as error:
+        if error.errno == errno.ENAMETOOLONG:
+            return False
+        else:
+            raise GitReadError(f"{folder / GIT_DIRECTORY_NAME} cannot be examined: {error}") from error
+    else:
+        return True
+
+
+def read_common_git_directory(root: Path) -> Path:
+    """The Git folder a checkout shares with its worktrees. Raises GitReadError when Git cannot tell."""
     result = _run_git(root, ["rev-parse", "--path-format=absolute", "--git-common-dir"])
 
     if result is not None and result.returncode == 0:
         return Path(result.stdout.strip())
     else:
-        return None
+        raise GitReadError(f"Git could not find the repository folder of {root}: {_describe_git_failure(result)}")
 
 
 def read_original_checkout(root: Path) -> Path | None:
-    """The original checkout that a worktree, or the original checkout itself, belongs to."""
+    """The original checkout that a worktree, or the original checkout itself, belongs to; None for a repository whose
+    Git folder lies elsewhere, such as a submodule's. Raises GitReadError when Git cannot tell."""
     common = read_common_git_directory(root)
 
-    if common is not None and is_original_checkout(common.parent):
+    if is_original_checkout(common.parent):
         return common.parent
     else:
         return None
@@ -158,7 +196,7 @@ def is_original_checkout(root: Path) -> bool:
 def check_cleanup_patterns(patterns: Sequence[str], source: str) -> None:
     """Git takes these patterns on its command line, which skips the .gitignore file grammar, so the parts of it a
     reader expects are refused rather than read as names. Only the cleanup tool calls this: the hooks read the same
-    file and stop guarding when reading it fails.
+    file and refuse the calls they cannot judge when reading it fails.
     """
     findings = [(pattern, _find_cleanup_pattern_problem(pattern)) for pattern in patterns]
     refused = [f"{pattern!r} {problem}" for pattern, problem in findings if problem]
@@ -181,6 +219,13 @@ def _run_git(root: Path, arguments: list[str]) -> subprocess.CompletedProcess[st
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
+
+
+def _describe_git_failure(result: subprocess.CompletedProcess[str] | None) -> str:
+    if result is None:
+        return "git did not run or did not finish in time"
+    else:
+        return result.stderr.strip() or f"exit code {result.returncode}"
 
 
 def _read_mode(data: Any, source: str) -> WorkflowMode:

@@ -58,10 +58,12 @@ review has run.
 
 Git cannot tell which session wrote a line, so a whole-file add or a
 hand-built partial file can carry another session's uncommitted lines.
-In a Claude session whose write record covers the whole session
-(session_writes.py), the wrapper refuses staged lines that record does
-not show as the session's own, and --own-lines stages each file as the
-base plus only those lines. It reads every listed file before refusing,
+In a Claude session the wrapper refuses staged lines its write record
+(session_writes.py) does not show as the session's own, also when that
+record is missing or began late (user decision, 2026-11-24), and
+--own-lines, which needs a record that covers the whole session, stages
+each file as the base plus only those lines. It reads every listed file
+before refusing,
 so one refusal names them all and one rerun, with one dialog, settles
 the commit.
 --include-unrecorded <file> commits that file whole after the user has
@@ -76,10 +78,13 @@ instead of the write record: the owner commits the listed files whole,
 whoever wrote their lines (Codex, a formatter, a person at a terminal
 there), and every other session is refused, as is a worktree with no
 owner yet (user decision, 2026-11-18). --own-lines and
---include-unrecorded only print a note there. When the guard let calls
-through there without judging them, the wrapper commits only with
---accept-gaps, before which the guard asks the user once, and then sets
-those gaps aside. The original checkout keeps the own-lines check.
+--include-unrecorded only print a note there. When the guard recorded
+calls there it could not match to the owner record (a takeover it asked
+about whose step after the call did not finish, or a write after another
+session took the folder), the wrapper commits only with --accept-gaps,
+before which the guard asks the user once, and then sets those gaps
+aside; a gap record that cannot be read commits nothing. The original
+checkout keeps the own-lines check.
 
 Sessions that share a checkout commit as the same person, so --amend can
 rewrite a commit another session landed a moment earlier: --expect-head
@@ -105,11 +110,15 @@ Exit codes:
     6  HEAD moved since the index was built, and the commits since change
        a listed file or the index cannot be rebuilt on them (nothing
        committed)
-    7  large code change without --reviewed (nothing committed)
+    7  large code change, or a merge Git cannot redo, without --reviewed
+       (nothing committed)
     8  staged lines this session's write record does not show as its own,
-       own lines that cannot be separated from them, or an
+       own lines that cannot be separated from them, an
        --include-unrecorded file that changed after the shell guard's
-       dialog showed it (nothing committed)
+       dialog showed it, that no dialog showed, whose dialog record or
+       approval cannot be read or kept, or that Git cannot place in a
+       repository, or a write record that cannot be read (nothing
+       committed)
     9  --amend of a commit this session did not make, or one already
        pushed (nothing committed)
    10  another commit or integration held this checkout's lock longer
@@ -118,8 +127,9 @@ Exit codes:
        cannot be read (nothing committed)
    12  a task worktree this session does not own, or one with no owner
        recorded or an unreadable record (nothing committed)
-   13  the folder guard let calls through in this task worktree without
-       judging them, and --accept-gaps was not given (nothing committed)
+   13  the folder guard recorded calls in this task worktree it could not
+       match to the owner record, and --accept-gaps was not given, or its
+       gap record cannot be read (nothing committed)
 """
 
 from __future__ import annotations
@@ -171,6 +181,8 @@ from session_commits import add_session_commit, is_session_commit
 from session_writes import (
     ContestCause,
     IncludeChangedError,
+    IncludeRecordError,
+    IncludeUnshownError,
     SessionWritesError,
     SnapshotScope,
     approve_include,
@@ -192,6 +204,7 @@ from session_writes import (
 )
 from workflow_policy import (
     POLICY_FILE,
+    GitReadError,
     PolicyError,
     WorkflowMode,
     WorkflowPolicy,
@@ -210,6 +223,32 @@ REFLOG_MARK_BYTES = 8
 COMMIT_HOOK_TOOL = "commit hook"
 COMMIT_HOOK_CALL_PREFIX = "commit-hooks-"
 COMMIT_HOOK_RECORD_NOTE = "Note: the commit hooks' writes could not be recorded ({error})."
+STAGED_DIFF_FAILURE = "FAIL: git diff --cached failed"
+GIT_READ_MESSAGE = "FAIL: Git could not answer what this commit needs ({error}), so nothing was committed."
+UNKEPT_APPROVAL_MESSAGE = "FAIL: the approval of the lines the shell guard's dialog showed could not be kept ({error}), so nothing was committed: without it this commit could take lines the dialog did not show.\nResolve: run the same command again; the dialog asks once more."
+UNSHOWN_INCLUDE_MESSAGE = "FAIL: no dialog of the shell guard showed the lines of {files}, so nothing was committed.\nResolve: run the commit wrapper with --include-unrecorded as a command of its own, where the shell guard sees it and shows the lines."
+STAGED_CONTENT_FAILURE = "FAIL: git could not read the staged content of {path}, so nothing was committed"
+INCLUDE_SCOPE_FAILURE = "FAIL: git could not place {files} in a repository, so the shell guard's dialog for them cannot be found and nothing was committed"
+INDEX_LIST_FAILURE = "FAIL: git could not tell whether the index holds {path}, so nothing was committed"
+HEAD_TREE_FAILURE = "FAIL: git could not tell whether HEAD holds {path}, so nothing was committed"
+BRANCH_FAILURE = "FAIL: git could not read which branch HEAD is on, so nothing was committed"
+MERGE_STATE_FAILURE = "FAIL: git could not show whether a merge is in progress ({error}), so nothing was committed"
+MERGE_REDO_FAILURE = "FAIL: git could not redo this merge to count the lines it changes beyond what the merged branch brings, so the review size is not known and nothing was committed.\nResolve: run a checklist review of the staged diff against the code and commit rules (git-commit skill), fix what it finds, then pass --reviewed."
+OWN_LINES_RECORD_FAILURE = "FAIL: {own_lines} needs a write record that covers this whole session, and this session's record is missing or began late, as when the record hook failed or the session started before it was installed.\nResolve: commit the files with {include} <file>, whose dialog shows their lines to the user; for a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, stage it with `git hash-object -w` and `git update-index --cacheinfo`, and run with --no-stage."
+UNREADABLE_DIALOG_MESSAGE = "FAIL: the shell guard's dialog record cannot be read where the newest dialog for these files should be ({error}), so the lines the user approved are not known and nothing was committed.\nResolve: run the same command again; the dialog asks once more."
+RECORD_READ_MESSAGE = "FAIL: the session's write record could not be read ({error}), so nothing was committed."
+UNREADABLE_GAPS_MESSAGE = "FAIL: the folder guard's gap record cannot be read ({error}), so the calls it recorded cannot be shown and nothing was committed."
+NOT_SYMBOLIC_EXIT_CODE = 1
+UNMATCHED_PATH_EXIT_CODE = 1
+TOP_LITERAL_PATHSPEC = ":(top,literal)"
+SUBMODULE_MODE = "160000"
+BLOB_TYPE = "blob"
+ENTRY_NAME_SEPARATOR = "\t"
+REVISION_FAILURE = "FAIL: git could not read {revision}, so nothing was committed"
+BASE_CONTENT_FAILURE = "FAIL: git could not read {path} as it is in {base}, so nothing was committed"
+INDEX_UPDATE_FAILURE = "FAIL: git update-index failed for {path}, so nothing was committed"
+INDEX_MODE_FAILURE = "FAIL: git could not read the index entry of {path}, so nothing was committed"
+UNKNOWN_REVISION_EXIT_CODE = 1
 REFLOG_ENTRY_FORMAT = "--format=%H %gs"
 REFLOG_ENTRY_RE = re.compile(r"([0-9a-f]{40,64}) (.*)")
 REFLOG_SPACE_RE = re.compile(r"[\t\n\r ]+")
@@ -250,7 +289,7 @@ NOT_OWNER_MESSAGE = "FAIL: {root} is the task worktree of {owner}, not of this s
 NO_OWNER_MESSAGE = "FAIL: {root} is a task worktree with no owner recorded, as worktrees made before owners were recorded are, so nothing was committed. Claim it with `{command} claim` in it, which asks the user once when it holds uncommitted changes, then commit again."
 SETTLE_GAPS_NOTE = "Note: the commit is made, but the gaps it took in could not be set aside ({error}); the next commit asks about them again."
 UNREADABLE_OWNER_MESSAGE = "FAIL: {error}, so who owns this task worktree is not known and nothing was committed. Tell the user."
-GUARD_GAPS_MESSAGE = "FAIL: the folder guard let {count} calls through in {root} without judging them, and the user has not seen them, so another session may have written there and nothing was committed:\n{gaps}\nResolve: rerun with {option} as a command of its own, without asking in chat first: the folder guard shows the user these calls and asks once. If the user declines, do not commit."
+GUARD_GAPS_MESSAGE = "FAIL: the folder guard recorded {count} calls in {root} it could not match to the folder's owner record (one may not have run), and the user has not seen them, so another session may have written there and nothing was committed:\n{gaps}\nResolve: rerun with {option} as a command of its own, without asking in chat first: the folder guard shows the user these calls and asks once. If the user declines, do not commit."
 TASK_WORKTREE_NOTE = "this session's task worktree: its owner commits every change there"
 NO_WORKFLOW_MESSAGE = "{root} records no Git workflow in {file}, so nothing was committed. Ask the user which workflow this repository uses and record it there as the git-commit skill's 'Repository Workflow' describes: {modes}."
 UNREADABLE_WORKFLOW_MESSAGE = "{error}; nothing was committed. Fix {path}, then commit again."
@@ -281,6 +320,19 @@ class ApprovedContent:
 
     repository_path: str
     blob: str | None
+
+
+@dataclass(frozen=True)
+class IncludeApproval:
+    """What the user approved in the shell guard's dialog: the contents staged as it showed them, by the path given on
+    the command line, and the paths from the repository's top the approval covers, the same paths the own-lines check
+    reads, so it leaves out exactly the files whose approval was kept."""
+
+    contents: dict[str, ApprovedContent]
+    paths: tuple[str, ...]
+
+
+NO_APPROVAL = IncludeApproval({}, ())
 
 
 @dataclass(frozen=True)
@@ -427,14 +479,65 @@ def is_removal_staged(path: str) -> bool:
 
 
 def is_in_index(path: str) -> bool:
-    return run_git(["ls-files", "--error-unmatch", "--", path], capture_output=True).returncode == 0
+    """Whether the index holds a path given from the current folder, as the command line names it; an index Git
+    cannot read stops the commit, since a listed file would read as removed and be left out."""
+    result = run_git(["ls-files", "--error-unmatch", "--", path], capture_output=True)
+
+    if result.returncode == 0:
+        return True
+    elif result.returncode == UNMATCHED_PATH_EXIT_CODE:
+        return False
+    else:
+        fail(INDEX_LIST_FAILURE.format(path=path), EXIT_GIT_ERROR)
+
+
+def read_staged_mode(path: str) -> str | None:
+    """The mode of a path's index entry by its path from the repository's top, as Git's own listings name it, whichever
+    folder the wrapper runs in; None when the index holds nothing there. An index Git cannot list stops the commit."""
+    listing = ["ls-files", "--stage", "--full-name", "-z", "--", f"{TOP_LITERAL_PATHSPEC}{path}"]
+    result = run_git(listing, capture_output=True)
+    details = find_entry_details(result.stdout, path)
+
+    if result.returncode == 0 and details is not None:
+        return details[0]
+    elif result.returncode == 0:
+        return None
+    else:
+        fail(INDEX_LIST_FAILURE.format(path=path), EXIT_GIT_ERROR)
 
 
 def is_in_head(path: str) -> bool:
-    """Whether HEAD has an entry at the path, a folder included; false before the first commit."""
-    result = run_git(["ls-tree", HEAD_REVISION, "--", path], capture_output=True)
+    """Whether HEAD has an entry at the path, a folder included; false before the first commit, and a HEAD Git cannot
+    read stops the commit."""
+    head = read_revision(HEAD_REVISION)
+    result = run_git(["ls-tree", HEAD_REVISION, "--", path], capture_output=True) if head is not None else None
 
-    return result.returncode == 0 and bool(result.stdout.strip())
+    if result is None:
+        return False
+    elif result.returncode == 0:
+        return bool(result.stdout.strip())
+    else:
+        fail(HEAD_TREE_FAILURE.format(path=path), EXIT_GIT_ERROR)
+
+
+def read_staged_paths(*options: str) -> list[str]:
+    """The paths the index changes from HEAD, by their path from the repository's top; a listing Git cannot give stops
+    the commit, since every check of what is staged reads it."""
+    staged_proc = run_git(["diff", "--cached", "--name-only", "-z", *options], capture_output=True)
+
+    if staged_proc.returncode == 0:
+        return split_path_list(staged_proc.stdout)
+    else:
+        fail(STAGED_DIFF_FAILURE, EXIT_GIT_ERROR)
+
+
+def find_entry_details(listing: str, path: str) -> list[str] | None:
+    """The fields before the name of the entry named exactly by a path in a `-z` listing of `ls-files --stage` or
+    `ls-tree`, so a folder's name never picks a file inside it."""
+    entries = [entry.split(ENTRY_NAME_SEPARATOR, 1) for entry in split_path_list(listing)]
+    found = [details.split() for details, *name in entries if name == [path]]
+
+    return found[0] if found else None
 
 
 def split_path_list(output: str) -> list[str]:
@@ -443,15 +546,10 @@ def split_path_list(output: str) -> list[str]:
 
 
 def verify_staging(expected_files: Sequence[str]) -> None:
-    actual_proc = run_git(
-        ["diff", "--cached", "--name-only", "-z"],
-        capture_output=True,
-    )
-    if actual_proc.returncode != 0:
-        fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
     expected = set(expected_files)
-    actual = set(split_path_list(actual_proc.stdout))
+    actual = set(read_staged_paths())
     extra = actual - expected
+
     if extra:
         sys.stderr.write("FAIL: files staged but not in argv:\n")
         for path in sorted(extra):
@@ -461,12 +559,16 @@ def verify_staging(expected_files: Sequence[str]) -> None:
 
 
 def read_revision(revision: str) -> str | None:
+    """The object a revision names, None when Git knows no such name; any other failure stops the commit, since a base
+    or HEAD read as missing would change what the checks compare."""
     revision_proc = run_git(["rev-parse", "--verify", "--quiet", revision], capture_output=True)
 
     if revision_proc.returncode == 0:
         return revision_proc.stdout.strip()
-    else:
+    elif revision_proc.returncode == UNKNOWN_REVISION_EXIT_CODE:
         return None
+    else:
+        fail(REVISION_FAILURE.format(revision=revision), EXIT_GIT_ERROR)
 
 
 def resolve_expected_head(expected_head_argument: str | None) -> str | None:
@@ -577,16 +679,16 @@ def check_private_index_arguments(expected_head_argument: str | None, files: Seq
         fail("\n".join(usage_lines), EXIT_USAGE)
 
 
-def read_approved_files(arguments: CommitArguments) -> dict[str, ApprovedContent]:
+def read_approved_files(arguments: CommitArguments) -> IncludeApproval:
     """In a task worktree the owner commits whole files, so --include-unrecorded has nothing to approve there."""
     if arguments.included_paths and find_task_worktree() is not None:
         print(f"=== {TASK_WORKTREE_NOTE}: {INCLUDE_UNRECORDED_OPTION} is not needed ===")
-        return {}
+        return NO_APPROVAL
     else:
         return approve_included_files(arguments)
 
 
-def approve_included_files(arguments: CommitArguments) -> dict[str, ApprovedContent]:
+def approve_included_files(arguments: CommitArguments) -> IncludeApproval:
     """The contents of the --include-unrecorded files the user approved, by the path given on the command line.
 
     The shell guard asks before every such call, so this run is the user's
@@ -594,31 +696,37 @@ def approve_included_files(arguments: CommitArguments) -> dict[str, ApprovedCont
     contents rather than the files as they are when staged. With --no-stage
     the prepared index is committed as it is, so the dialog showed the
     index's contents and the approval covers them; nothing is staged from
-    it. A session without a record folder has no dialog contents kept, so
-    the files count as they are now. It is empty outside a session and when
-    the approval cannot be kept; the files are then staged as they are. Only
-    regular files and removed ones are staged from a content: a folder, a
-    link, or a submodule is staged by `git add` as before.
+    it. A call no dialog showed, such as one run where the shell guard
+    could not see it, commits nothing, and so does one whose files Git
+    cannot place in a repository, since their dialog cannot be found then.
+    It is empty outside a session, and the files are then staged as they
+    are; when the approval cannot be kept, nothing is committed, since the
+    files may hold lines the dialog did not show. Only regular files and
+    removed ones are staged from a content: a folder, a link, or a
+    submodule is staged by `git add` as before.
     """
     session_id = read_session_id()
     included = list(arguments.included_paths)
     scope = find_repository_paths(os.getcwd(), included) if session_id and included else None
 
-    if session_id and scope is not None and arguments.no_stage:
-        try_approve_include(session_id, *scope, from_index=True)
-        return {}
+    if session_id and included and scope is None:
+        fail(INCLUDE_SCOPE_FAILURE.format(files=", ".join(included)), EXIT_FOREIGN_LINES)
+    elif session_id and scope is not None and arguments.no_stage:
+        approve_dialog_contents(session_id, *scope, from_index=True)
+        return IncludeApproval({}, tuple(scope[1]))
     elif session_id and scope is not None:
         root, repository_paths = scope
-        blobs = try_approve_include(session_id, root, repository_paths, from_index=False)
+        blobs = approve_dialog_contents(session_id, root, repository_paths, from_index=False)
         pairs = zip(included, repository_paths)
-
-        return {
+        contents = {
             argument: ApprovedContent(path, blobs[path])
             for argument, path in pairs
             if path in blobs and is_content_stageable(root, path)
         }
+
+        return IncludeApproval(contents, tuple(repository_paths))
     else:
-        return {}
+        return NO_APPROVAL
 
 
 def is_content_stageable(root: str, path: str) -> bool:
@@ -628,8 +736,14 @@ def is_content_stageable(root: str, path: str) -> bool:
     return not os.path.lexists(file) or (os.path.isfile(file) and not os.path.islink(file))
 
 
-def try_approve_include(session_id: str, root: str, paths: Sequence[str], from_index: bool) -> dict[str, str | None]:
-    """Approve what the dialog showed: the files, or with `from_index` the prepared index this commit takes.
+def approve_dialog_contents(
+    session_id: str,
+    root: str,
+    paths: Sequence[str],
+    from_index: bool,
+) -> dict[str, str | None]:
+    """Approve what the dialog showed: the files, or with `from_index` the prepared index this commit takes. An
+    approval that cannot be kept commits nothing, since the files as they are now may hold lines it did not show.
 
     A relative index path counts from this folder, as the shell guard reads it from the command's folder.
     """
@@ -641,9 +755,12 @@ def try_approve_include(session_id: str, root: str, paths: Sequence[str], from_i
         return approve_include(session_id, root, paths, index_blobs)
     except IncludeChangedError as error:
         fail(make_changed_include_message(error.paths), EXIT_FOREIGN_LINES)
+    except IncludeUnshownError as error:
+        fail(UNSHOWN_INCLUDE_MESSAGE.format(files=error), EXIT_FOREIGN_LINES)
+    except IncludeRecordError as error:
+        fail(UNREADABLE_DIALOG_MESSAGE.format(error=error), EXIT_FOREIGN_LINES)
     except (SessionWritesError, OSError) as error:
-        print(f"Note: the approval could not be kept ({error}), so a retry is asked again.", file=sys.stderr)
-        return {}
+        fail(UNKEPT_APPROVAL_MESSAGE.format(error=error), EXIT_FOREIGN_LINES)
 
 
 def make_changed_include_message(paths: Sequence[str]) -> str:
@@ -752,18 +869,20 @@ def read_git_directory() -> Path:
     if git_directory_proc.returncode == 0:
         return Path(git_directory_proc.stdout.strip())
     else:
-        fail(
-            "FAIL: git could not find this checkout's Git folder, so the commit lock could not be taken", EXIT_GIT_ERROR
-        )
+        fail("FAIL: git could not find this checkout's Git folder, so nothing was committed", EXIT_GIT_ERROR)
 
 
 def read_head_branch() -> str | None:
+    """The branch HEAD is on, None when it is on none; a branch Git cannot read stops the commit, since two failed
+    reads would match and let a moved branch pass."""
     branch_proc = run_git(["symbolic-ref", "--quiet", HEAD_REVISION], capture_output=True)
 
     if branch_proc.returncode == 0:
         return branch_proc.stdout.strip()
-    else:
+    elif branch_proc.returncode == NOT_SYMBOLIC_EXIT_CODE:
         return None
+    else:
+        fail(BRANCH_FAILURE, EXIT_GIT_ERROR)
 
 
 def find_commit_base(arguments: CommitArguments, expected_head: str | None, starting_branch: str | None) -> str | None:
@@ -939,23 +1058,35 @@ def record_session_commit(commit: str) -> None:
 
 
 def read_staged_content(path: str) -> bytes | None:
+    """A staged file's content by its path from the repository's top, None where the index holds no file: a staged
+    removal, or a submodule, whose entry names a commit of another repository. Content Git cannot show stops the
+    commit, since a check would otherwise read another file in its place."""
+    mode = read_staged_mode(path)
+
+    if mode is not None and mode != SUBMODULE_MODE:
+        return read_required_staged_content(path)
+    else:
+        return None
+
+
+def read_required_staged_content(path: str) -> bytes:
+    """A staged file's content for a check that must see it; one Git cannot show stops the commit."""
     blob_proc = subprocess.run(
         ["git", "cat-file", "blob", f":{path}"],
         capture_output=True,
         check=False,
     )
-    return blob_proc.stdout if blob_proc.returncode == 0 else None
+
+    if blob_proc.returncode == 0:
+        return blob_proc.stdout
+    else:
+        fail(STAGED_CONTENT_FAILURE.format(path=path), EXIT_GIT_ERROR)
 
 
 def check_credential_files() -> None:
-    staged_proc = run_git(
-        ["diff", "--cached", "--name-only", "-z", "--diff-filter=d"],
-        capture_output=True,
-    )
-    if staged_proc.returncode != 0:
-        fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
     offenders = []
-    for path in split_path_list(staged_proc.stdout):
+
+    for path in read_staged_paths("--diff-filter=d"):
         reason = get_credential_reason(path, functools.partial(read_staged_content, path))
         if reason:
             offenders.append(f"  {path} ({reason})")
@@ -972,7 +1103,7 @@ def check_credential_files() -> None:
 def check_secret_tokens() -> None:
     diff_proc = run_git(STAGED_DIFF_ARGUMENTS, capture_output=True)
     if diff_proc.returncode != 0:
-        fail("FAIL: git diff --cached failed", EXIT_GIT_ERROR)
+        fail(STAGED_DIFF_FAILURE, EXIT_GIT_ERROR)
     offenders = find_added_secret_tokens(diff_proc.stdout)
     if offenders:
         fail(
@@ -995,49 +1126,67 @@ def check_large_commit_reviewed(changed_lines: int, reviewed: bool) -> None:
         fail(message, EXIT_REVIEW_MISSING)
 
 
-def count_code_lines() -> int:
-    numstat_proc = run_git(["diff", "--cached", "--numstat", "-z", *read_count_base()], capture_output=True)
+def count_code_lines(reviewed: bool) -> int:
+    numstat_proc = run_git(["diff", "--cached", "--numstat", "-z", *read_count_base(reviewed)], capture_output=True)
     if numstat_proc.returncode != 0:
         fail("FAIL: git diff --cached --numstat failed", EXIT_GIT_ERROR)
     return sum(count_numstat_lines(*entry) for entry in parse_numstat(numstat_proc.stdout))
 
 
-def read_count_base() -> list[str]:
+def read_count_base(reviewed: bool) -> list[str]:
     """What the staged change is counted against: HEAD, or for a merge Git's own automatic merge of both sides.
 
     The lines a merged branch brings in passed review and checks on that branch,
     so a merge counts only what differs from Git's automatic merge, the same
     comparison `git show --remerge-diff` makes: conflict resolutions and hand
-    edits. A merge of several branches, or one Git cannot redo, counts against HEAD.
+    edits. A merge of several branches counts against HEAD. A merge Git cannot
+    redo is refused without --reviewed whatever its size and counted against
+    HEAD with it, since a resolution that undoes many merged lines would look
+    small against HEAD.
     """
     merge_heads = read_merge_heads()
 
     if len(merge_heads) == 1:
-        return read_automatic_merge(merge_heads[0])
+        return read_automatic_merge(merge_heads[0], reviewed)
     else:
         return []
 
 
 def read_merge_heads() -> list[str]:
+    """The commits a merge in progress brings in, none outside a merge; a merge state Git cannot show stops the
+    commit, since its lines would be counted against the wrong base."""
     path_proc = run_git(["rev-parse", "--git-path", MERGE_HEAD], capture_output=True)
-    path = path_proc.stdout.strip()
 
-    if path_proc.returncode == 0 and os.path.isfile(path):
+    if path_proc.returncode == 0:
+        return read_merge_head_file(path_proc.stdout.strip())
+    else:
+        fail(MERGE_STATE_FAILURE.format(error=path_proc.stderr.strip()), EXIT_GIT_ERROR)
+
+
+def read_merge_head_file(path: str) -> list[str]:
+    try:
         with open(path, encoding=GIT_STATE_ENCODING) as handle:
             return handle.read().split()
-    else:
+    except FileNotFoundError:
         return []
+    except OSError as error:
+        fail(MERGE_STATE_FAILURE.format(error=error), EXIT_GIT_ERROR)
 
 
-def read_automatic_merge(merge_head: str) -> list[str]:
-    merge_proc = run_git(["merge-tree", "--write-tree", "--no-messages", "HEAD", merge_head], capture_output=True)
+def read_automatic_merge(merge_head: str, reviewed: bool) -> list[str]:
+    """Git's own merge of HEAD and the merged commit. A merge in progress of unrelated histories was allowed when it
+    began, so redoing it allows them too, and any other failure of Git to redo it is an error."""
+    merge = ["merge-tree", "--write-tree", "--no-messages", "--allow-unrelated-histories", "HEAD", merge_head]
+    merge_proc = run_git(merge, capture_output=True)
     tree = merge_proc.stdout.split("\n", 1)[0].strip()
 
     if merge_proc.returncode in (0, MERGE_TREE_CONFLICTED) and tree:
         return [tree]
-    else:
-        print("Note: Git could not redo this merge, so its lines are counted against HEAD.")
+    elif reviewed:
+        print("Note: Git could not redo this merge, so its lines are counted against HEAD in this reviewed commit.")
         return []
+    else:
+        fail(MERGE_REDO_FAILURE, EXIT_REVIEW_MISSING)
 
 
 def parse_numstat(output: str) -> list[tuple[str, str, str]]:
@@ -1068,16 +1217,19 @@ def is_uncounted_path(path: str) -> bool:
 
 
 def read_repository_root() -> str:
-    return run_git(["rev-parse", "--show-toplevel"], capture_output=True).stdout.strip()
+    """The checkout's top folder; Git that cannot tell, outside a repository or not, stops the commit, so no check
+    reads an empty folder name as somewhere to look."""
+    result = run_git(["rev-parse", "--show-toplevel"], capture_output=True)
+    root = result.stdout.strip()
+
+    if result.returncode == 0 and root:
+        return root
+    else:
+        fail(NOT_REPOSITORY_MESSAGE, EXIT_GIT_ERROR)
 
 
 def check_workflow_recorded() -> None:
-    root = read_repository_root()
-
-    if root:
-        check_workflow_file(Path(root))
-    else:
-        fail(NOT_REPOSITORY_MESSAGE, EXIT_GIT_ERROR)
+    check_workflow_file(Path(read_repository_root()))
 
 
 def check_workflow_file(root: Path) -> None:
@@ -1105,15 +1257,37 @@ def read_recorded_policy(root: Path) -> WorkflowPolicy | None:
 
 
 def read_base_text(expected_head: str | None, path: str) -> str:
-    """Base content as text that keeps its line endings and bytes, matching session_writes."""
-    base_args = ["git", "cat-file", "blob", f"{expected_head}:{path}"]
-    base_proc = subprocess.run(base_args, capture_output=True, check=False) if expected_head else None
+    """Base content as text that keeps its line endings and bytes, matching session_writes: empty where the base holds
+    no file (no such path, a folder, a submodule), and a base Git cannot read stops the commit, since reading it as
+    empty would hide another session's lines."""
+    blob = read_tree_file_blob(expected_head, path) if expected_head else None
+    base_proc = subprocess.run(["git", "cat-file", "blob", blob], capture_output=True, check=False) if blob else None
 
-    return decode_content(base_proc.stdout) if base_proc is not None and base_proc.returncode == 0 else ""
+    if base_proc is None:
+        return ""
+    elif base_proc.returncode == 0:
+        return decode_content(base_proc.stdout)
+    else:
+        fail(BASE_CONTENT_FAILURE.format(path=path, base=shorten(expected_head)), EXIT_GIT_ERROR)
 
 
 def read_base_blob(expected_head: str | None, path: str) -> str | None:
+    """The object a path names in the base, whatever its kind, as the write record names the base it starts from."""
     return read_revision(f"{expected_head}:{path}") if expected_head else None
+
+
+def read_tree_file_blob(revision: str, path: str) -> str | None:
+    """The blob of the file a path names in a commit, None where it holds no file: no such path, a folder, or a
+    submodule. A commit Git cannot list stops the commit."""
+    listing = run_git(["ls-tree", "--full-tree", "-z", revision, "--", path], capture_output=True)
+    details = find_entry_details(listing.stdout, path)
+
+    if listing.returncode == 0 and details is not None and details[1] == BLOB_TYPE:
+        return details[2]
+    elif listing.returncode == 0:
+        return None
+    else:
+        fail(BASE_CONTENT_FAILURE.format(path=path, base=shorten(revision)), EXIT_GIT_ERROR)
 
 
 def read_own_content(session_id: str, root: str, path: str, base: str) -> OwnCommitContent | None:
@@ -1164,10 +1338,14 @@ def make_foreign_lines_report(problems: Sequence[str], paths: Sequence[str], sug
 
 
 def read_index_mode(root: str, path: str) -> str:
-    """The mode of a path in the repository, read from the index or, for a new file, from the file."""
-    entry = run_git(["-C", root, "ls-files", "-s", "--", path], capture_output=True).stdout.split()
+    """The mode of a path in the repository, read from the index or, for a new file, from the file; an index Git cannot
+    read stops the commit, since the mode goes into what is staged."""
+    result = run_git(["-C", root, "ls-files", "-s", "--", path], capture_output=True)
+    entry = result.stdout.split()
 
-    if entry:
+    if result.returncode != 0:
+        fail(INDEX_MODE_FAILURE.format(path=path), EXIT_GIT_ERROR)
+    elif entry:
         return entry[0]
     else:
         return EXECUTABLE_FILE_MODE if os.access(os.path.join(root, path), os.X_OK) else REGULAR_FILE_MODE
@@ -1184,11 +1362,7 @@ def stage_changes(arguments: CommitArguments, expected_head: str | None, approve
     elif arguments.own_lines and session_id is not None and is_record_complete(session_id):
         stage_own_lines(session_id, arguments.files, arguments.included_paths, approved, expected_head)
     elif arguments.own_lines:
-        fail(
-            f"FAIL: {OWN_LINES_OPTION} needs a write record that covers this whole session, which only sessions started after the record hook was installed have.\n"
-            f"Resolve: commit without {OWN_LINES_OPTION}; for a file that also holds another session's uncommitted edits, build its content from `git show <base>:<path>` plus only your change, stage it with `git hash-object -w` and `git update-index --cacheinfo`, and run with --no-stage.",
-            EXIT_USAGE,
-        )
+        fail(OWN_LINES_RECORD_FAILURE.format(own_lines=OWN_LINES_OPTION, include=INCLUDE_UNRECORDED_OPTION), EXIT_USAGE)
     else:
         stage_files(arguments.files, approved)
     print("=== Staged changes ===")
@@ -1239,10 +1413,18 @@ def stage_own_text(root: str, path: str, text: str) -> None:
 def stage_content(root: str, path: str, blob: str | None, note: str) -> None:
     """Put a stored content in the index at a path in the repository, or remove the path for None."""
     if blob is None:
-        run_git(["-C", root, "update-index", "--force-remove", "--", path])
-        print(f"  - {path} (removed, {note})")
+        remove_index_entry(root, path, note)
     else:
         stage_blob(root, path, blob, note)
+
+
+def remove_index_entry(root: str, path: str, note: str) -> None:
+    result = run_git(["-C", root, "update-index", "--force-remove", "--", path])
+
+    if result.returncode == 0:
+        print(f"  - {path} (removed, {note})")
+    else:
+        fail(INDEX_UPDATE_FAILURE.format(path=path), EXIT_GIT_ERROR)
 
 
 def stage_blob(root: str, path: str, blob: str, note: str) -> None:
@@ -1256,19 +1438,17 @@ def stage_blob(root: str, path: str, blob: str, note: str) -> None:
 
 
 def find_own_lines_skip_reason() -> str | None:
-    """Why the own-lines check does not apply to this commit, or None when it does."""
+    """Why the own-lines check does not apply to this commit, or None when it does. A Claude session whose write
+    record is missing or began late is checked too, so its lines it cannot show as its own are asked about: a record
+    hook that failed must not read as a session that needs no check (user decision, 2026-11-24)."""
     session_id = read_session_id()
-    git_directory = run_git(["rev-parse", "--git-dir"], capture_output=True).stdout.strip()
+    git_directory = read_git_directory()
 
     if session_id is None:
         return "not checked (not a Claude session)"
     elif find_task_worktree() is not None:
         return f"not checked ({TASK_WORKTREE_NOTE})"
-    elif not has_record(session_id):
-        return "not checked (no write record: the session started before the record hook)"
-    elif not is_record_complete(session_id):
-        return "not checked (write record started mid-session: new sessions are checked)"
-    elif any(os.path.exists(os.path.join(git_directory, name)) for name in SEQUENCER_STATE_FILES):
+    elif any((git_directory / name).exists() for name in SEQUENCER_STATE_FILES):
         return "not checked (merge in progress)"
     else:
         return None
@@ -1298,11 +1478,15 @@ def read_task_gaps() -> tuple[GuardGap, ...]:
     """The gaps this commit checks and then settles, read once; a gap added while it runs stays for the next one."""
     worktree = find_task_worktree()
 
-    return tuple(read_gaps(worktree)) if worktree is not None else ()
+    try:
+        return tuple(read_gaps(worktree)) if worktree is not None else ()
+    except OwnerFileError as error:
+        fail(UNREADABLE_GAPS_MESSAGE.format(error=error), EXIT_GUARD_GAPS)
 
 
 def check_folder_owner(accept_gaps: bool) -> None:
-    """In a task worktree only its owner commits, and only once the user saw what the folder guard let through."""
+    """In a task worktree only its owner commits, and only once the user saw the calls the folder guard could not
+    match to the owner record."""
     worktree = find_task_worktree()
 
     check_task_owner()
@@ -1371,9 +1555,7 @@ def settle_seen_gaps() -> None:
 def check_staged_lines(included: Sequence[str], expected_head: str | None) -> None:
     session_id = read_session_id() or ""
     root = read_repository_root()
-    staged_output = run_git(["diff", "--cached", "--name-only", "-z", "--no-renames"], capture_output=True).stdout
-    staged_paths = split_path_list(staged_output)
-    checked = [path for path in staged_paths if path not in included]
+    checked = [path for path in read_staged_paths("--no-renames") if path not in included]
     problems = {path: describe_staged_problem(session_id, root, path, expected_head) for path in checked}
     shown = {path: problem for path, problem in problems.items() if problem}
 
@@ -1597,6 +1779,17 @@ def read_commit_arguments(argv: list[str]) -> CommitArguments:
 
 
 def main(argv: list[str]) -> None:
+    """A Git answer or a write record the wrapper needs and cannot read, such as a worktree's unreadable `.git` file,
+    stops the commit."""
+    try:
+        run_commit(argv)
+    except GitReadError as error:
+        fail(GIT_READ_MESSAGE.format(error=error), EXIT_GIT_ERROR)
+    except SessionWritesError as error:
+        fail(RECORD_READ_MESSAGE.format(error=error), EXIT_FOREIGN_LINES)
+
+
+def run_commit(argv: list[str]) -> None:
     arguments = read_commit_arguments(argv)
     files = arguments.files
 
@@ -1626,18 +1819,18 @@ def main(argv: list[str]) -> None:
 def stage_and_commit(
     arguments: CommitArguments,
     expected_head: str | None,
-    approved: dict[str, ApprovedContent],
+    approved: IncludeApproval,
     metrics: tuple[int, int, int, int],
 ) -> MadeCommit:
-    stage_changes(arguments, expected_head, approved)
+    stage_changes(arguments, expected_head, approved.contents)
     if arguments.files:
         verify_staging(arguments.files)
     check_credential_files()
     check_secret_tokens()
     own_lines_skip_reason = find_own_lines_skip_reason()
     if own_lines_skip_reason is None:
-        check_staged_lines(arguments.included_paths, expected_head)
-    code_lines = count_code_lines()
+        check_staged_lines(approved.paths, expected_head)
+    code_lines = count_code_lines(arguments.reviewed)
     check_large_commit_reviewed(code_lines, arguments.reviewed)
     print_verification(*metrics, expected_head, code_lines, own_lines_skip_reason or "OK", arguments.amend)
     print("=== Committing ===")

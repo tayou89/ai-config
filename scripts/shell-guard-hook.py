@@ -29,8 +29,15 @@ Routine commits and pushes need no approval (user decision, 2026-11-09):
 a push of the current branch to its own remote passes without a prompt.
 
 Prints nothing when no check matches, so the normal permission flow
-decides. When the command cannot be analyzed, it asks instead of
-letting the call through.
+decides. A command the hook cannot finish judging is refused, since not
+knowing must not read as safe (user decision, 2026-11-24): each check runs
+on its own through judge_checks in hook_failure.py, so a check that fails
+keeps the others' findings; a Git check that fails refuses, and the
+production check, which asks anyway, asks. A Git answer the hook cannot
+read raises GitReadError instead of reading as nothing there, and an
+error before the checks, such as a command too deep to follow, gets
+FAILURE_POLICY's refusal. The settings entry blocks on failure, so a crash
+or a timeout refuses the call too.
 
 The --include-unrecorded dialog is the only question about those lines
 (user decision, 2026-11-11): it lists them, and the session does not ask
@@ -47,22 +54,22 @@ dialog lists and keeps the index's contents instead of the working tree's.
 from __future__ import annotations
 
 import functools
-import json
 import os
 import re
 import subprocess
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from commit_arguments import CommitArguments, CommitArgumentsError, parse_commit_arguments
 from folder_owner import find_linked_worktree
+from hook_failure import Check, Decision, FailurePolicy, Finding, judge_checks, run_hook
 from secret_files import get_credential_reason, read_file_head
 from session_lineage import find_session_record, is_archived, read_session_title
 from session_writes import (
     INDEX_VARIABLE,
-    SessionWritesError,
     add_include_offer,
     find_repository_paths,
     is_include_approved,
@@ -77,14 +84,25 @@ from shell_command import (
     join_directory,
     parse_git_command,
 )
-from workflow_policy import WorkflowMode, find_repository_root, read_checkout_policy, read_original_checkout
+from workflow_policy import (
+    GitReadError,
+    WorkflowMode,
+    find_repository_root,
+    has_git_location_variable,
+    read_checkout_policy,
+    read_original_checkout,
+)
 
+FAILURE_POLICY = FailurePolicy.blocking(
+    "shell-guard-hook",
+    Decision.DENY,
+    "The shell guard could not analyze this command ({error}), so it refuses it rather than let a commit, a push, a merge, or a production run through unchecked. Retry it or split it; if every command is refused, tell the user, since the README's Hooks section (failure handling) says how to repair the guard from a terminal.",
+)
+GIT_CHECK_FAILURE_REASON = "The shell guard could not finish its {check} check ({{error}}), so it refuses this command rather than let it through unchecked. Retry it; if it keeps failing, tell the user."
+PRODUCTION_CHECK_FAILURE_REASON = "The shell guard could not finish its production-mode check ({error}). Approve only if this command does not start an application in production, staging, or live mode."
 TERMINAL_TOOL = "mcp__terminal__run_in_terminal"
 CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 DEFAULT_CONFIG_DIRECTORY = "~/.claude"
-DECISION_DENY = "deny"
-DECISION_ASK = "ask"
-HOOK_EVENT_NAME = "PreToolUse"
 SESSION_KEY = "session_id"
 MAX_SHOWN_INCLUDE_LINES = 8
 MAX_SHOWN_LINE_LENGTH = 160
@@ -114,9 +132,7 @@ INCLUDE_UNRECORDED_REASON = (
     "아래 줄이 이 커밋에 들어가도 되면 승인해 주세요. 거절하시면 세션이 그 파일을 빼고 커밋합니다.\n"
     "{lines}\n명령: {command}{origin}"
 )
-INCLUDE_LINES_UNKNOWN = (
-    "{path}: 줄 목록을 읽지 못했습니다. python3 ~/.claude/scripts/session_writes.py report {path} 로 볼 수 있습니다."
-)
+INCLUDE_OFFER_UNKNOWN = "the dialog cannot keep what this call would commit of {paths}, since its session, repository, or index is not known before it runs"
 INCLUDE_LINES_MORE = "  … 그 밖에 {count}줄"
 PUSH_REASON = "This push needs your approval because it {risks}: {command}{origin}."
 PRODUCTION_REASON = (
@@ -141,11 +157,6 @@ ADOPTION_REASON = (
 )
 ADOPTION_OPEN_STATE = "아직 닫히지 않았습니다"
 ADOPTION_UNKNOWN_STATE = "앱 기록에 없어 닫혔는지 알 수 없습니다"
-ANALYSIS_FAILURE_REASON = (
-    "The shell guard hook could not analyze this command ({error}). Approve "
-    "only if it does not rewrite or delete remote history, commit credential "
-    "files, or start production mode."
-)
 FORCE_PUSH_RISK = "rewrites history on the remote (force push)"
 DELETE_PUSH_RISK = "deletes a branch or tag on the remote"
 MIRROR_PUSH_RISK = "makes the remote match every local ref (mirror)"
@@ -196,6 +207,8 @@ WHOLE_TREE_PATHSPEC = ":/"
 PATHSPEC_MAGIC_PREFIX = ":"
 OPTION_END = "--"
 STATUS_TIMEOUT_SECONDS = 10
+GIT_LOCATION_OPTIONS = ("--git-dir", "--work-tree")
+NO_CURRENT_BRANCH_EXIT_CODES = frozenset({1})
 UNTRACKED_STATUS = "??"
 IGNORED_STATUS = "!!"
 RENAME_OR_COPY_STATUSES = "RC"
@@ -328,6 +341,10 @@ class IncludeOffer:
     blobs: dict[str, str | None]
 
 
+class IncludeOfferError(Exception):
+    """The --include-unrecorded dialog cannot keep or list what the commit would take, so the call is refused."""
+
+
 @dataclass
 class AddArguments:
     pathspecs: list[str]
@@ -338,14 +355,15 @@ class AddArguments:
     reads_pathspec_file: bool
 
 
-def main() -> None:
-    payload = json.load(sys.stdin)
+def main() -> int:
+    return run_hook(make_output, FAILURE_POLICY)
+
+
+def make_output(payload: dict[str, Any]) -> dict[str, Any] | None:
     command, cwd = read_tool_command(payload)
     session_id = payload.get(SESSION_KEY) or None
-    decision = decide(command, cwd, session_id) if command else None
 
-    if decision:
-        print(json.dumps(decision))
+    return decide(command, cwd, session_id) if command else None
 
 
 def read_tool_command(payload: dict) -> tuple[str, str | None]:
@@ -360,52 +378,64 @@ def read_tool_command(payload: dict) -> tuple[str, str | None]:
     return (command if isinstance(command, str) else ""), cwd
 
 
-def decide(command: str, cwd: str | None, session_id: str | None = None) -> dict | None:
-    try:
-        calls = expand_command(command, cwd)
-        git_commands = find_git_commands(calls)
-        merge_calls = [call for call in calls if is_pull_request_merge(call)]
-        deny_reasons = (
-            find_commit_reasons(git_commands)
-            + find_dynamic_file_reasons(calls)
-            + find_credential_reasons(calls, git_commands)
-            + [describe_call(MERGE_TOOL_REASON, call) for call in merge_calls if is_guarded_merge(call)]
-        )
-        push_reasons = find_push_reasons(git_commands, find_git_environment_names(calls))
-        ask_reasons = (
-            push_reasons
-            + find_unrecorded_include_reasons(calls, session_id)
-            + find_adoption_reasons(calls)
-            + find_production_reasons(calls)
-            + [describe_call(MERGE_APPROVAL_REASON, call) for call in merge_calls if not is_guarded_merge(call)]
-        )
-    except Exception as error:
-        deny_reasons = []
-        ask_reasons = [ANALYSIS_FAILURE_REASON.format(error=f"{type(error).__name__}: {error}")]
-    if deny_reasons:
-        return make_decision(DECISION_DENY, deny_reasons)
-    elif ask_reasons:
-        return make_decision(DECISION_ASK, ask_reasons)
+def decide(command: str, cwd: str | None, session_id: str | None = None) -> dict[str, Any] | None:
+    """Run each check on its own, so a check that fails gives its own answer and keeps the others' findings; an error
+    before them, such as a command too deep to follow, raises to the failure policy."""
+    calls = expand_command(command, cwd)
+    git_commands = find_git_commands(calls)
+    merge_calls = [call for call in calls if is_pull_request_merge(call)]
+    git_environment = find_git_environment_names(calls)
+    checks = [
+        make_git_check("commit", Decision.DENY, functools.partial(find_commit_reasons, git_commands)),
+        make_git_check("commit file list", Decision.DENY, functools.partial(find_dynamic_file_reasons, calls)),
+        make_git_check("credential", Decision.DENY, functools.partial(find_credential_reasons, calls, git_commands)),
+        Check(functools.partial(find_merge_findings, merge_calls), Decision.DENY, make_git_failure_reason("merge")),
+        make_git_check("push", Decision.ASK, functools.partial(find_push_reasons, git_commands, git_environment)),
+        make_git_check(
+            "unrecorded lines",
+            Decision.ASK,
+            functools.partial(find_unrecorded_include_reasons, calls, session_id),
+        ),
+        make_git_check("file takeover", Decision.ASK, functools.partial(find_adoption_reasons, calls)),
+        Check(
+            functools.partial(make_findings, Decision.ASK, functools.partial(find_production_reasons, calls)),
+            Decision.ASK,
+            PRODUCTION_CHECK_FAILURE_REASON,
+        ),
+    ]
+
+    return judge_checks(checks)
+
+
+def make_git_check(name: str, decision: Decision, find_reasons: Callable[[], list[str]]) -> Check:
+    """A Git check gives its reasons its usual answer, and refuses when it cannot finish, whatever it usually answers."""
+    return Check(functools.partial(make_findings, decision, find_reasons), Decision.DENY, make_git_failure_reason(name))
+
+
+def make_git_failure_reason(name: str) -> str:
+    return GIT_CHECK_FAILURE_REASON.format(check=name)
+
+
+def make_findings(decision: Decision, find_reasons: Callable[[], list[str]]) -> list[Finding]:
+    return [Finding(decision, reason) for reason in find_reasons()]
+
+
+def find_merge_findings(merge_calls: list[CommandCall]) -> list[Finding]:
+    """Refuse a pull request merge where the repository records the pull-request workflow, and ask before any other."""
+    return [make_merge_finding(call) for call in merge_calls]
+
+
+def make_merge_finding(call: CommandCall) -> Finding:
+    if is_guarded_merge(call):
+        return Finding(Decision.DENY, describe_call(MERGE_TOOL_REASON, call))
     else:
-        return None
+        return Finding(Decision.ASK, describe_call(MERGE_APPROVAL_REASON, call))
 
 
 def expand_command(command: str, cwd: str | None) -> list[CommandCall]:
     config_directory = Path(os.path.expanduser(os.environ.get(CONFIG_DIRECTORY_VARIABLE) or DEFAULT_CONFIG_DIRECTORY))
 
     return expand_shell_command(command, cwd, config_directory)
-
-
-def make_decision(decision: str, reasons: list[str]) -> dict:
-    unique_reasons = list(dict.fromkeys(reasons))
-
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": HOOK_EVENT_NAME,
-            "permissionDecision": decision,
-            "permissionDecisionReason": "\n".join(unique_reasons),
-        }
-    }
 
 
 def find_git_commands(calls: list[CommandCall]) -> list[tuple[CommandCall, GitCommand]]:
@@ -529,25 +559,50 @@ def list_add_candidates(
 
 
 def run_status(git_command: GitCommand, pathspecs: list[str], add_arguments: AddArguments) -> tuple[str, list[str]]:
-    base = make_git_base(git_command, git_command.work_dir or "")
+    """The files a `git add` would stage; outside a repository there are none, since the add itself fails there. A Git
+    location named by an option or inherited from the environment counts as a repository, as Git reads it so."""
+    work_dir = git_command.work_dir or ""
+    base = make_git_base(git_command, work_dir)
     ignored = ["--ignored=matching"] if add_arguments.includes_ignored else []
     status = ["status", "--porcelain=v1", "-z", "--untracked-files=all", *ignored, OPTION_END, *pathspecs]
-    root = run_git_output([*base, "rev-parse", "--show-toplevel"]).strip()
+    names_location = has_git_location_option(git_command) or has_git_location_variable()
+    is_repository = find_repository_root(Path(work_dir)) is not None or names_location
+    root = run_git_output([*base, "rev-parse", "--show-toplevel"]).strip() if is_repository else ""
     output = run_git_output([*base, *status]) if root else ""
 
     return root, parse_status_paths(output, add_arguments)
+
+
+def has_git_location_option(git_command: GitCommand) -> bool:
+    return any(option.startswith(GIT_LOCATION_OPTIONS) for option in git_command.global_options)
 
 
 def make_git_base(git_command: GitCommand, work_dir: str) -> list[str]:
     return ["git", "--no-optional-locks", "-C", work_dir, *git_command.global_options]
 
 
-def run_git_output(command: list[str]) -> str:
+def run_git_output(command: list[str], empty_exit_codes: frozenset[int] = frozenset()) -> str:
+    """Git's output; an exit code in `empty_exit_codes` means there is nothing to read, and any other failure raises
+    GitReadError, since a guard that cannot read Git must not read it as nothing there."""
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=STATUS_TIMEOUT_SECONDS, check=False)
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as error:
+        raise GitReadError(f"`{' '.join(command)}` did not run: {error}") from error
+    else:
+        return read_git_result(command, result, empty_exit_codes)
+
+
+def read_git_result(
+    command: list[str],
+    result: subprocess.CompletedProcess[str],
+    empty_exit_codes: frozenset[int],
+) -> str:
+    if result.returncode == 0:
+        return result.stdout
+    elif result.returncode in empty_exit_codes:
         return ""
-    return result.stdout if result.returncode == 0 else ""
+    else:
+        raise GitReadError(f"`{' '.join(command)}` failed: {result.stderr.strip() or result.returncode}")
 
 
 def parse_status_paths(output: str, add_arguments: AddArguments) -> list[str]:
@@ -585,31 +640,46 @@ def find_unrecorded_include_reasons(calls: list[CommandCall], session_id: str | 
         arguments = read_commit_wrapper_arguments(call.argv)
         included = arguments.included_paths if arguments is not None and not is_task_worktree_call(call) else ()
 
-        offer = offer_include(call, arguments, session_id) if arguments is not None and included else None
-
-        if included and not is_approved_offer(offer, session_id):
-            reasons.append(make_include_reason(call, included, offer, session_id))
+        if arguments is not None and included:
+            reasons.extend(find_include_reasons(call, arguments, session_id))
     return reasons
 
 
-def offer_include(call: CommandCall, arguments: CommitArguments, session_id: str | None) -> IncludeOffer | None:
+def find_include_reasons(call: CommandCall, arguments: CommitArguments, session_id: str | None) -> list[str]:
+    """Ask before committing lines the write record cannot show as this session's, unless the user approved these
+    very contents already; a dialog that cannot keep or list them raises, so the call is refused."""
+    if session_id is not None:
+        offer = offer_include(call, arguments, session_id)
+        is_approved = is_include_approved(session_id, offer.root, offer.blobs)
+
+        return [] if is_approved else [make_include_reason(call, arguments.included_paths, offer, session_id)]
+    else:
+        raise make_include_offer_error(arguments.included_paths)
+
+
+def offer_include(call: CommandCall, arguments: CommitArguments, session_id: str) -> IncludeOffer:
     """Keep the files' contents as the dialog will show them, which the commit wrapper then commits exactly.
 
-    With --no-stage they are the contents of the index the call commits.
-    None outside a Claude session or a repository, when a file cannot be
-    stored, or when the call names an index whose place is known only when
-    it runs; the dialog then says it could not list the lines.
+    With --no-stage they are the contents of the index the call commits. A
+    call outside a repository, or one that names an index whose place is
+    known only when it runs, raises IncludeOfferError, and a file that
+    cannot be stored raises too: the dialog could not show what the commit
+    would take (user decision, 2026-11-24).
     """
     included = arguments.included_paths
-    scope = find_repository_paths(call.cwd, included) if call.cwd and session_id else None
+    scope = find_repository_paths(call.cwd, included) if call.cwd else None
     index_values = list_index_values(call) if arguments.no_stage else []
     index_file = join_directory(call.cwd, index_values[-1]) if index_values else None
     is_index_known = not index_values or index_file is not None
 
-    if scope is not None and session_id and is_index_known:
-        return try_add_include_offer(session_id, *scope, arguments.no_stage, index_file)
+    if scope is not None and is_index_known:
+        return add_offer(session_id, *scope, arguments.no_stage, index_file)
     else:
-        return None
+        raise make_include_offer_error(included)
+
+
+def make_include_offer_error(paths: Sequence[str]) -> IncludeOfferError:
+    return IncludeOfferError(INCLUDE_OFFER_UNKNOWN.format(paths=", ".join(paths)))
 
 
 def list_index_values(call: CommandCall) -> list[str]:
@@ -617,49 +687,35 @@ def list_index_values(call: CommandCall) -> list[str]:
     return [value for name, value in list_call_assignments(call) if name == INDEX_VARIABLE]
 
 
-def try_add_include_offer(
+def add_offer(
     session_id: str,
     root: str,
     paths: list[str],
     from_index: bool,
     index_file: str | None,
-) -> IncludeOffer | None:
-    try:
-        index_blobs = read_index_blobs(root, paths, index_file) if from_index else None
-        blobs = add_include_offer(session_id, root, paths, index_blobs)
-    except (SessionWritesError, OSError):
-        return None
-    else:
-        return IncludeOffer(root, paths, blobs)
+) -> IncludeOffer:
+    """Keep the dialog's contents; a file or an index that cannot be read or stored raises SessionWritesError."""
+    index_blobs = read_index_blobs(root, paths, index_file) if from_index else None
+
+    return IncludeOffer(root, paths, add_include_offer(session_id, root, paths, index_blobs))
 
 
-def is_approved_offer(offer: IncludeOffer | None, session_id: str | None) -> bool:
-    if offer is not None and session_id:
-        return is_include_approved(session_id, offer.root, offer.blobs)
-    else:
-        return False
-
-
-def make_include_reason(
-    call: CommandCall, paths: Sequence[str], offer: IncludeOffer | None, session_id: str | None
-) -> str:
+def make_include_reason(call: CommandCall, paths: Sequence[str], offer: IncludeOffer, session_id: str) -> str:
     listing = "\n".join(describe_unproven_lines(offer, index, path, session_id) for index, path in enumerate(paths))
 
     return INCLUDE_UNRECORDED_REASON.format(lines=listing, command=show_command(call), origin=show_origin(call))
 
 
-def describe_unproven_lines(offer: IncludeOffer | None, index: int, path: str, session_id: str | None) -> str:
-    """The lines --include-unrecorded adds for one file as the dialog shows them, or how to list them."""
-    lines = read_unproven_lines(offer, index, session_id)
+def describe_unproven_lines(offer: IncludeOffer, index: int, path: str, session_id: str) -> str:
+    """The lines --include-unrecorded adds for one file as the dialog shows them; a record that cannot be read
+    raises, since a dialog that cannot list them would ask about lines the user cannot see."""
+    repository_path = offer.paths[index]
+    lines = list_unproven_lines(session_id, offer.root, repository_path, offer.blobs[repository_path])
+    shown = [f"  {shorten_line(line)}" for line in lines[:MAX_SHOWN_INCLUDE_LINES]]
+    hidden = len(lines) - MAX_SHOWN_INCLUDE_LINES
+    more = [INCLUDE_LINES_MORE.format(count=hidden)] if hidden > 0 else []
 
-    if lines is None:
-        return INCLUDE_LINES_UNKNOWN.format(path=path)
-    else:
-        shown = [f"  {shorten_line(line)}" for line in lines[:MAX_SHOWN_INCLUDE_LINES]]
-        hidden = len(lines) - MAX_SHOWN_INCLUDE_LINES
-        more = [INCLUDE_LINES_MORE.format(count=hidden)] if hidden > 0 else []
-
-        return "\n".join([f"{path}:", *shown, *more])
+    return "\n".join([f"{path}:", *shown, *more])
 
 
 def shorten_line(line: str) -> str:
@@ -669,30 +725,12 @@ def shorten_line(line: str) -> str:
         return line
 
 
-def read_unproven_lines(offer: IncludeOffer | None, index: int, session_id: str | None) -> list[str] | None:
-    """One file's unproven lines in the content kept for the dialog, or None without one or when the record
-    cannot be read."""
-    if offer is not None and session_id:
-        path = offer.paths[index]
-
-        return try_list_unproven_lines(session_id, offer.root, path, offer.blobs[path])
-    else:
-        return None
-
-
-def try_list_unproven_lines(session_id: str, root: str, path: str, blob: str | None) -> list[str] | None:
-    try:
-        return list_unproven_lines(session_id, root, path, blob)
-    except (SessionWritesError, OSError):
-        return None
-
-
 def find_adoption_reasons(calls: list[CommandCall]) -> list[str]:
     """Ask before a takeover of files from a session the app has not archived, since it may still commit them."""
     takeovers = [
         (call, takeover)
         for call in calls
-        if not is_task_worktree_call(call) and (takeover := read_adoption_arguments(call.argv)) is not None
+        if (takeover := read_adoption_arguments(call.argv)) is not None and not is_task_worktree_call(call)
     ]
     reasons: list[str] = []
 
@@ -854,7 +892,8 @@ def find_push_option_risks(flags: set[str], refspecs: list[str]) -> list[str]:
 
 
 def find_target_push_risks(git_command: GitCommand, work_dir: str, positionals: list[str]) -> list[str]:
-    branch = read_git_output(git_command, work_dir, CURRENT_BRANCH_ARGUMENTS).strip()
+    """Git answers 1 for a detached HEAD, which is no branch rather than a failure."""
+    branch = read_git_output(git_command, work_dir, CURRENT_BRANCH_ARGUMENTS, NO_CURRENT_BRANCH_EXIT_CODES).strip()
 
     if branch:
         return find_branch_push_risks(git_command, work_dir, branch, positionals)
@@ -920,8 +959,13 @@ def read_config_value(config: dict[str, list[str]], key: str) -> str:
     return values[-1] if values else ""
 
 
-def read_git_output(git_command: GitCommand, work_dir: str, arguments: list[str]) -> str:
-    return run_git_output([*make_git_base(git_command, work_dir), *arguments])
+def read_git_output(
+    git_command: GitCommand,
+    work_dir: str,
+    arguments: list[str],
+    empty_exit_codes: frozenset[int] = frozenset(),
+) -> str:
+    return run_git_output([*make_git_base(git_command, work_dir), *arguments], empty_exit_codes)
 
 
 def describe_push(call: CommandCall, risks: list[str]) -> str:
@@ -950,6 +994,8 @@ def read_pull_request_base(directory: str | None) -> str | None:
     """The base branch when the folder's repository records the pull-request workflow, else None.
 
     It reads the original checkout's copy, so a task branch that drops the file does not turn a refusal into a question.
+    Git that cannot tell the original checkout raises GitReadError, and a file that cannot be read raises PolicyError,
+    so the check that asked refuses instead of reading the repository as unguarded.
     """
     root = find_repository_root(Path(directory)) if directory else None
     original = read_original_checkout(root) if root else None
@@ -1237,4 +1283,4 @@ def show_origin(call: CommandCall) -> str:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

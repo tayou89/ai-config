@@ -55,6 +55,7 @@ from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any, BinaryIO
 
 from folder_owner import FROM_OPTION, TAKE_COMMAND, find_linked_worktree
 from folder_owner import main as run_folder_owner
@@ -66,8 +67,11 @@ from own_lines import (
     build_own_content,
     list_foreign_lines,
 )
+from path_listing import list_matching_paths
 from session_lineage import CLI_SESSION_VARIABLE, find_session_record, read_cli_session_id
 from shell_command import CommandCall, GitCommand, expand_shell_command, parse_git_command
+from workflow_policy import GitReadError, has_git_location_variable
+from workflow_policy import find_repository_root as find_marked_repository
 
 _CONFIG_DIRECTORY_VARIABLE = "CLAUDE_CONFIG_DIR"
 _DEFAULT_CONFIG_DIRECTORY = "~/.claude"
@@ -98,6 +102,7 @@ RECORD_FORMAT = 2
 _EARLIEST_RECORD_FORMAT = 1
 _PENDING_TOOL = "pending"
 _RECORD_LINE_END = "\n"
+_RECORD_LINE_END_BYTES = b"\n"
 _ROOT_FIELD = "root"
 _BLOBS_FIELD = "blobs"
 _TIME_FIELD = "time"
@@ -118,6 +123,8 @@ _KIND_FIELD = "kind"
 _UNKNOWN_KIND = "unknown"
 _MAX_TRACKED_BYTES = 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 10
+_GIT_TRUE = "true"
+_UNKNOWN_REVISION_EXIT_CODE = 1
 _RENAME_OR_COPY_STATUSES = "RC"
 _REPORT_COMMAND = "report"
 _HEAD_REVISION = "HEAD"
@@ -257,6 +264,15 @@ class IncludeChangedError(SessionWritesError):
     def __init__(self, paths: Sequence[str]) -> None:
         super().__init__(", ".join(paths))
         self.paths = list(paths)
+
+
+class IncludeUnshownError(SessionWritesError):
+    """No dialog the shell guard showed holds these files, so the user has seen none of their lines."""
+
+
+class IncludeRecordError(SessionWritesError):
+    """A line of the dialog record newer than the last dialog for these files cannot be read, so the dialog the user
+    answered may be that line and an older one must not stand in for it."""
 
 
 class ContestCause(str, Enum):
@@ -424,10 +440,33 @@ def get_record_directory() -> Path:
 
 
 def find_repository_root(path: str) -> str | None:
-    """The repository holding a path, judged from its nearest existing folder so new folders count too."""
-    output = _try_git(_find_existing_directory(path), "rev-parse", "--show-toplevel")
+    """The repository holding a path, judged from its nearest existing folder so new folders count too. A folder that
+    a `.git` entry or the Git location variables place in a repository raises SessionWritesError when Git cannot name
+    its top, since a write there would go unrecorded and an approval unmatched (user decision, 2026-11-24). A folder
+    inside a Git folder, such as `.git/info`, is in no working tree, so it holds nothing to record."""
+    directory = _find_existing_directory(path)
+    output = _try_git(directory, "rev-parse", "--show-toplevel")
 
-    return decode_content(output).strip() or None if output is not None else None
+    if output is not None:
+        return decode_content(output).strip() or None
+    elif _is_placed_in_repository(directory) and not _is_inside_git_directory(directory):
+        raise SessionWritesError(f"git could not name the repository that holds {directory}")
+    else:
+        return None
+
+
+def _is_inside_git_directory(directory: str) -> bool:
+    """Asked of Git, so a Git folder kept apart from its working tree counts too; a Git that cannot answer is not."""
+    output = _try_git(directory, "rev-parse", "--is-inside-git-dir")
+
+    return output is not None and decode_content(output).strip() == _GIT_TRUE
+
+
+def _is_placed_in_repository(directory: str) -> bool:
+    try:
+        return find_marked_repository(Path(directory)) is not None or has_git_location_variable()
+    except GitReadError as error:
+        raise SessionWritesError(str(error)) from error
 
 
 def find_command_roots(session_id: str, command: str, cwd: str | None) -> list[str]:
@@ -580,13 +619,19 @@ def append_events(session_id: str, events: Iterable[WriteEvent | UnknownWrite]) 
 
 def save_pending(session_id: str, tool_use_id: str, call: PendingCall) -> None:
     """Keep a call's before snapshots until it ends; its start is taken before the first snapshot."""
+    pending = _open_record_directory(session_id, call.start) / f"{tool_use_id}{_PENDING_SUFFIX}"
+
+    pending.write_text(json.dumps(asdict(call), ensure_ascii=False), encoding=_TEXT_ENCODING)
+
+
+def _open_record_directory(session_id: str, start: float) -> Path:
+    """The session's record folder, made with its start time when nothing made it yet."""
     directory = get_record_directory() / session_id
-    pending = directory / f"{tool_use_id}{_PENDING_SUFFIX}"
 
     if not directory.is_dir():
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / _STARTED_FILE).write_text(str(call.start), encoding=_TEXT_ENCODING)
-    pending.write_text(json.dumps(asdict(call), ensure_ascii=False), encoding=_TEXT_ENCODING)
+        (directory / _STARTED_FILE).write_text(str(start), encoding=_TEXT_ENCODING)
+    return directory
 
 
 def read_pending(session_id: str, tool_use_id: str) -> PendingCall | None:
@@ -750,10 +795,10 @@ def add_include_offer(
     The guard counts the lines it lists from these contents, and the commit
     wrapper commits exactly them, so what the user approves is what lands.
     They are the working tree's, or `blobs` when the call commits a prepared
-    index (--no-stage), whose contents it commits instead. A session without
-    a record folder keeps nothing, and its wrapper then takes the files as
-    they are when it starts. Raises SessionWritesError when a file cannot be
-    stored.
+    index (--no-stage), whose contents it commits instead. They are kept in
+    a session without a record too, whose folder this makes, since such a
+    session's lines are what the dialog asks about (user decision,
+    2026-11-24). Raises SessionWritesError when a file cannot be stored.
     """
     offered = blobs if blobs is not None else _store_files(root, paths)
 
@@ -774,16 +819,19 @@ def approve_include(
     never runs, so the wrapper running is the approval of what the newest
     dialog for these files showed. The contents it commits are the working
     tree's, or `blobs` from a prepared index. One that differs from the
-    dialog raises IncludeChangedError, since the user has not seen it.
-    Without such a dialog, the contents as they are now. An approval that
-    already covers the contents keeps its time, so a chain of retries does
-    not stretch it.
+    dialog raises IncludeChangedError, since the user has not seen it, and
+    no dialog for these files raises IncludeUnshownError, as when the call
+    ran where the shell guard could not see it. An approval that already
+    covers the contents keeps its time, so a chain of retries does not
+    stretch it.
     """
     committed = blobs if blobs is not None else _store_files(root, paths)
     offer = _find_latest_include_offer(session_id, root, paths)
     changed = [path for path in paths if offer is not None and offer.blobs[path] != committed[path]]
 
-    if changed:
+    if offer is None:
+        raise IncludeUnshownError(", ".join(paths))
+    elif changed:
         raise IncludeChangedError(changed)
     else:
         _keep_include_approval(session_id, root, committed)
@@ -957,21 +1005,55 @@ def _keep_include_approval(session_id: str, root: str, blobs: dict[str, str | No
 
 
 def _append_include_entry(session_id: str, name: str, root: str, blobs: dict[str, str | None]) -> None:
-    """Add a dialog's or an approval's contents to the session's folder, which a session without a record lacks."""
-    directory = get_record_directory() / session_id
-    entry = {_ROOT_FIELD: root, _BLOBS_FIELD: blobs, _TIME_FIELD: time.time()}
+    """Add a dialog's or an approval's contents to the session's folder, made now when the record hook never made it,
+    so its record counts as begun now and covers no earlier write. An entry always starts a line of its own, so a
+    write cut off before its line end leaves only that line unreadable and the next dialog reads."""
+    now = time.time()
+    directory = _open_record_directory(session_id, now)
+    entry = {_ROOT_FIELD: root, _BLOBS_FIELD: blobs, _TIME_FIELD: now}
+    line = json.dumps(entry, ensure_ascii=False).encode(_TEXT_ENCODING) + _RECORD_LINE_END_BYTES
 
-    if directory.is_dir():
-        with (directory / name).open("a", encoding=_TEXT_ENCODING) as file:
-            file.write(json.dumps(entry, ensure_ascii=False) + _RECORD_LINE_END)
+    with (directory / name).open("a+b") as file:
+        file.write(_read_line_start(file) + line)
+
+
+def _read_line_start(file: BinaryIO) -> bytes:
+    """What an appended line needs first: nothing at the start of a line, a line end after a line cut off before it."""
+    size = file.seek(0, os.SEEK_END)
+
+    if size:
+        file.seek(size - 1)
+        return b"" if file.read(1) == _RECORD_LINE_END_BYTES else _RECORD_LINE_END_BYTES
+    else:
+        return b""
 
 
 def _find_latest_include_offer(session_id: str, root: str, paths: Sequence[str]) -> _IncludeApproval | None:
-    """The newest dialog the shell guard showed for exactly these files, which is the one the user just answered."""
-    offers = _read_include_entries(session_id, _OFFERS_FILE)
-    matching = [offer for offer in offers if offer.root == root and set(offer.blobs) == set(paths)]
+    """The newest dialog the shell guard showed for exactly these files, which is the one the user just answered.
 
-    return matching[-1] if matching else None
+    A line newer than it that cannot be read may be the dialog the user answered, so it raises IncludeRecordError
+    rather than let an older dialog stand in; the next dialog for these files is written after it, so a retry passes
+    (user decision, 2026-11-24).
+    """
+    record = get_record_directory() / session_id / _OFFERS_FILE
+    entries = _read_include_lines(record)
+    matching = [
+        (index, offer) for index, offer in enumerate(entries) if offer is not None and _is_offer_for(offer, root, paths)
+    ]
+    newest_index = matching[-1][0] if matching else -1
+
+    if any(entry is None for entry in entries[newest_index + 1 :]):
+        raise IncludeRecordError(
+            f"{record.name} holds a line that cannot be read after the last dialog for {', '.join(paths)}"
+        )
+    elif matching:
+        return matching[-1][1]
+    else:
+        return None
+
+
+def _is_offer_for(offer: _IncludeApproval, root: str, paths: Sequence[str]) -> bool:
+    return offer.root == root and set(offer.blobs) == set(paths)
 
 
 def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | None]) -> _IncludeApproval | None:
@@ -990,23 +1072,52 @@ def _find_include_approval(session_id: str, root: str, blobs: dict[str, str | No
 
 
 def _read_include_entries(session_id: str, name: str) -> list[_IncludeApproval]:
-    """A session's dialog or approval entries, oldest first, without lines that do not read as one."""
-    record = get_record_directory() / session_id / name
-    entries = [_parse_approval(line) for line in _read_record_text(record).split(_RECORD_LINE_END) if line.strip()]
+    """A session's approval entries, oldest first, without lines that do not read as one: an approval left out only
+    asks the user again."""
+    entries = _read_include_lines(get_record_directory() / session_id / name)
 
     return [entry for entry in entries if entry is not None]
 
 
-def _parse_approval(line: str) -> _IncludeApproval | None:
-    """A kept dialog or approval entry, or None for a line that does not read as one."""
+def _read_include_lines(record: Path) -> list[_IncludeApproval | None]:
+    """Each non-empty line of a dialog or approval record, None for one that does not read as an entry."""
+    lines = _read_record_bytes(record).split(_RECORD_LINE_END_BYTES)
+
+    return [_parse_approval(line) for line in lines if line.strip()]
+
+
+def _parse_approval(line: bytes) -> _IncludeApproval | None:
+    """A kept dialog or approval entry, or None for a line that does not read as one: bytes that are not text, or a
+    field of the wrong type. A damaged root or path read leniently would name another dialog and let an older one
+    stand in for the one the user answered."""
     try:
-        entry = json.loads(line)
-        blobs = {str(path): None if blob is None else str(blob) for path, blob in dict(entry[_BLOBS_FIELD]).items()}
-        approval = _IncludeApproval(str(entry[_ROOT_FIELD]), blobs, float(entry[_TIME_FIELD]))
-    except (ValueError, TypeError, KeyError, AttributeError):
+        entry = json.loads(line.decode(_TEXT_ENCODING))
+    except ValueError:
         return None
     else:
-        return approval
+        return _make_approval(entry) if _is_approval_entry(entry) else None
+
+
+def _make_approval(entry: dict[str, Any]) -> _IncludeApproval:
+    return _IncludeApproval(entry[_ROOT_FIELD], dict(entry[_BLOBS_FIELD]), float(entry[_TIME_FIELD]))
+
+
+def _is_approval_entry(entry: Any) -> bool:
+    moment = entry.get(_TIME_FIELD) if isinstance(entry, dict) else None
+
+    return (
+        isinstance(entry, dict)
+        and isinstance(entry.get(_ROOT_FIELD), str)
+        and _is_blob_map(entry.get(_BLOBS_FIELD))
+        and isinstance(moment, (int, float))
+        and not isinstance(moment, bool)
+    )
+
+
+def _is_blob_map(blobs: Any) -> bool:
+    return isinstance(blobs, dict) and all(
+        isinstance(path, str) and (blob is None or isinstance(blob, str)) for path, blob in blobs.items()
+    )
 
 
 def _get_config_directory() -> Path:
@@ -1027,21 +1138,36 @@ def _read_record_start(session_id: str) -> float | None:
 
 
 def _find_transcript(session_id: str) -> Path | None:
-    matches = sorted((_get_config_directory() / _PROJECTS_DIRECTORY_NAME).glob(f"*/{session_id}{_TRANSCRIPT_SUFFIX}"))
+    """The session's transcript; a projects folder that cannot be listed raises SessionWritesError, since a transcript
+    left out unseen would make a record that began late read as complete."""
+    pattern = f"*/{session_id}{_TRANSCRIPT_SUFFIX}"
 
-    return matches[0] if matches else None
+    try:
+        matches = list_matching_paths(_get_config_directory() / _PROJECTS_DIRECTORY_NAME, pattern)
+    except OSError as error:
+        raise SessionWritesError(f"the session transcripts cannot be listed ({error})") from error
+    else:
+        return matches[0] if matches else None
 
 
 def _read_first_recorded_result_time(transcript: Path) -> float | None:
-    """When the session's first call of a tool the hook records ended; an unreadable time counts as earliest."""
+    """When the session's first call of a tool the hook records ended; an unreadable time counts as earliest, and a
+    transcript that cannot be read raises SessionWritesError."""
+    try:
+        with transcript.open(encoding=_TEXT_ENCODING, errors="replace") as file:
+            return _find_first_recorded_result_time(file)
+    except OSError as error:
+        raise SessionWritesError(f"{transcript.name} cannot be read ({error})") from error
+
+
+def _find_first_recorded_result_time(lines: Iterable[str]) -> float | None:
     recorded_ids: set[str] = set()
 
-    with transcript.open(encoding=_TEXT_ENCODING, errors="replace") as file:
-        for line in file:
-            result_time = _read_recorded_result_time(line, recorded_ids)
+    for line in lines:
+        result_time = _read_recorded_result_time(line, recorded_ids)
 
-            if result_time is not None:
-                return result_time
+        if result_time is not None:
+            return result_time
     return None
 
 
@@ -1100,14 +1226,16 @@ def _read_events(session_id: str) -> list[WriteEvent | UnknownWrite]:
 
 def _read_record_text(record: Path) -> str:
     """A record's text, empty when it does not exist (none yet, or expired); raises SessionWritesError otherwise."""
+    return _read_record_bytes(record).decode(_TEXT_ENCODING, errors="replace")
+
+
+def _read_record_bytes(record: Path) -> bytes:
     try:
-        content = record.read_bytes()
+        return record.read_bytes()
     except FileNotFoundError:
-        return ""
+        return b""
     except OSError as error:
         raise SessionWritesError(f"{record.name} cannot be read ({error})") from error
-    else:
-        return content.decode(_TEXT_ENCODING, errors="replace")
 
 
 def _serialize_event(event: WriteEvent | UnknownWrite) -> dict[str, object]:
@@ -1133,15 +1261,13 @@ def _parse_event(record: Path, number: int, line: str) -> WriteEvent | UnknownWr
 
 
 def _read_recorded_roots(session_id: str) -> set[str]:
-    """Repositories the session's record names; a line or record that cannot be read loses only its own roots."""
+    """Repositories the session's record names; a line that cannot be read loses only its own roots, and a record that
+    cannot be read raises SessionWritesError, so the hook shows an error instead of skipping a repository's
+    snapshot unseen (user decision, 2026-11-24)."""
     record = get_record_directory() / f"{session_id}{_RECORD_SUFFIX}"
+    lines = _read_record_text(record).split(_RECORD_LINE_END)
 
-    try:
-        lines = _read_record_text(record).split(_RECORD_LINE_END)
-    except SessionWritesError:
-        return set()
-    else:
-        return {root for root in map(_parse_root, lines) if root}
+    return {root for root in map(_parse_root, lines) if root}
 
 
 def _parse_root(line: str) -> str | None:
@@ -1157,7 +1283,7 @@ def _parse_root(line: str) -> str | None:
 
 def _read_file_events(root: str, path: str) -> list[tuple[str, WriteEvent | UnknownWrite]]:
     """Every session's events covering one file, each with the session that recorded it."""
-    sessions = [record.stem for record in get_record_directory().glob(f"*{_RECORD_SUFFIX}")]
+    sessions = [record.stem for record in _list_record_paths(f"*{_RECORD_SUFFIX}")]
 
     return [
         (session, event) for session in sessions for event in _read_events(session) if event.is_covering(root, path)
@@ -1296,9 +1422,18 @@ def _list_other_pendings(session_id: str) -> list[Path]:
 
     return [
         pending
-        for pending in get_record_directory().glob(f"*/*{_PENDING_SUFFIX}")
+        for pending in _list_record_paths(f"*/*{_PENDING_SUFFIX}")
         if pending.parent.name != session_id and (_read_modified_time(pending) or 0.0) >= limit
     ]
+
+
+def _list_record_paths(pattern: str) -> list[Path]:
+    """The records matching a pattern; one that cannot be listed raises SessionWritesError, so no other session's write
+    is left out unseen."""
+    try:
+        return list_matching_paths(get_record_directory(), pattern)
+    except OSError as error:
+        raise SessionWritesError(f"the write records cannot be listed ({error})") from error
 
 
 def _read_running_call(pending: Path, root: str, path: str) -> UnknownWrite | None:
@@ -1942,15 +2077,34 @@ def _store_files(root: str, paths: Sequence[str]) -> dict[str, str | None]:
 
 
 def _read_head(root: str) -> str | None:
-    output = _try_git(root, "rev-parse", "--verify", "--quiet", _HEAD_REVISION)
-
-    return decode_content(output).strip() or None if output is not None else None
+    return _read_revision_name(root, _HEAD_REVISION)
 
 
 def _read_committed_blob(root: str, head: str | None, path: str) -> str | None:
-    output = _try_git(root, "rev-parse", "--verify", "--quiet", f"{head}:{path}") if head else None
+    return _read_revision_name(root, f"{head}:{path}") if head else None
 
-    return decode_content(output).strip() or None if output is not None else None
+
+def _read_revision_name(root: str, revision: str) -> str | None:
+    """The object a revision names, None when Git knows no such name, as for an unborn HEAD or a file a commit lacks.
+    Any other failure raises SessionWritesError: a base read as empty would show lines no session wrote as nobody's
+    change (user decision, 2026-11-24)."""
+    command = ["git", "-C", root, "rev-parse", "--verify", "--quiet", revision]
+
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=_GIT_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise SessionWritesError(f"git rev-parse {revision} failed in {root}: {error}") from error
+    else:
+        return _read_revision_result(root, revision, result)
+
+
+def _read_revision_result(root: str, revision: str, result: subprocess.CompletedProcess[bytes]) -> str | None:
+    if result.returncode == 0:
+        return decode_content(result.stdout).strip() or None
+    elif result.returncode == _UNKNOWN_REVISION_EXIT_CODE:
+        return None
+    else:
+        raise SessionWritesError(f"git rev-parse {revision} failed in {root}")
 
 
 @functools.cache

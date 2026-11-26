@@ -73,6 +73,13 @@ class StartSessionOwnerTest(unittest.TestCase):
         self.assertEqual(decision, PASS)
         self.assertNotIn("hand-over", context)
 
+    def test_a_worktree_link_that_cannot_be_read_checks_nothing_here(self) -> None:
+        (self.worktree / ".git").write_text("nonsense\n", encoding=ENCODING)
+        decision, context = self.start(OTHER, self.worktree, {"use_worktree": False})
+
+        self.assertEqual(decision, PASS)
+        self.assertNotIn("only read", context)
+
     def start(self, session: Session, cwd: Path, fields: dict[str, Any]) -> tuple[str, str]:
         payload = {
             "hook_event_name": "PreToolUse",

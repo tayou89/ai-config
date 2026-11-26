@@ -2,7 +2,11 @@
 """PreToolUse, PostToolUse and PostToolUseFailure hook: record the files this session writes.
 
 It never blocks a tool call and prints nothing. A failure only leaves a write
-unrecorded, which the commit wrapper then treats as someone else's.
+unrecorded, which the commit wrapper then treats as someone else's and asks
+about, a record missing from the session's start included (user decision,
+2026-11-24). An error exits 1 (FAILURE_POLICY, a notice policy), so Claude
+Code lets the call go ahead and shows a hook error notice instead of hiding
+it.
 
 With --around it runs a project's PostToolUse hook that may rewrite the file
 the call wrote, such as a formatter, and records that hook's change as one
@@ -40,6 +44,7 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from hook_failure import FailurePolicy, run_hook
 from session_writes import (
     SessionWritesError,
     SnapshotScope,
@@ -87,15 +92,18 @@ _CALL_RECORD_WAIT_SECONDS = 5.0
 _CALL_RECORD_POLL_SECONDS = 0.05
 _USAGE_EXIT = 1
 _USAGE_TEXT = f"usage: session-writes-hook.py {_AROUND_OPTION} <hook command> [<argument> ...]"
+FAILURE_POLICY = FailurePolicy.notice("session-writes-hook")
 
 
-def main() -> None:
+def main() -> int:
+    """Around a project hook, that hook's exit code passes through, so an error there only leaves its change
+    unrecorded."""
     arguments = sys.argv[1:]
 
     if arguments[:1] == [_AROUND_OPTION]:
-        sys.exit(_run_around(arguments[1:], sys.stdin.buffer.read()))
+        return _run_around(arguments[1:], sys.stdin.buffer.read())
     else:
-        _try_recording(_record_tool_call, sys.stdin.read())
+        return run_hook(_record_tool_call, FAILURE_POLICY)
 
 
 def _try_recording(record: Callable[[dict[str, Any]], None], payload_text: str | bytes) -> None:
@@ -442,4 +450,4 @@ def _parse_hunk_lines(hunk: Any) -> list[tuple[str, str]] | None:
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

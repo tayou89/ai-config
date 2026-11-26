@@ -128,6 +128,7 @@ RUNTIME_SCRIPTS = (
     "reply-language-hook.py",
     "plain-words-hook.py",
     "own_lines.py",
+    "path_listing.py",
     "session_writes.py",
     "session_commits.py",
     "session-writes-hook.py",
