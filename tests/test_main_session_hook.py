@@ -32,6 +32,7 @@ HOST_SESSION_VARIABLE = "CLAUDE_CODE_HOST_SESSION_ID"
 SWITCH_VARIABLE = "MAIN_SESSION_NOTICE"
 NOTICE_TAG = "[MAIN SESSION]"
 TOOL_NOTICE_TEXT = "file changes and long commands go to a session of their own"
+APPROVED_EXCEPTION_TEXT = "apart from an exception its project's rules record with the user's approval"
 NOT_LOADED_TEXT = f"has not loaded the {LEAD_SKILL} skill"
 SIZE_TEXT = "Its context is about"
 MAIN_SESSION = "local_main"
@@ -124,6 +125,7 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertTrue(context.startswith(NOTICE_TAG))
         self.assertIn("started 1 other session and", context)
+        self.assertIn(APPROVED_EXCEPTION_TEXT, context)
         self.assertIn(
             "about 210k, 22% of the 967k automatic compaction point its settings give, below the 85% context threshold",
             context,

@@ -159,7 +159,8 @@ _OTHER_SUBJECT = "This session's"
 _ROLE_NOTICE = (
     f"{_NOTICE_TAG} This session started {{count}} other {{noun}} and is not under another session, so it is "
     f'a main session, which {_LEAD_SKILL} "Working alongside other sessions" limits to '
-    "conversation and managing sessions."
+    "conversation and managing sessions, apart from an exception its project's rules record with the user's "
+    "approval, which holds within its stated scope."
 )
 _SIZE_NOTICE = (
     "{subject} context is about {size}k, {percent}% of the {point}k automatic compaction point its settings give, "
