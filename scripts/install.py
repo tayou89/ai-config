@@ -92,6 +92,7 @@ SETTINGS_FILE = "settings.json"
 STATUS_LINE_FILE = "statusline-command.sh"
 CODEX_CONFIG_FILE = "config.toml"
 RULES_DIRECTORY = "rules"
+TERMINAL_DIRECTORY = "terminal"
 SKILLS_DIRECTORY = "skills"
 SCRIPTS_DIRECTORY = "scripts"
 MODS_DIRECTORY = "mods"
@@ -146,6 +147,7 @@ RUNTIME_SCRIPTS = (
     "notes-place-hook.py",
     "plan-reminder-hook.py",
     "tool_calls.py",
+    "tmux-window-mark-hook.py",
 )
 MAINTENANCE_SCRIPTS = (
     "install.py",
@@ -992,6 +994,7 @@ class Installer:
         claude_home = self._platform.claude_home
 
         self._sync_directory(REPOSITORY_ROOT / RULES_DIRECTORY, claude_home / RULES_DIRECTORY, claude_home, ())
+        self._sync_directory(REPOSITORY_ROOT / TERMINAL_DIRECTORY, claude_home / TERMINAL_DIRECTORY, claude_home, ())
         for skill in sorted(list_entries(REPOSITORY_ROOT / SKILLS_DIRECTORY)):
             self._sync_directory(skill, claude_home / SKILLS_DIRECTORY / skill.name, claude_home, ())
         for script in RUNTIME_SCRIPTS:
