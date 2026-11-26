@@ -3,7 +3,7 @@ name: code-style
 description: Apply personal coding conventions when writing or editing code, including code examples; honor language syntax and project conventions.
 ---
 
-<!-- Adapted from skills/code-style/SKILL.md at 9f47f5b08216923702bbac732a9c16032d7695dc, skills/code-style/references/examples-and-procedures.md at cd1632743deb04a0cd4b9bff3e7c604d5d133787 -->
+<!-- Adapted from skills/code-style/SKILL.md at bb7e236b36624e51b48d29f04c30ea23a66b5926, skills/code-style/references/examples-and-procedures.md at cd1632743deb04a0cd4b9bff3e7c604d5d133787 -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The opening authorization line, and the scope paragraph that limits syntax rules to languages that have them and leaves unrelated code alone: Codex permissions and codex/MIGRATION.md, "Clarified Technical Assumptions".
 - One file holds the rules JavaScript and TypeScript share and the reference file's examples and class member order. History: Claude split them out on 2026-11-12 to fit how much of a skill Claude Code restores after context compaction. Kept in this audit: whether Codex cuts long skills the same way is not checked, and the content is the same wherever it sits.- "File Top Structure" makes type aliases and interfaces one section, "Direct Method Reference for Callbacks" keeps receiver binding, and "Await Only Thenables" keeps intentional background work: codex/MIGRATION.md, "Clarified Technical Assumptions".
@@ -19,11 +19,10 @@ Apply these conventions to implementation code and relevant code examples in pla
 
 ## Design-First Proposal
 
-Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and present multi-axis comparison.
+Before proposing any code change (fix, feature, refactor), grep the codebase for 2-3 analogous patterns solving similar problems (lifecycle pairs like enable/disable, register/unregister; state-based dispatch; owner API exposure; cleanup/cancel chains). Map every caller path of the change (normal completion / error / cancel / dispose / lifecycle transitions) — when paths share a function but carry different intent, branch by *state* or *parameter* explicitly rather than apply blanket behavior. Audit checklist before proposing: (a) consistency with existing analogous patterns, (b) separation of concerns (who owns the action), (c) lifecycle symmetry (every register has matching unregister), (d) idempotency (safe to call twice), (e) caller surface (signature change ripple count). Reject first working solution if any item fails; surface a structurally cleaner alternative and compare them as `decisions-and-collaboration` describes.
 
 ## Standards Over Workarounds
 
-- Always prefer **industry standard / best practices** when writing, modifying, or suggesting code.
 - Resolution order: (1) find the standard approach first, (2) workarounds (casts, non-null assertions, loose types) only when standard is technically impossible, (3) if workaround needed, explain why standard is impossible and get user approval.
 - **Never rationalize workarounds as "legitimate" or "acceptable"** — if it deviates from standard, classify it as a workaround and plan to fix. Effort never justifies keeping it (`work-principles` "Proposals and options").
 - **Definitions are root causes**: When casts, assertions, or workarounds exist because a type/interface/schema definition is wrong or incomplete, the definition IS the root cause — fix it first. Never classify a workaround as "unavoidable" without verifying the underlying definition is correct and complete.
@@ -286,10 +285,6 @@ No comments explaining "what" code does — use clear names instead. Only allow 
 
 Repeated or meaningful string literals should be defined as `const` constants. Don't use string literals directly in function args, event types, identifiers.
 
-## Minimize Duplicate Code
-
-Extract identical code into shared functions. In switch-case: if all cases produce same result, put it outside switch. If results differ, set in each case.
-
 ## Name by Purpose, Not Input Shape
 
 Name functions/utilities by **what they produce**, not what input shape they take. Same role + different input shapes → one name, handle shapes internally (overloads, conditional types, type guards).
@@ -300,7 +295,7 @@ If an argument is always a literal at every call site (never dynamic), encode it
 
 ## No Duplicate Logic
 
-Logic repeated in 2+ places → extract to a method. Check existing codebase for same patterns before writing new code.
+Logic or identical code repeated in 2+ places → extract to a shared method or function. Check existing codebase for same patterns before writing new code. In switch-case: if all cases produce same result, put it outside switch. If results differ, set in each case.
 
 ## Boilerplate Belongs on the Owner
 

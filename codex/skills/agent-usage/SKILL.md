@@ -3,7 +3,7 @@ name: agent-usage
 description: Coordinate subagents only when the user explicitly authorizes delegation; define review scope and verify their evidence.
 ---
 
-<!-- Adapted from skills/agent-usage/SKILL.md at 0cbbddad2835b1d6b123c62d9c5e18c2bfd032dc, skills/agent-usage/references/codex-implementation.md at c71e065c4860d8527659b1bebf1134cdedd226f3 -->
+<!-- Adapted from skills/agent-usage/SKILL.md at 8ad68834bb18245a443e37a55b31cd50acc6fd5b, skills/agent-usage/references/codex-implementation.md at c71e065c4860d8527659b1bebf1134cdedd226f3 -->
 <!-- Left out or changed on purpose (audited 2026-11-24):
 - The copy is a short rewrite, not a section-by-section port: Claude's Agent and team-agent tools, slash commands, and model names do not exist in Codex (codex/MIGRATION.md, "Claude Skill/Agent tools and slash commands").
 - Sections 1 to 6 are joined into the opening paragraph; section 6's team agents are left out, since Codex has no team-agent tool.
@@ -11,6 +11,7 @@ description: Coordinate subagents only when the user explicitly authorizes deleg
 - Section 12's model override and Section 13's Claude model names, session tools, and Agent options become "choose from the work-type table with Codex's own options".
 - Section 14 and the codex-implementation reference are left out: they are Claude's procedure for handing work to Codex, which Codex does not do (the 2026-11-17 plan that added them left the copy's content as it was for this reason; Codex has run only reviews since 2026-11-23).
 - Codex adds that it uses its own collaboration tools for subtasks and opens or messages another chat only when the user asks.
+- Sections 2 to 4 narrow optional delegation proposals in Claude because Anthropic's migration guidance says Claude Opus 5 and later spawn subagents readily (prompt audit of 2026-11-24, item M1); the copy keeps its splitting and parallel-audit proposal, since that guidance is about Claude models and the copy already starts no subagent without the user's explicit authorization.
 -->
 
 # Agent Coordination
