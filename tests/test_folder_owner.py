@@ -62,9 +62,13 @@ class FolderOwnerTest(unittest.TestCase):
         submodule = self.world.root / "submodule"
         submodule_git = self.world.root / "modules" / "submodule"
 
-        submodule.mkdir()
-        submodule_git.mkdir(parents=True)
-        (submodule / ".git").write_text(f"gitdir: {submodule_git}\n", encoding=ENCODING)
+        submodule_git.parent.mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "-q", "--separate-git-dir", str(submodule_git), str(submodule)],
+            env=self.world.environment(OWNER),
+            capture_output=True,
+            check=True,
+        )
         self.assertEqual(self.worktree.root, self.worktree_path)
         self.assertEqual(self.worktree.git_directory, self.world.git_directory(self.worktree_path))
         self.assertEqual(folder_owner.find_linked_worktree(nested), self.worktree)
@@ -287,9 +291,12 @@ class FolderOwnerTest(unittest.TestCase):
 
         self.assertEqual([gap.call_id for gap in gaps], ["toolu_a", "toolu_b", None, None])
 
-    def test_an_unreadable_gap_record_still_counts_as_a_gap(self) -> None:
+    def test_an_unreadable_gap_record_raises_rather_than_reads_as_one_gap(self) -> None:
+        """A dialog could not show what such a record holds, so its approval must not cover it (user decision,
+        2026-11-24)."""
         self.worktree.gaps_file.write_bytes(b"\xff\xfe not text")
-        self.assertEqual(len(folder_owner.read_gaps(self.worktree)), 1)
+        with self.assertRaises(folder_owner.OwnerFileError):
+            folder_owner.read_gaps(self.worktree)
 
     def test_uncommitted_changes_include_untracked_files(self) -> None:
         self.assertFalse(folder_owner.has_uncommitted_changes(self.worktree))

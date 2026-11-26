@@ -88,6 +88,7 @@ from integration_commands import (
 )
 from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integration_lock
 from workflow_policy import (
+    NO_ORIGINAL_CHECKOUT_MESSAGE,
     POLICY_FILE,
     PolicyError,
     WorkflowMode,
@@ -172,7 +173,7 @@ def main(arguments: Sequence[str]) -> int:
             wait_for_checks(root, number, limit)
         lock_wait_seconds = read_lock_wait_seconds(options, limit)
 
-        with hold_integration_lock(find_common_git_directory(root), lock_wait_seconds, announce_wait):
+        with hold_integration_lock(read_common_git_directory(root), lock_wait_seconds, announce_wait):
             pull_request = view_pull_request(str(number))
             ready = bring_in_base(root, pull_request, limit) if options.wait else pull_request
             result = merge_when_ready(root, ready)
@@ -243,15 +244,6 @@ def read_lock_wait_seconds(options: MergeOptions, limit: WaitLimit) -> float:
         return max(limit.read_seconds_left(), DEFAULT_WAIT_SECONDS)
     else:
         return DEFAULT_WAIT_SECONDS
-
-
-def find_common_git_directory(root: Path) -> Path:
-    common = read_common_git_directory(root)
-
-    if common is None:
-        raise CommandError(f"Git cannot find the repository folder of {root}")
-    else:
-        return common
 
 
 def view_pull_request(selector: str | None) -> PullRequest:
@@ -525,7 +517,7 @@ def update_original_checkout(root: Path, base: str, merge_commit: str) -> None:
         original = read_original_checkout(root)
 
         if original is None:
-            print("Left the original checkout as it is: Git cannot find it.")
+            print(f"Left the original checkout as it is: {NO_ORIGINAL_CHECKOUT_MESSAGE.format(folder=root)}.")
         elif read_current_branch(original) != base or has_tracked_changes(original):
             print(f"Left {original} as it is: it is not a clean checkout of {base}.")
         else:

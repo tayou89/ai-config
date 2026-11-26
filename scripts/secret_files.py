@@ -160,10 +160,12 @@ def find_secret_tokens(text: str) -> list[tuple[str, str]]:
 
 
 def read_file_head(path: str) -> bytes | None:
+    """A file's first bytes, or None when there is no file there to stage; any other failure to read it raises, so
+    a check that must see the content refuses instead of reading it as clean (user decision, 2026-11-24)."""
     try:
         with open(path, "rb") as handle:
             return handle.read(MAX_CONTENT_BYTES)
-    except OSError:
+    except (FileNotFoundError, IsADirectoryError, NotADirectoryError):
         return None
 
 

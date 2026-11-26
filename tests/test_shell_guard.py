@@ -213,6 +213,30 @@ MISSING_BLOB = "0" * 40
 VANISHED_RECORD = "another session removed this record file"
 
 
+def make_record_payload(
+    session: str,
+    event: str,
+    tool_use: str,
+    tool_input: dict[str, Any],
+    cwd: Path,
+    response: dict[str, Any] | None = None,
+    tool: str | None = None,
+) -> dict[str, Any]:
+    """A record hook payload for a call in a folder; a call with a file path is an Edit unless named."""
+    payload = {
+        "session_id": session,
+        "hook_event_name": event,
+        "tool_use_id": tool_use,
+        "tool_name": tool or (EDIT_TOOL if "file_path" in tool_input else BASH_TOOL),
+        "tool_input": tool_input,
+        "cwd": str(cwd),
+    }
+
+    if response is not None:
+        payload["tool_response"] = response
+    return payload
+
+
 @dataclass
 class GuardCase:
     group: str
@@ -390,7 +414,7 @@ CASES = [
     GuardCase("production", "cat .env.production", PASS),
     GuardCase("production", "npm test", PASS),
     GuardCase("combined", "git add .env && git push", DENY, "secrets"),
-    GuardCase("combined", DEEP_NESTING, ASK),
+    GuardCase("combined", DEEP_NESTING, DENY),
     GuardCase("merge", "gh pr merge 3 --squash", DENY, "workflow"),
     GuardCase("merge", "gh pr merge --admin --squash", DENY, "workflow"),
     GuardCase("merge", "sh -c 'gh pr merge 3'", DENY, "workflow"),
@@ -498,7 +522,13 @@ class GuardFixture:
         for name, path in self.locations.items():
             command = command.replace(f"{{{name}}}", str(path))
         tool_input = {"command": command, "description": "test", **({"tab_id": case.tab_id} if case.tab_id else {})}
-        payload = {"tool_name": case.tool, "tool_input": tool_input, "cwd": cwd}
+        payload = {
+            "session_id": OWN_SESSION,
+            "hook_event_name": PRE_TOOL_USE,
+            "tool_name": case.tool,
+            "tool_input": tool_input,
+            "cwd": cwd,
+        }
         result = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
             input=json.dumps(payload),
@@ -590,13 +620,14 @@ class Landing(str, Enum):
 class WrapperHeadFixture:
     def __init__(self) -> None:
         self.directory = tempfile.TemporaryDirectory()
-        self.root = Path(self.directory.name)
+        self.root = Path(os.path.realpath(self.directory.name))
         self.repository = self.root / "repository"
         self.private_index = self.root / "private-index"
         self.other_index = self.root / "other-index"
         self.shim_directory = self.root / "bin"
         self.git_config = self.root / "gitconfig"
         self.config_directory = self.root / "config"
+        self.tool_uses = 0
 
     def create(self) -> None:
         self.git_config.write_text("[user]\n\tname = Wrapper Test\n\temail = wrapper@example.com\n")
@@ -717,6 +748,27 @@ class WrapperHeadFixture:
     def edit(self, path: str, text: str) -> None:
         with (self.repository / path).open("a") as file:
             file.write(text)
+
+    def edit_as(self, session: str, path: str, text: str) -> None:
+        """Append to a file as a session whose write record sees it, as every session's record hook does, so the
+        wrapper's line check shows the lines as that session's."""
+        self.tool_uses += 1
+        tool_use = f"call-{self.tool_uses}"
+        command = {"command": f"python3 write.py {path}"}
+
+        self.run_record_hook(make_record_payload(session, PRE_TOOL_USE, tool_use, command, self.repository))
+        self.edit(path, text)
+        self.run_record_hook(make_record_payload(session, POST_TOOL_USE, tool_use, command, self.repository, {}))
+
+    def run_record_hook(self, payload: dict[str, Any]) -> None:
+        subprocess.run(
+            [sys.executable, str(RECORD_HOOK)],
+            input=json.dumps(payload),
+            env=self.environment(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
 
     def start_unrelated_history(self) -> str:
         """Point HEAD at a commit that does not descend from the old one, as a reset to other work would."""
@@ -840,12 +892,12 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(self.fixture.read_head(), unrelated)
 
     def test_amend_after_a_commit_on_other_files_is_refused(self) -> None:
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         first_base = self.fixture.build_private_index("b.txt")
         first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
         mine = self.fixture.read_head()
-        self.fixture.edit("b.txt", "more of mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "more of mine\n")
         self.fixture.build_private_index("b.txt")
         other = self.fixture.commit_other_session("a.txt")
         amend_arguments = ["--amend", "--expect-head", mine, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
@@ -1020,7 +1072,7 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertIn("was undone", result.stderr)
 
     def test_commit_landing_right_after_mine_is_kept(self) -> None:
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
         arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*arguments, landing=Landing.AFTER_COMMIT, session=OWN_SESSION)
@@ -1046,7 +1098,7 @@ class CommitWrapperHeadTest(unittest.TestCase):
 
     def test_commit_by_a_post_commit_hook_is_not_taken_for_mine(self) -> None:
         self.fixture.add_post_commit_hook()
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
         arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
@@ -1060,7 +1112,7 @@ class CommitWrapperHeadTest(unittest.TestCase):
 
     def test_head_entry_from_a_hook_command_is_not_taken_for_my_commit(self) -> None:
         self.fixture.add_hook(PRE_COMMIT_HOOK, PRE_COMMIT_HOOK_TEXT)
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
         arguments = ["--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
@@ -1073,7 +1125,7 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [mine])
 
     def test_subject_with_a_run_of_spaces_is_found(self) -> None:
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         base = self.fixture.build_private_index("b.txt")
         arguments = ["--expect-head", base, "--no-stage", SPACED_SUBJECT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*arguments, session=OWN_SESSION)
@@ -1160,11 +1212,11 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_amend_as_head_moves_is_undone(self) -> None:
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         first_base = self.fixture.build_private_index("b.txt")
         first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
-        self.fixture.edit("b.txt", "more of mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "more of mine\n")
         base = self.fixture.build_private_index("b.txt")
         amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*amend_arguments, landing=Landing.BEFORE_COMMIT, session=OWN_SESSION)
@@ -1176,11 +1228,11 @@ class CommitWrapperHeadTest(unittest.TestCase):
         self.assertEqual(self.fixture.read_listed_commits(OWN_SESSION), [base])
 
     def test_commit_landing_right_after_my_amend_is_kept(self) -> None:
-        self.fixture.edit("b.txt", "mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "mine\n")
         first_base = self.fixture.build_private_index("b.txt")
         first_arguments = ["--expect-head", first_base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         first = self.fixture.run_wrapper(*first_arguments, session=OWN_SESSION)
-        self.fixture.edit("b.txt", "more of mine\n")
+        self.fixture.edit_as(OWN_SESSION, "b.txt", "more of mine\n")
         base = self.fixture.build_private_index("b.txt")
         amend_arguments = ["--amend", "--expect-head", base, "--no-stage", HEAD_COMMIT_MESSAGE, "b.txt"]
         result = self.fixture.run_wrapper(*amend_arguments, landing=Landing.AFTER_COMMIT, session=OWN_SESSION)
@@ -2166,19 +2218,7 @@ class SessionWritesFixture:
         response: dict[str, Any] | None = None,
         tool: str | None = None,
     ) -> dict[str, Any]:
-        tool = tool or (EDIT_TOOL if "file_path" in tool_input else BASH_TOOL)
-        payload = {
-            "session_id": session,
-            "hook_event_name": event,
-            "tool_use_id": tool_use,
-            "tool_name": tool,
-            "tool_input": tool_input,
-            "cwd": str(self.repository),
-        }
-
-        if response is not None:
-            payload["tool_response"] = response
-        return payload
+        return make_record_payload(session, event, tool_use, tool_input, self.repository, response, tool)
 
     def write(self, session: str, path: str, text: str, mode: str = "a") -> None:
         self.tool_uses += 1
@@ -2359,10 +2399,37 @@ class SessionWritesFixture:
 
     def run_approved_wrapper(self, session: str, *arguments: str) -> subprocess.CompletedProcess[str]:
         """A wrapper call the user approved in the shell guard's dialog, after the record hook saw it start."""
+        self.show_include_dialog(session, arguments)
+        return self.run_wrapper_after_dialog(session, *arguments)
+
+    def run_wrapper_after_dialog(self, session: str, *arguments: str) -> subprocess.CompletedProcess[str]:
+        """The approved wrapper call alone, for a test that changes files between the dialog and the call."""
         self.tool_uses += 1
         self.run_record_hook(session, PRE_TOOL_USE, f"call-{self.tool_uses}", {"command": "claude-commit.py"})
 
         return self.run_wrapper(*arguments, session=session)
+
+    def show_include_dialog(
+        self,
+        session: str,
+        arguments: tuple[str, ...],
+        cwd: Path | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        """The shell guard's run before a wrapper call, which keeps what its dialog shows for the wrapper to commit. A
+        call the guard refuses, or whose guard fails, never runs, so a test that goes on to the wrapper then fails here."""
+        result = self.run_guard(session, PRE_TOOL_USE, self.make_wrapper_command(arguments, cwd or self.repository))
+        output = result.stdout.strip()
+        decision = json.loads(output)["hookSpecificOutput"]["permissionDecision"] if output else PASS
+
+        if result.returncode != 0 or decision == DENY:
+            raise AssertionError(f"the shell guard did not let the wrapper call run: {result.stdout}{result.stderr}")
+        else:
+            return result
+
+    def make_wrapper_command(self, arguments: tuple[str, ...], cwd: Path) -> str:
+        shown = " ".join(f'"{argument}"' if " " in argument or "\n" in argument else argument for argument in arguments)
+
+        return f"cd {cwd} && ~/.claude/scripts/claude-commit.py {shown}"
 
     def run_guard(self, session: str, event: str, command: str) -> subprocess.CompletedProcess[str]:
         payload = {
@@ -2449,7 +2516,7 @@ class SessionWritesTest(unittest.TestCase):
         self.assertEqual([event["tool"] for event in self.fixture.read_events(OWN_SESSION)], [BASH_TOOL, EDIT_TOOL])
         self.assertEqual((pre.returncode, pre.stdout, post.returncode, post.stdout), (0, "", 0, ""))
 
-    def test_hook_never_blocks_on_bad_input(self) -> None:
+    def test_bad_input_shows_a_hook_error_and_never_blocks(self) -> None:
         result = subprocess.run(
             [sys.executable, str(RECORD_HOOK)],
             input="not json",
@@ -2459,7 +2526,8 @@ class SessionWritesTest(unittest.TestCase):
             check=False,
         )
 
-        self.assertEqual((result.returncode, result.stdout), (0, ""))
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("session-writes-hook", result.stderr)
 
     def test_whole_mixed_file_is_refused(self) -> None:
         self.write_mixed_log()
@@ -2528,23 +2596,25 @@ class SessionWritesTest(unittest.TestCase):
         self.assertNotIn("## mine", report.stdout)
 
     def test_unrecorded_file_needs_include(self) -> None:
+        including = ("--own-lines", "--include-unrecorded", OTHER_FILE, HEAD_COMMIT_MESSAGE, OTHER_FILE)
+
         self.fixture.write(OWN_SESSION, LOG_FILE, MINE_1)
         self.fixture.write(OTHER_SESSION, OTHER_FILE, "theirs only\n", "w")
         refused = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
-        included = self.fixture.run_own_lines_commit(
-            "--own-lines", "--include-unrecorded", OTHER_FILE, HEAD_COMMIT_MESSAGE, OTHER_FILE
-        )
+        self.fixture.show_include_dialog(OWN_SESSION, including)
+        included = self.fixture.run_own_lines_commit(*including)
 
         self.assertEqual(refused.returncode, FOREIGN_LINES_EXIT, refused.stderr)
         self.assertIn("no recorded writes", refused.stderr)
         self.assertEqual(included.returncode, 0, included.stdout + included.stderr)
 
-    def test_check_is_skipped_without_a_record(self) -> None:
+    def test_lines_are_asked_about_without_a_record(self) -> None:
         (self.fixture.repository / OTHER_FILE).write_text("typed by a person\n")
-        outside = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, OTHER_FILE)
+        result = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, OTHER_FILE)
 
-        self.assertEqual(outside.returncode, 0, outside.stdout + outside.stderr)
-        self.assertIn("not checked (no write record", outside.stdout)
+        self.assertEqual(result.returncode, FOREIGN_LINES_EXIT, result.stdout + result.stderr)
+        self.assertIn("typed by a person", result.stderr)
+        self.assertIn("--include-unrecorded", result.stderr)
 
     def test_check_is_skipped_outside_a_session(self) -> None:
         (self.fixture.repository / OTHER_FILE).write_text("typed by a person\n")
@@ -3193,17 +3263,17 @@ class SessionWritesTest(unittest.TestCase):
         result = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, OTHER_FILE)
 
         self.assertEqual(result.returncode, USAGE_EXIT, result.stderr)
-        self.assertIn("commit without --own-lines", result.stderr)
+        self.assertIn("commit the files with --include-unrecorded", result.stderr)
 
-    def test_record_started_mid_session_is_not_checked(self) -> None:
+    def test_record_started_mid_session_asks_about_its_lines(self) -> None:
         self.write_mixed_log()
         self.fixture.write_transcript(OWN_SESSION, BASH_TOOL, HOUR_SECONDS)
         own_lines = self.fixture.run_own_lines_commit("--own-lines", HEAD_COMMIT_MESSAGE, LOG_FILE)
         whole = self.fixture.run_own_lines_commit(HEAD_COMMIT_MESSAGE, LOG_FILE)
 
         self.assertEqual(own_lines.returncode, USAGE_EXIT, own_lines.stderr)
-        self.assertEqual(whole.returncode, 0, whole.stdout + whole.stderr)
-        self.assertIn("not checked (write record started mid-session", whole.stdout)
+        self.assertEqual(whole.returncode, FOREIGN_LINES_EXIT, whole.stdout + whole.stderr)
+        self.assertNotIn("not checked", whole.stdout)
 
     def test_record_from_session_start_is_checked(self) -> None:
         self.write_mixed_log()
@@ -3664,7 +3734,7 @@ class IncludeDialogTest(unittest.TestCase):
         self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
         self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
         self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, self.make_command(arguments))
-        result = self.fixture.run_approved_wrapper(OWN_SESSION, *arguments)
+        result = self.fixture.run_wrapper_after_dialog(OWN_SESSION, *arguments)
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("as the dialog showed", result.stdout)
@@ -3691,7 +3761,7 @@ class IncludeDialogTest(unittest.TestCase):
         self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
         self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
         self.fixture.append(LOG_FILE, MINE_2)
-        result = self.fixture.run_approved_wrapper(OWN_SESSION, *arguments)
+        result = self.fixture.run_wrapper_after_dialog(OWN_SESSION, *arguments)
         retry = self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
         decision = json.loads(retry.stdout)["hookSpecificOutput"]
 
@@ -3700,6 +3770,34 @@ class IncludeDialogTest(unittest.TestCase):
         self.assertEqual(self.fixture.run_git("rev-parse", "HEAD"), head)
         self.assertEqual(decision["permissionDecision"], ASK, retry.stderr)
         self.assertIn("+ ## mine 2", decision["permissionDecisionReason"])
+
+    def test_a_damaged_newest_dialog_commits_nothing_until_a_dialog_shows_the_lines_again(self) -> None:
+        """An older dialog never stands in for the newest one whose line cannot be read, through to the commit."""
+        arguments = self.make_committing_arguments()
+        command = self.make_command(arguments)
+        offers = self.fixture.config_directory / RECORD_DIRECTORY_NAME / OWN_SESSION / "offered-includes.jsonl"
+        head = self.fixture.run_git("rev-parse", "HEAD")
+
+        self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
+        self.fixture.write(OTHER_SESSION, LOG_FILE, MINE_1)
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
+        self.fixture.append(LOG_FILE, MINE_2)
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
+        lines = offers.read_text().splitlines()
+        newest = {**json.loads(lines[-1]), "root": None}
+
+        offers.write_text("\n".join([*lines[:-1], json.dumps(newest)]) + "\n")
+        self.fixture.write(OTHER_SESSION, LOG_FILE, LOG_BASE + MINE_1, mode="w")
+        refused = self.fixture.run_wrapper_after_dialog(OWN_SESSION, *arguments)
+        refused_head = self.fixture.run_git("rev-parse", "HEAD")
+
+        self.fixture.run_guard(OWN_SESSION, PRE_TOOL_USE, command)
+        committed = self.fixture.run_wrapper_after_dialog(OWN_SESSION, *arguments)
+        self.assertEqual(refused.returncode, FOREIGN_LINES_EXIT, refused.stdout + refused.stderr)
+        self.assertIn("dialog record cannot be read", refused.stderr)
+        self.assertEqual(refused_head, head)
+        self.assertEqual(committed.returncode, 0, committed.stdout + committed.stderr)
+        self.assertEqual(self.fixture.read_committed_bytes(LOG_FILE).decode(), LOG_BASE + MINE_1)
 
     def test_included_file_named_from_a_subfolder_is_staged_at_its_own_path(self) -> None:
         """Content is staged at the file's path in the repository, never at a same-named path at its top."""
@@ -3710,6 +3808,7 @@ class IncludeDialogTest(unittest.TestCase):
         folder.mkdir()
         self.fixture.write(OWN_SESSION, NOTES_FILE, MY_TEXT)
         (folder / "a.md").write_text(MY_TEXT)
+        self.fixture.show_include_dialog(OWN_SESSION, arguments, folder)
         result = self.fixture.run_wrapper(*arguments, cwd=folder)
 
         self.assertIn("+ docs/a.md (as the dialog showed)", result.stdout)
@@ -3730,9 +3829,7 @@ class IncludeDialogTest(unittest.TestCase):
         return ("--private-index", "--expect-head", base, "--include-unrecorded", LOG_FILE, HEAD_COMMIT_MESSAGE, LOG_FILE)
 
     def make_command(self, arguments: tuple[str, ...]) -> str:
-        shown = " ".join(f'"{argument}"' if " " in argument or "\n" in argument else argument for argument in arguments)
-
-        return f"cd {self.fixture.repository} && ~/.claude/scripts/claude-commit.py {shown}"
+        return self.fixture.make_wrapper_command(arguments, self.fixture.repository)
 
 
 class CommitWrapperAmendTest(unittest.TestCase):

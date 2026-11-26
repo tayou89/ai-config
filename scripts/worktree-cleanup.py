@@ -68,6 +68,7 @@ from integration_commands import (
     run_binary_command,
 )
 from workflow_policy import (
+    NO_ORIGINAL_CHECKOUT_MESSAGE,
     POLICY_FILE,
     PolicyError,
     WorkflowMode,
@@ -144,7 +145,7 @@ def find_original_checkout(worktree: Path) -> Path:
     original = read_original_checkout(worktree)
 
     if original is None:
-        raise CommandError(f"Git cannot find the original checkout of {worktree}")
+        raise CommandError(NO_ORIGINAL_CHECKOUT_MESSAGE.format(folder=worktree))
     else:
         return original
 

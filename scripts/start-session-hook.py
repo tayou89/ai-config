@@ -42,6 +42,7 @@ from folder_owner import (
     read_current_identity,
 )
 from hook_failure import Decision, FailurePolicy, run_hook
+from workflow_policy import GitReadError
 
 FAILURE_POLICY = FailurePolicy.blocking(
     "start-session-hook",
@@ -223,15 +224,16 @@ def _list_load_notices(tool_input: dict[str, Any], load: tuple[float, int] | Non
 def _judge_shared_folder(tool_input: dict[str, Any], cwd: str | None, session_id: str | None) -> FolderAccess | None:
     """What this session may do in the task worktree the new session would share, or None when it shares none.
 
-    An unreadable owner record checks nothing here; the folder guard records it when the session writes.
+    An owner record or a worktree link that cannot be read checks nothing here, since the folder guard refuses the new
+    session's writes there (user decision, 2026-11-24).
     """
-    folder = _read_shared_folder(tool_input, cwd)
-    worktree = find_linked_worktree(folder) if folder is not None else None
-    identity = read_current_identity(session_id) if worktree is not None else None
-
     try:
+        folder = _read_shared_folder(tool_input, cwd)
+        worktree = find_linked_worktree(folder) if folder is not None else None
+        identity = read_current_identity(session_id) if worktree is not None else None
+
         return judge_access(worktree, identity) if worktree is not None and identity is not None else None
-    except OwnerFileError:
+    except (OwnerFileError, GitReadError):
         return None
 
 

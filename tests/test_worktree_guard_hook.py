@@ -17,6 +17,7 @@ POLICY = {"mode": "pull-request", "base": BASE, "requiredChecks": ["checks"]}
 DENY = "deny"
 PASS = "pass"
 WRAPPER = "python3 ~/.claude/scripts/claude-commit.py 'Fix: x' a.txt"
+SESSION_ID = "worktree-guard-hook-test"
 
 
 class WorktreeGuardHookTest(unittest.TestCase):
@@ -31,7 +32,13 @@ class WorktreeGuardHookTest(unittest.TestCase):
         (self.original / ".git" / "info" / "exclude").write_text("claude-plans/\n", encoding="utf-8")
 
     def run_hook(self, tool_name: str, tool_input: dict[str, str], cwd: Path) -> str:
-        payload = {"hook_event_name": "PreToolUse", "tool_name": tool_name, "tool_input": tool_input, "cwd": str(cwd)}
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "session_id": SESSION_ID,
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "cwd": str(cwd),
+        }
         environment = {**self.world.environment, "CLAUDE_CONFIG_DIR": str(self.config_directory)}
         result = subprocess.run(
             [sys.executable, str(HOOK_SCRIPT)],
@@ -131,7 +138,12 @@ class WorktreeGuardHookTest(unittest.TestCase):
 
     def test_the_shell_guard_reads_the_original_checkouts_policy_not_the_task_branchs(self) -> None:
         (self.worktree / ".agent-workflow.json").unlink()
-        payload = {"tool_name": "Bash", "tool_input": {"command": "gh pr merge 1 --squash"}, "cwd": str(self.worktree)}
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh pr merge 1 --squash"},
+            "cwd": str(self.worktree),
+        }
         environment = {**self.world.environment, "CLAUDE_CONFIG_DIR": str(self.config_directory)}
         result = subprocess.run(
             [sys.executable, str(SHELL_GUARD_SCRIPT)],

@@ -32,13 +32,6 @@ PRE_TOOL_USE = "PreToolUse"
 SCRIPT_COMMAND = re.compile(r'^python3 "\$HOME/\.claude/scripts/([a-z_-]+\.py)"$')
 BLOCK = "block"
 CONTINUE = "continue"
-# The Git role moves these to run_hook with its decision on how they fail (guard-fail-open report, 2026-11-24);
-# until then they are excused from both the policy and a stated onFailure, and its task session removes them here.
-GIT_ROLE_LATER = {
-    "worktree-guard-hook.py": "Git role, guard failure task (local_cd713324)",
-    "shell-guard-hook.py": "Git role, guard failure task (local_cd713324)",
-    "session-writes-hook.py": "Git role, guard failure task (local_cd713324)",
-}
 TOOL_CALL = {"hook_event_name": PRE_TOOL_USE, "tool_name": "Bash", "tool_input": {"command": "true"}}
 UNREADABLE_INPUTS = (
     "",
@@ -60,9 +53,12 @@ JUDGMENT_PARTS = {
     "recommendation-change-hook.py": "_make_output",
     "reply-language-hook.py": "_make_output",
     "session-notes-hook.py": "_copy_app_notes",
+    "session-writes-hook.py": "_record_tool_call",
+    "shell-guard-hook.py": "make_output",
     "skill-gate-hook.py": "handle_event",
     "start-session-hook.py": "make_output",
     "sub-session-question-hook.py": "_make_hook_output",
+    "worktree-guard-hook.py": "decide",
 }
 BACKGROUND_KEYS = ("async", "asyncRewake")
 
@@ -89,7 +85,7 @@ def read_script_name(hook: dict[str, Any]) -> str:
 def list_adopted_scripts() -> list[str]:
     names = {read_script_name(hook) for hook in list_pre_tool_use_hooks()}
 
-    return sorted(name for name in names if name not in GIT_ROLE_LATER)
+    return sorted(names)
 
 
 def load_script(name: str) -> ModuleType:
@@ -222,12 +218,9 @@ class RegistrationTest(unittest.TestCase):
             name = read_script_name(hook)
 
             with self.subTest(script=name):
-                if name in GIT_ROLE_LATER:
-                    self.assertIn(hook.get("onFailure", CONTINUE), (BLOCK, CONTINUE))
-                else:
-                    policy = load_script(name).FAILURE_POLICY
+                policy = load_script(name).FAILURE_POLICY
 
-                    self.assertEqual(hook.get("onFailure"), BLOCK if policy.is_blocking() else CONTINUE)
+                self.assertEqual(hook.get("onFailure"), BLOCK if policy.is_blocking() else CONTINUE)
 
     def test_the_shell_guard_blocks_on_failure_for_its_production_check(self) -> None:
         hooks = [hook for hook in list_pre_tool_use_hooks() if read_script_name(hook) == "shell-guard-hook.py"]
