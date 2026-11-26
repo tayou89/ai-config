@@ -304,6 +304,19 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertIn("of the 400k automatic compaction point", context)
 
+    def test_worktree_whose_git_folder_is_gone_shows_a_hook_error_instead_of_reading_its_own_settings(self) -> None:
+        worktree = self._root / "worktree"
+        worktree.mkdir()
+        (worktree / ".git").write_text(f"gitdir: {self._root / 'gone'}\n", encoding=ENCODING)
+        self._write_main_with_child()
+        self._write_settings(worktree / ".claude", {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        hook_input = {"transcript_path": str(self._transcript), "cwd": str(worktree), EVENT_KEY: USER_PROMPT_SUBMIT}
+        result = self._run_process(MAIN_SESSION, json.dumps(hook_input))
+
+        self.assertEqual((result.returncode, result.stdout), (1, ""))
+        self.assertIn("main-session-hook: GitReadError", result.stderr)
+
     def test_size_after_the_last_compaction_counts_and_none_before_a_request(self) -> None:
         self._write_main_with_child()
         self._write_settings(self._claude_home, {WINDOW_KEY: TRIAL_WINDOW})
