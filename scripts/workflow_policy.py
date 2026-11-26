@@ -32,6 +32,9 @@ from integration_commands import CommandError
 POLICY_FILE = ".agent-workflow.json"
 GIT_DIRECTORY_NAME = ".git"
 GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE")
+NO_ORIGINAL_CHECKOUT_MESSAGE = (
+    "{folder} has no original checkout: its repository keeps its Git folder elsewhere, as a submodule does"
+)
 _MODE_KEY = "mode"
 _BASE_KEY = "base"
 _REQUIRED_CHECKS_KEY = "requiredChecks"

@@ -74,6 +74,17 @@ TRIAL_THRESHOLD = 297_500
 PAST_TEXT = "past the 85% context threshold"
 BELOW_TEXT = "below the 85% context threshold"
 WRITING_TOOLS = ("Edit", "Write", "NotebookEdit", "Monitor", "mcp__terminal__run_in_terminal")
+GIT_VARIABLE_PREFIX = "GIT_"
+GIT_SETTINGS = ("-c", "user.name=Test", "-c", "user.email=test@example.com")
+
+
+def run_git(*arguments: str) -> None:
+    """Git with the test's own identity and none of this computer's settings, since a Git location variable such as
+    GIT_DIR would point `git init` at another repository."""
+    inherited = {name: value for name, value in os.environ.items() if not name.startswith(GIT_VARIABLE_PREFIX)}
+    environment = {**inherited, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+
+    subprocess.run(["git", *GIT_SETTINGS, *arguments], env=environment, capture_output=True, check=True)
 
 
 def make_usage_record(total: int, sidechain: bool = False) -> dict[str, Any]:
@@ -110,7 +121,7 @@ class MainSessionHookTest(unittest.TestCase):
         self._project = self._root / "project"
         self._records.mkdir(parents=True)
         self._claude_home.mkdir()
-        subprocess.run(["git", "init", "-q", str(self._project)], check=True)
+        run_git("init", "-q", str(self._project))
 
     def tearDown(self) -> None:
         self._directory.cleanup()
@@ -290,13 +301,9 @@ class MainSessionHookTest(unittest.TestCase):
     def test_worktree_reads_the_original_checkout_settings(self) -> None:
         original = self._root / "original"
         worktree = self._root / "worktree"
-        identity = ["-c", "user.name=test", "-c", "user.email=test@example.com"]
-        subprocess.run(["git", "init", "-q", str(original)], check=True)
-        subprocess.run(
-            ["git", "-C", str(original), *identity, "commit", "-q", "--allow-empty", "-m", "start"],
-            check=True,
-        )
-        subprocess.run(["git", "-C", str(original), "worktree", "add", "-q", str(worktree)], check=True)
+        run_git("init", "-q", str(original))
+        run_git("-C", str(original), "commit", "-q", "--allow-empty", "-m", "start")
+        run_git("-C", str(original), "worktree", "add", "-q", str(worktree))
         self._write_main_with_child()
         self._write_settings(original / ".claude", {WINDOW_KEY: 400_000})
         self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
@@ -316,6 +323,15 @@ class MainSessionHookTest(unittest.TestCase):
 
         self.assertEqual((result.returncode, result.stdout), (1, ""))
         self.assertIn("main-session-hook: GitReadError", result.stderr)
+
+    def test_folder_outside_any_repository_reads_its_own_settings(self) -> None:
+        folder = self._root / "plain"
+        self._write_main_with_child()
+        self._write_settings(folder / ".claude", {WINDOW_KEY: 400_000})
+        self._write_transcript(make_usage_record(FIRST_REQUEST_TOKENS))
+        context = self._read_context(MAIN_SESSION, USER_PROMPT_SUBMIT, cwd=str(folder))
+
+        self.assertIn("of the 400k automatic compaction point", context)
 
     def test_size_after_the_last_compaction_counts_and_none_before_a_request(self) -> None:
         self._write_main_with_child()
@@ -745,7 +761,11 @@ class MainSessionHookTest(unittest.TestCase):
         extra_environment: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         removed = (HOST_SESSION_VARIABLE, SWITCH_VARIABLE, *COMPACTION_VARIABLES)
-        environment = {key: value for key, value in os.environ.items() if key not in removed}
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in removed and not key.startswith(GIT_VARIABLE_PREFIX)
+        }
 
         environment.update({"HOME": str(self._home), "CLAUDE_CONFIG_DIR": str(self._claude_home)})
         if session_id is not None:

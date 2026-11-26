@@ -56,7 +56,14 @@ from integration_commands import (
     run_command,
 )
 from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integration_lock
-from workflow_policy import PolicyError, WorkflowMode, WorkflowPolicy, read_original_checkout, read_original_policy
+from workflow_policy import (
+    NO_ORIGINAL_CHECKOUT_MESSAGE,
+    PolicyError,
+    WorkflowMode,
+    WorkflowPolicy,
+    read_original_checkout,
+    read_original_policy,
+)
 
 INTEGRATION_FOLDER = "agent-integration"
 REMOVAL_WARNING = "Warning: could not remove the temporary worktree {folder} ({error}); the next run removes it."
@@ -109,7 +116,7 @@ def find_original_checkout(root: Path) -> Path:
     original = read_original_checkout(root)
 
     if original is None:
-        raise CommandError(f"Git cannot find the original checkout of {root}")
+        raise CommandError(NO_ORIGINAL_CHECKOUT_MESSAGE.format(folder=root))
     else:
         return original
 

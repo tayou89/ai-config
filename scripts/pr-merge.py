@@ -88,6 +88,7 @@ from integration_commands import (
 )
 from integration_lock import DEFAULT_WAIT_SECONDS, LockTimeoutError, hold_integration_lock
 from workflow_policy import (
+    NO_ORIGINAL_CHECKOUT_MESSAGE,
     POLICY_FILE,
     PolicyError,
     WorkflowMode,
@@ -516,7 +517,7 @@ def update_original_checkout(root: Path, base: str, merge_commit: str) -> None:
         original = read_original_checkout(root)
 
         if original is None:
-            print("Left the original checkout as it is: Git cannot find it.")
+            print(f"Left the original checkout as it is: {NO_ORIGINAL_CHECKOUT_MESSAGE.format(folder=root)}.")
         elif read_current_branch(original) != base or has_tracked_changes(original):
             print(f"Left {original} as it is: it is not a clean checkout of {base}.")
         else:
